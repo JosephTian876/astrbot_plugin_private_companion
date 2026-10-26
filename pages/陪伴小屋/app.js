@@ -3081,11 +3081,32 @@ function renderQzoneSection(){
     <div class="action-qzone-body" id="actionQzoneBody">${qzoneBody()}</div>
   </section>`;
 }
+function mountQzoneConfigEditor(){
+  const host=document.getElementById('qzoneConfigWorkspace');
+  if(!host||host.companionConfigEditor)return;
+  const mount=mountConfigEditor('qzoneConfigWorkspace',['qzone']);
+  if(mount)configEditorMounts.push(mount);else qzoneConfigUnavailable(host);
+}
 /* 只重画这一块：动作结果不该重建行动页的其他内容或丢失当前焦点。 */
 function paintQzone(){
   const host=document.getElementById('actionQzoneBody');
   if(!host)return;
+  /* QQ 空间的设置区是异步画出来的：配置分区先于它挂载，等它出现时
+     已经没有代码再挂编辑器。这里补挂；重画时把已经挂好的编辑器节点
+     搬回新位置，保留草稿、焦点和已读取的令牌。 */
+  const previous=document.getElementById('qzoneConfigWorkspace');
+  const mounted=previous?.companionConfigEditor||null;
   host.innerHTML=qzoneBody();
+  const next=document.getElementById('qzoneConfigWorkspace');
+  if(mounted&&next){
+    next.replaceWith(previous);
+  }else if(mounted){
+    mounted.unmount?.();
+    const index=configEditorMounts.indexOf(mounted);
+    if(index>=0)configEditorMounts.splice(index,1);
+  }else if(next){
+    mountQzoneConfigEditor();
+  }
   icons();
 }
 /* 挂载：面板每次重画都会走这里，所以这里不无条件重读——只有第一次、
