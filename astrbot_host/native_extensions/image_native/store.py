@@ -94,6 +94,16 @@ class ImageStore:
             return self._decode(db.execute("SELECT * FROM operations WHERE scope=? AND request_id=?", (scope, request_id)).fetchone())
 
     def state(self, scope: str, operation_id: str, state: str, *, error: str = "", locator=None, receipt=None) -> dict:
+        """Move one operation between the reopenable states.
+
+        ``prepared``, ``dispatching`` and ``pending`` are the only reopenable
+        states.  ``dispatching -> failed`` is deliberate: the dispatch fence is
+        crossed before the POST, so ``dispatching`` proves that a request *may*
+        have been sent, and a definitive provider refusal (4xx) proves that it
+        was not executed.  Rows already stored as ``unknown`` are never
+        rewritten here; replaying their ``(scope, request_id)`` returns them
+        unchanged and never dispatches again.
+        """
         with self.db() as db:
             self._current(db)
             current = self._decode(db.execute("SELECT * FROM operations WHERE scope=? AND id=?", (scope, operation_id)).fetchone())

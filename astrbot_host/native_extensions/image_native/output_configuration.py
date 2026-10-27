@@ -17,9 +17,133 @@ PLATFORMS = {
     "auto", "openai", "openrouter", "agnes", "sensenova", "minimax",
     "bailian", "modelscope", "doubao", "gemini",
 }
-IMAGE_QUALITIES = {"auto", "low", "medium", "high", "standard", "hd"}
+# ``quality`` and ``response_format`` are optional request fields: the empty
+# string means "omit the field and use the service default".  The previous
+# contract forced ``quality=standard`` and ``response_format=b64_json`` on every
+# OpenAI-compatible request, which the official GPT Image protocol rejects.
+IMAGE_QUALITIES = {"", "auto", "low", "medium", "high", "standard", "hd"}
+RESPONSE_FORMATS = {"", "b64_json"}
+# The official GPT Image models are a different request contract from the
+# legacy dall-e family: they have no ``response_format`` field at all and accept
+# ``quality`` only from {auto, low, medium, high}.  Versions up to 7.0.7 wrote
+# the dall-e default ``standard`` into every saved endpoint (and forced
+# ``b64_json`` on the wire), so a stored ``standard`` on a GPT Image endpoint is
+# a legacy default, not a user decision.  A dall-e endpoint keeps an explicit
+# ``standard``/``hd``; a model this release cannot classify keeps its saved
+# values as well, because a compatible gateway may legitimately accept them.
+GPT_IMAGE_MODEL_PREFIXES = ("gpt-image-", "chatgpt-image-")
+GPT_IMAGE_QUALITIES = frozenset({"auto", "low", "medium", "high"})
+DALL_E_MODEL_PREFIXES = ("dall-e", "dalle")
 IMAGE_OPERATIONS = ("generate", "edit")
 LOCAL_ROUTES = {"comfyui", "sd_webui"}
+# One image operation is bounded by the same budget everywhere: the tool task
+# deadline, the HTTP call and the polling wait.  300s is the historical total
+# budget and 1800s is the documented maximum an endpoint may configure.
+DEFAULT_TASK_TIMEOUT_SECONDS = 300
+MAX_TASK_TIMEOUT_SECONDS = 1800
+
+
+def task_timeout_seconds(config) -> int:
+    """The single time budget shared by the image tool task and its wait.
+
+    The manifest used to declare a fixed 300s deadline while endpoints accepted
+    up to 1800s, so the supervisor cancelled work the dashboard explicitly
+    allowed to run longer.  The budget now follows the longest timeout an
+    administrator configured, never dropping below the previous default and
+    never exceeding the documented limit.
+    """
+    if not isinstance(config, dict):
+        return DEFAULT_TASK_TIMEOUT_SECONDS
+    budget = DEFAULT_TASK_TIMEOUT_SECONDS
+    for endpoint in config.get("endpoints") or ():
+        if isinstance(endpoint, dict) and endpoint.get("enabled") is True:
+            budget = max(budget, _configured_timeout(endpoint.get("timeout_seconds")))
+    for name in ("sd_webui", "comfyui"):
+        connection = config.get(name)
+        if isinstance(connection, dict) and connection.get("base_url"):
+            budget = max(budget, _configured_timeout(connection.get("timeout_seconds")))
+    return min(MAX_TASK_TIMEOUT_SECONDS, budget)
+
+
+def _configured_timeout(value) -> int:
+    if type(value) is int and 1 <= value <= MAX_TASK_TIMEOUT_SECONDS:
+        return value
+    return 0
+
+
+def image_model_family(model) -> str:
+    """Classify a saved model ID into the request contract it belongs to.
+
+    Returns ``"gpt-image"`` for the official GPT Image family, ``"dall-e"`` for
+    the legacy OpenAI models or ``""`` for anything this release cannot prove.
+    Provider decorations such as ``openai/``, ``azure:`` or a ``:free`` suffix
+    are ignored, so a gateway keeps the same model contract.
+    """
+    name = model.strip().lower() if isinstance(model, str) else ""
+    segments = [part for part in name.replace(":", "/").split("/") if part]
+    if any(part.startswith(GPT_IMAGE_MODEL_PREFIXES) for part in segments):
+        return "gpt-image"
+    if any(part.startswith(DALL_E_MODEL_PREFIXES) for part in segments):
+        return "dall-e"
+    return ""
+
+
+def accepted_request_fields(platform, model, *, quality="", response_format=""):
+    """The optional request fields this exact backend/model can accept.
+
+    An empty value means "omit the field and use the service default".  This is
+    the single capability decision shared by the wire request, the dashboard
+    projection and the save normalization, so the page and the request can
+    never disagree about a saved value.
+    """
+    if not isinstance(quality, str) or quality not in IMAGE_QUALITIES:
+        quality = ""
+    if not isinstance(response_format, str) or response_format not in RESPONSE_FORMATS:
+        response_format = ""
+    if platform == "minimax":
+        # MiniMax has its own fixed protocol; its request builder never
+        # forwards the OpenAI quality/response_format vocabulary.
+        return {"quality": "", "response_format": ""}
+    if image_model_family(model) == "gpt-image":
+        return {"quality": quality if quality in GPT_IMAGE_QUALITIES else "",
+                "response_format": ""}
+    return {"quality": quality, "response_format": response_format}
+
+
+def project_endpoint_fields(endpoint) -> tuple[str, str]:
+    """The effective ``(quality, response_format)`` for one saved endpoint.
+
+    Only the GPT Image family is normalized: 7.0.7's ``standard`` default and
+    its forced ``b64_json`` are rejected by that protocol.  A dall-e endpoint
+    (or any model this release cannot classify) keeps the saved choice exactly,
+    so a deliberate legacy ``standard`` is never rewritten for the wrong model.
+    """
+    if not isinstance(endpoint, dict):
+        return "", ""
+    quality = endpoint.get("quality", "")
+    response_format = endpoint.get("response_format", "")
+    quality = quality if isinstance(quality, str) and quality in IMAGE_QUALITIES else ""
+    response_format = (response_format if isinstance(response_format, str)
+                       and response_format in RESPONSE_FORMATS else "")
+    if image_model_family(endpoint.get("model")) == "gpt-image":
+        accepted = accepted_request_fields(endpoint.get("platform"), endpoint.get("model"),
+                                           quality=quality, response_format=response_format)
+        return accepted["quality"], accepted["response_format"]
+    return quality, response_format
+
+
+def has_legacy_protocol_defaults(endpoint) -> bool:
+    """Whether the saved values are the old dall-e defaults that GPT Image rejects.
+
+    The page uses this read-only projection flag to explain why a saved
+    ``standard``/``b64_json`` is not sent; it is never persisted (the next save
+    stores the normalized values).
+    """
+    if not isinstance(endpoint, dict) or image_model_family(endpoint.get("model")) != "gpt-image":
+        return False
+    quality, response_format = project_endpoint_fields(endpoint)
+    return (quality != endpoint.get("quality", "")
+            or response_format != endpoint.get("response_format", ""))
 
 
 def _default_operation_routes(value):
@@ -105,7 +229,14 @@ def settings(plugin):
         result.setdefault("network", {})
         for endpoint in result.get("endpoints", []):
             if isinstance(endpoint, dict):
-                endpoint.setdefault("quality", "standard")
+                # Project the effective protocol values.  A 7.0.7 ``standard``
+                # on a GPT Image endpoint is its old default and is not sent;
+                # dall-e/unknown models keep the administrator's exact choice.
+                # The read-only flag lets the page explain the migration; it is
+                # dropped again by save_configuration and never persisted.
+                legacy = has_legacy_protocol_defaults(endpoint)
+                endpoint["quality"], endpoint["response_format"] = project_endpoint_fields(endpoint)
+                endpoint["legacy_protocol_defaults"] = legacy
                 endpoint.setdefault("max_reference_images", 1)
                 endpoint.setdefault("size_label", f"{endpoint.get('width', 1024)}x{endpoint.get('height', 1024)}")
         result["operation_routes"] = _stored_operation_routes(result)
@@ -139,7 +270,7 @@ def public_configuration(plugin):
     provider = getattr(plugin, "_native_v2_provider", None)
     return {"revision": fingerprint(source), "settings": result,
             "live": bool(provider and not provider._closed),
-            "limits": {"max_endpoints": 24, "timeout_min": 1, "timeout_max": 1800},
+            "limits": {"max_endpoints": 24, "timeout_min": 1, "timeout_max": MAX_TASK_TIMEOUT_SECONDS},
             "supported_backends": sorted(BACKENDS), "supported_platforms": sorted(PLATFORMS)}
 
 
@@ -208,7 +339,7 @@ def _connection(value, previous):
         if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password or url.fragment:
             raise NativeImageError("invalid_configuration")
     timeout = result.get("timeout_seconds", 300)
-    if type(timeout) is not int or not 1 <= timeout <= 1800:
+    if type(timeout) is not int or not 1 <= timeout <= MAX_TASK_TIMEOUT_SECONDS:
         raise NativeImageError("invalid_configuration")
     result["timeout_seconds"] = timeout
     for key in ("parameters", "workflows"):
@@ -250,7 +381,8 @@ def save_configuration(plugin, revision, changes):
     normalized = []
     for item in endpoints:
         if not isinstance(item, dict) or item.keys() - {"id", "name", "enabled", "platform", "model",
-                "width", "height", "size_label", "quality", "max_reference_images", "base_url", "api_key", "api_key_set",
+                "width", "height", "size_label", "quality", "response_format", "max_reference_images",
+                "base_url", "api_key", "api_key_set", "legacy_protocol_defaults",
                 "clear_api_key", "clear_custom_headers", "timeout_seconds", "custom_headers", "custom_headers_set",
                 "custom_header_names", "ratio"}:
             raise NativeImageError("invalid_configuration")
@@ -258,19 +390,24 @@ def save_configuration(plugin, revision, changes):
         if not isinstance(identifier, str) or not identifier or len(identifier) > 128 or identifier in ids:
             raise NativeImageError("invalid_configuration")
         ids.add(identifier)
-        quality = item.get("quality", "standard")
+        quality = item.get("quality", "")
+        response_format = item.get("response_format", "")
         max_reference_images = item.get("max_reference_images", 1)
         if (type(item.get("enabled")) is not bool or item.get("platform") not in PLATFORMS
                 or any(type(item.get(key)) is not str or len(item[key]) > 240 for key in ("name", "model"))
                 or any(type(item.get(key)) is not int or not 64 <= item[key] <= 8192 for key in ("width", "height"))
                 or ("size_label" in item and (not isinstance(item.get("size_label"), str)
                                                or len(item.get("size_label", "")) > 64))
-                or quality not in IMAGE_QUALITIES
+                or quality not in IMAGE_QUALITIES or response_format not in RESPONSE_FORMATS
                 or type(max_reference_images) is not int or not 0 <= max_reference_images <= 8):
             raise NativeImageError("invalid_configuration")
         clear_headers = item.get("clear_custom_headers", False)
         if type(clear_headers) is not bool:
             raise NativeImageError("invalid_configuration")
+        # An old page can still post the 7.0.7 default ``standard`` for a GPT
+        # Image endpoint.  It is not a protocol value there, so it is migrated to
+        # "server default" instead of rejecting the save; dall-e keeps it.
+        quality, response_format = project_endpoint_fields(item)
         headers = {} if clear_headers else item.get("custom_headers", previous.get(identifier, {}).get("custom_headers", {}))
         if headers in (None, ""):
             headers = {}
@@ -292,8 +429,10 @@ def save_configuration(plugin, revision, changes):
         normalized.append({**item, "name": item["name"].strip(),
                            "size_label": item.get("size_label", f"{item.get('width')}x{item.get('height')}"),
                            **connection, "custom_headers": headers, "ratio": ratio, "quality": quality,
+                           "response_format": response_format,
                            "max_reference_images": max_reference_images})
         normalized[-1].pop("api_key_set", None)
+        normalized[-1].pop("legacy_protocol_defaults", None)
         normalized[-1].pop("clear_api_key", None)
         normalized[-1].pop("clear_custom_headers", None)
         normalized[-1].pop("custom_headers_set", None)
@@ -345,7 +484,12 @@ def save_configuration(plugin, revision, changes):
         raise NativeImageError("configuration_save_failed") from exc
     if provider:
         provider.owner.backend = backend
-        provider.wait_budget_seconds = 1800
+        # The tool declaration keeps the documented ceiling (an immutable
+        # catalog identity); the effective per-task budget is derived live from
+        # this saved configuration, so the next task uses it without a
+        # registry/lease refresh.  Tasks that already started keep the snapshot
+        # they captured at dispatch.
+        provider.wait_budget_seconds = provider.task_timeout_seconds()
     else:
         from .bootstrap import build_provider
         from ... import main

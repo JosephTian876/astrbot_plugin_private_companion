@@ -40,6 +40,13 @@ class BundledNativeLease:
         self.factory = factory
         self.state = "inactive"
         self.error_code = None
+        # The manifest is the immutable catalog identity of this session.  Do
+        # not put mutable per-request configuration (for example an image
+        # endpoint timeout) in it: executors pin these declarations, persist
+        # their encoding with every invocation and compare it on replay, so a
+        # later "refresh" would invalidate running and recorded work.  Providers
+        # resolve live budgets themselves; the declaration carries only the
+        # documented ceiling.
         manifest = parse_manifest(port.manifest(), plugin_id=package_id, version=package_version)
         package = replace(manifest.package, furniture=(furniture,))
         self.manifest = replace(manifest, package=package)

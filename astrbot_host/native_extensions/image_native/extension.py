@@ -82,7 +82,10 @@ class ImageExtensionAPI:
                 envelope={"endpoint_id": endpoint_id}), before_dispatch=before_dispatch)
             return {"status": result["state"], "operation_id": result["id"],
                     "elapsed_ms": round((monotonic() - started) * 1000),
-                    "error": result.get("error", "")}
+                    "error": result.get("error", ""),
+                    # Redacted, bounded per-endpoint evidence for the dashboard.
+                    # The model-facing receipt contract is untouched.
+                    "diagnostics": list(result.get("receipt", {}).get("diagnostics", ()) or ())}
         finally:
             await owner.close()
 

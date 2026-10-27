@@ -1210,6 +1210,22 @@ window.CompanionModelsPage = (() => {
   };
   const IMAGE_PLATFORMS = {auto: "自动识别", openai: "OpenAI 兼容", openrouter: "OpenRouter", agnes: "Agnes", sensenova: "商汤日日新", minimax: "MiniMax", bailian: "阿里云百炼", modelscope: "魔搭社区", doubao: "火山引擎 / 豆包", gemini: "Google Gemini"};
   const IMAGE_PROTOCOL_SUPPORT = {auto: "根据地址识别协议", openai: "文生图 · 改图", openrouter: "文生图 · 改图", agnes: "文生图 · 改图", sensenova: "文生图 · 改图", minimax: "仅文生图", doubao: "文生图 · 改图", bailian: "已保留配置 · 需异步协议适配", modelscope: "已保留配置 · 需协议适配", gemini: "已保留配置 · 需协议适配"};
+  const imageModelFamily = model => {
+    const parts = String(model || "").trim().toLowerCase().split(/[/:]+/).filter(Boolean);
+    return parts.some(part => part.startsWith("gpt-image-") || part.startsWith("chatgpt-image-")) ? "gpt-image"
+      : parts.some(part => part.startsWith("dall-e") || part.startsWith("dalle")) ? "dall-e" : "";
+  };
+  const imageQualityHelp = item => imageModelFamily(item.model) === "gpt-image"
+    ? "GPT Image 只接受自动/低/中/高；升级前保存的「标准/高清」会按服务端默认处理，不会发送（保存一次即修正），返回格式也不会发送。"
+    : "默认不发送 quality；standard/hd 只对 dall-e 系列有效。";
+  const imageResponseFormatHelp = item => imageModelFamily(item.model) === "gpt-image"
+    ? "GPT Image 不支持 response_format；升级前保存的 b64_json 会被忽略（保存一次即修正）。"
+    : "默认不发送 response_format；base64 与图片 URL 都能读取。";
+  const imageLegacyQualityNote = item => item.legacy_protocol_defaults
+    || (imageModelFamily(item.model) === "gpt-image"
+      && (["standard", "hd"].includes(item.quality) || item.response_format === "b64_json"))
+    ? '<small class="model-img-legacy-note">升级前保存的「标准/高清」或 b64_json 在 GPT Image 上不会发送；保存一次即按服务端默认清理。</small>'
+    : "";
   function imageEffectivePlatform(endpoint) {
     if (endpoint?.platform !== "auto") return endpoint?.platform;
     const url = String(endpoint?.base_url || "").toLowerCase(), model = String(endpoint?.model || "").toLowerCase();
@@ -1227,7 +1243,8 @@ window.CompanionModelsPage = (() => {
     const value = JSON.parse(JSON.stringify(config));
     value.endpoints = Array.isArray(value.endpoints) ? value.endpoints : [];
     for (const endpoint of value.endpoints) {
-      endpoint.quality ??= "standard";
+      endpoint.quality ??= "";
+      endpoint.response_format ??= "";
       endpoint.max_reference_images ??= 1;
       endpoint.size_label ??= `${endpoint.width || 1024}x${endpoint.height || 1024}`;
     }
@@ -1252,11 +1269,22 @@ window.CompanionModelsPage = (() => {
   }
   function imageConfigSet(s, data) {
     const i = s.image, normalized = imageNormalized(data.settings);
-    if (i.config?.revision !== data.revision) i.endpointTests = {};
+    if (i.config?.revision !== data.revision) {
+      /* A new revision invalidates the results and the keys: the stored request
+         fingerprint only carries endpoint_id, not base_url/api_key, so replaying
+         an old key would show the previous result instead of testing this one. */
+      const previous = !!i.config;
+      i.endpointTests = {}; i.endpointTestKeys = {};
+      if (previous) imageTestPersist(i);
+    } else {
+      const known = new Set((normalized.endpoints || []).map(item => item.id));
+      for (const id of Object.keys(i.endpointTestKeys || {})) if (!known.has(id)) delete i.endpointTestKeys[id];
+    }
     i.endpointTesting = null;
     i.config = data; i.configBase = JSON.parse(JSON.stringify(normalized));
     i.configDraft = JSON.parse(JSON.stringify(normalized));
     i.configTextBase = imageConfigText(normalized); i.configText = {...i.configTextBase};
+    imageTestRestore(i);
   }
   async function imageConfigRefresh(s) {
     const i = s.image;
@@ -1291,22 +1319,101 @@ window.CompanionModelsPage = (() => {
         : `${IMAGE_LABELS[action]}未就绪：${imageDiagnostic(result.diagnostic_code)}。`; }
     catch (err) { if (!current(ticket, s)) return; i.bad = true; i.notice = fail(err, "注册检查未完成。"); }
     finally { i.testing = null; if (current(ticket, s)) render(); } }
+  /* Endpoint tests are idempotent by operation key: the service stores one
+     operation per (scope, request_id=operation_key), replays it when the
+     fingerprint matches, and never dispatches a duplicate.  A key therefore
+     belongs to one endpoint and one configuration revision, and may only be
+     reused while the result is still unsettled.  A settled result or a changed
+     revision allocates a new key: the stored request fingerprint carries only
+     endpoint_id (not base_url/api_key), so an old key would replay the previous
+     result instead of testing the saved configuration. */
+  const IMAGE_TEST_PENDING = new Set(["pending", "prepared", "dispatching"]);
+  const IMAGE_TEST_TERMINAL = new Set(["succeeded", "failed", "stopped"]);
+  const IMAGE_TEST_STORAGE = "companion-model-image-tests.v1";
+  const imageTestUnsettled = status => status === "unknown" || IMAGE_TEST_PENDING.has(status);
+  const imageTestStorage = () => key ? `${IMAGE_TEST_STORAGE}:${key}` : "";
+  const imageTestElapsed = test => test?.recheck && Number(test.elapsed_ms) < 50
+    ? "沿用上次结果" : `${Number(test?.elapsed_ms) || 0} ms`;
+  function imageEndpointTestStatus(value) {
+    const status = typeof value === "string" ? value : "";
+    if (IMAGE_TEST_TERMINAL.has(status) || status === "unknown") return status;
+    return IMAGE_TEST_PENDING.has(status) ? "pending" : "";
+  }
+  function imageEndpointTestKey(i, endpointId) {
+    const revision = typeof i.config?.revision === "string" ? i.config.revision : "";
+    const previous = i.endpointTests?.[endpointId];
+    const settled = !previous || IMAGE_TEST_TERMINAL.has(previous.status);
+    const slots = (i.endpointTestKeys ||= {});
+    if (!slots[endpointId] || slots[endpointId].revision !== revision || settled)
+      slots[endpointId] = {revision, key: crypto.randomUUID()};
+    return slots[endpointId].key;
+  }
+  /* Only an unsettled test survives a reload.  Persisting a settled result
+     would make the next "generate" click replay it instead of generating. */
+  function imageTestPersist(i, storage = imageTestStorage()) {
+    if (!storage) return;
+    const revision = typeof i.config?.revision === "string" ? i.config.revision : "";
+    const records = {};
+    for (const [id, test] of Object.entries(i.endpointTests || {})) {
+      const slot = i.endpointTestKeys?.[id];
+      if (!slot || typeof slot.key !== "string" || !slot.key || slot.revision !== revision
+          || !imageTestUnsettled(test?.status)) continue;
+      records[id] = {revision: slot.revision, key: slot.key, status: test.status,
+        error: test.error || "", elapsed_ms: test.elapsed_ms};
+    }
+    try {
+      if (Object.keys(records).length) sessionStorage.setItem(storage, JSON.stringify(records));
+      else sessionStorage.removeItem(storage);
+    } catch { }
+  }
+  function imageTestRestore(i) {
+    const storage = imageTestStorage();
+    if (!storage) return;
+    let records = null;
+    try { records = JSON.parse(sessionStorage.getItem(storage) || "null"); } catch { return; }
+    if (!records || typeof records !== "object" || Array.isArray(records)) return;
+    const revision = typeof i.config?.revision === "string" ? i.config.revision : "";
+    const known = new Set((i.configDraft?.endpoints || []).map(item => item.id));
+    for (const [id, record] of Object.entries(records)) {
+      if (!known.has(id) || !record || record.revision !== revision || typeof record.key !== "string"
+          || !record.key || !imageTestUnsettled(record.status) || i.endpointTests?.[id]) continue;
+      (i.endpointTestKeys ||= {})[id] = {revision, key: record.key};
+      (i.endpointTests ||= {})[id] = {status: record.status, error: record.error || "",
+        elapsed_ms: record.elapsed_ms, recheck: true};
+    }
+    /* Drop entries that no longer match this revision or endpoint set. */
+    imageTestPersist(i, storage);
+  }
   async function imageEndpointTest(s, endpointId) {
     const i = s.image, endpoint = i.config?.settings?.endpoints?.find(item => item.id === endpointId);
     if (!endpoint || !endpoint.enabled || i.endpointTesting || imageConfigDirty(i)) return;
-    const ticket = version, operationKey = crypto.randomUUID();
-    i.endpointTests ||= {}; i.endpointTests[endpointId] = {status: "testing"}; i.endpointTesting = endpointId; render();
+    const ticket = version, storage = imageTestStorage();
+    const recheck = imageTestUnsettled(i.endpointTests?.[endpointId]?.status);
+    const operationKey = imageEndpointTestKey(i, endpointId);
+    i.endpointTests ||= {}; i.endpointTests[endpointId] = {status: "testing", recheck};
+    i.endpointTesting = endpointId; render();
     try {
       const timeout = Math.max(30000, (Number(endpoint.timeout_seconds) || 180) * 1000 + 10000);
       const result = await api("POST", path + "/image/output/test",
         {endpoint_id: endpointId, operation_key: operationKey}, timeout);
-      if (!current(ticket, s)) return;
-      if (!["succeeded", "failed", "unknown", "pending"].includes(result.status)) throw failure("invalid_response");
-      i.endpointTests[endpointId] = {status: result.status, elapsed_ms: result.elapsed_ms, error: result.error || ""};
+      const status = imageEndpointTestStatus(result?.status);
+      /* prepared/dispatching are the same unsettled operation as pending;
+         stopped means it never left the queue.  Anything unrecognised stays
+         unknown: the request may already have reached the provider, and a
+         fresh key would submit (and bill) a second generation. */
+      i.endpointTests[endpointId] = status
+        ? {status, elapsed_ms: result.elapsed_ms, error: result.error || "", recheck}
+        : {status: "unknown", error: "返回状态无法识别，请核对原测试", recheck};
     } catch (err) {
-      if (!current(ticket, s)) return;
-      i.endpointTests[endpointId] = {status: "error", error: err.code || "model_image_output_failed"};
-    } finally { i.endpointTesting = null; if (current(ticket, s)) render(); }
+      /* A bridge timeout/transport failure is not an error state: the service
+         may have accepted the request.  Keeping the same key makes the next
+         click a read-only recheck instead of a second paid generation. */
+      i.endpointTests[endpointId] = {status: "unknown", recheck,
+        error: `${err?.code === "bridge_timeout" ? "请求可能已被受理" : "测试结果未确认"}，请核对原测试`};
+    } finally {
+      i.endpointTesting = null; imageTestPersist(i, storage);
+      if (current(ticket, s)) render();
+    }
   }
   function imageConfigSaveValue(i) {
     const value = JSON.parse(JSON.stringify(i.configDraft));
@@ -1406,7 +1513,7 @@ window.CompanionModelsPage = (() => {
       `<label class="model-img-field model-img-inline"><span>密钥</span><span><input type="checkbox" data-img-config-field="${base}.clear_api_key"${item.clear_api_key ? " checked" : ""}${disabled ? " disabled" : ""}>清除已保存密钥</span></label>` : ""}`;
     const headersField = `<label class="model-img-field model-img-json"><span>自定义请求头（JSON）</span><textarea rows="3" spellcheck="false" data-img-config-json="${esc(headerKey)}" placeholder="${esc(headerPlaceholder)}"${disabled ? " disabled" : ""}>${esc(i.configText?.[headerKey] || "")}</textarea><small>${item.custom_headers_set ? `已保存：${esc((item.custom_header_names || []).join("、"))}。` : "可留空。"}填写新对象会替换现有自定义请求头。</small></label>${item.custom_headers_set ?
       `<label class="model-img-field model-img-inline"><span>请求头</span><span><input type="checkbox" data-img-config-field="${base}.clear_custom_headers"${item.clear_custom_headers ? " checked" : ""}${disabled ? " disabled" : ""}>清除已保存请求头</span></label>` : ""}`;
-    return `<label class="model-img-field"><span>协议</span><select data-img-config-field="${base}.platform"${disabled ? " disabled" : ""}>${options}</select><small>${esc(IMAGE_PROTOCOL_SUPPORT[item.platform] || "请按服务商文档选择")}</small></label>${imageConfigField("API 根地址", `${base}.base_url`, item.base_url, "url", 'placeholder="https://api.example.com/v1"', "", disabled)}${imageConfigField("超时秒数", `${base}.timeout_seconds`, item.timeout_seconds, "number", 'min="1" max="1800" step="1"', "", disabled)}${keyField}${headersField}`;
+    return `<label class="model-img-field"><span>协议</span><select data-img-config-field="${base}.platform"${disabled ? " disabled" : ""}>${options}</select><small>${esc(IMAGE_PROTOCOL_SUPPORT[item.platform] || "请按服务商文档选择")}</small></label>${imageConfigField("API 根地址", `${base}.base_url`, item.base_url, "url", 'placeholder="https://api.example.com/v1"', "可填根地址或完整 images 地址；查询参数会保留，不会重复拼接路径。", disabled)}${imageConfigField("超时秒数", `${base}.timeout_seconds`, item.timeout_seconds, "number", 'min="1" max="1800" step="1"', "本模型请求按此超时；任务等待预算取所有启用模型中的最长值（1–1800 秒），保存后下一次任务生效，正在执行的任务保持原时限。", disabled)}${keyField}${headersField}`;
   }
   const IMAGE_ROUTE_TONES = ["#4f7f64", "#5b70a6", "#9a6a3d", "#795b96", "#a65353", "#3f7b89"];
   function imageRouteHost(value) {
@@ -1428,20 +1535,22 @@ window.CompanionModelsPage = (() => {
       if (!item) return `<article class="model-img-route"><header><span class="model-img-priority">${index + 1}</span><strong>模型配置缺失</strong>${controls}</header></article>`;
       const base = `endpoints.${endpointIndex}`;
       const test = i.endpointTests?.[item.id], testing = i.endpointTesting === item.id;
-      const testLabel = test?.status === "succeeded" ? `测试成功 · ${Number(test.elapsed_ms) || 0} ms`
+      const recheckable = !!test && imageTestUnsettled(test.status);
+      const recheckMode = recheckable || (testing && !!test?.recheck);
+      const testLabel = test?.status === "succeeded" ? `测试成功 · ${imageTestElapsed(test)}`
         : test?.status === "failed" ? `生成失败 · ${test.error || "服务商拒绝请求"}`
-        : test?.status === "unknown" ? `结果未知 · ${test.error || "请先核对服务商记录"}`
-        : test?.status === "pending" ? "请求已提交，结果待确认"
-        : test?.status === "error" ? `测试未完成 · ${test.error || "未知错误"}` : "";
+        : test?.status === "unknown" ? `结果未知 · ${test.error || "请核对原测试"}`
+        : test?.status === "pending" ? "请求已提交，结果待确认 · 请核对原测试"
+        : test?.status === "stopped" ? "测试已中断 · 未发出生成请求，可重新测试" : "";
       const testDisabled = disabled || imageConfigDirty(i) || !config.enabled || !item.enabled ||
         ["bailian", "modelscope", "gemini"].includes(imageEffectivePlatform(item));
       const connectionFields = imageEndpointConnectionFields(i, item, base, disabled);
-      const modelFields = `${imageConfigField("模型 ID", `${base}.model`, item.model, "text", 'maxlength="240" placeholder="服务商提供的模型 ID"', "")}${imageConfigField("尺寸标签", `${base}.size_label`, item.size_label || `${item.width}x${item.height}`, "text", 'maxlength="64" placeholder="如 1024x1024、1K、auto"', "服务商接受标签时保留原值；宽高用于通用协议")}${imageConfigField("宽度", `${base}.width`, item.width, "number", 'min="64" max="8192" step="64"', "像素")}${imageConfigField("高度", `${base}.height`, item.height, "number", 'min="64" max="8192" step="64"', "像素")}${item.platform === "minimax" ? "" : `<label class="model-img-field"><span>图片质量</span><select data-img-config-field="${base}.quality"${disabled ? " disabled" : ""}>${[["auto", "自动"], ["low", "低"], ["medium", "中"], ["high", "高"], ["standard", "标准"], ["hd", "高清"]].map(([value, label]) => `<option value="${value}"${item.quality === value ? " selected" : ""}>${label}</option>`).join("")}</select></label>${imageConfigField("最多参考图", `${base}.max_reference_images`, item.max_reference_images, "number", 'min="0" max="8" step="1"', "设为 0 时此模型仅用于文生图")}`}<label class="model-img-field model-img-inline"><span>启用模型</span><input type="checkbox" data-img-config-field="${base}.enabled"${item.enabled ? " checked" : ""}${disabled ? " disabled" : ""}></label>`;
+      const modelFields = `${imageConfigField("模型 ID", `${base}.model`, item.model, "text", 'maxlength="240" placeholder="服务商提供的模型 ID"', "")}${imageConfigField("尺寸标签", `${base}.size_label`, item.size_label || `${item.width}x${item.height}`, "text", 'maxlength="64" placeholder="如 1024x1024、1K、auto"', "服务商接受标签时保留原值；宽高用于通用协议")}${imageConfigField("宽度", `${base}.width`, item.width, "number", 'min="64" max="8192" step="64"', "像素")}${imageConfigField("高度", `${base}.height`, item.height, "number", 'min="64" max="8192" step="64"', "像素")}${item.platform === "minimax" ? "" : `<label class="model-img-field"><span>图片质量</span><select data-img-config-field="${base}.quality"${disabled ? " disabled" : ""}>${[["", "服务端默认（不发送）"], ["auto", "自动"], ["low", "低"], ["medium", "中"], ["high", "高"], ["standard", "标准（dall-e 专用）"], ["hd", "高清（dall-e 专用）"]].map(([value, label]) => `<option value="${value}"${item.quality === value ? " selected" : ""}>${label}</option>`).join("")}</select><small>${esc(imageQualityHelp(item))}</small>${imageLegacyQualityNote(item)}</label><label class="model-img-field"><span>返回格式</span><select data-img-config-field="${base}.response_format"${disabled ? " disabled" : ""}>${[["", "按服务端默认（推荐）"], ["b64_json", "b64_json（旧式 dall-e 兼容）"]].map(([value, label]) => `<option value="${value}"${item.response_format === value ? " selected" : ""}>${label}</option>`).join("")}</select><small>${esc(imageResponseFormatHelp(item))}</small></label>${imageConfigField("最多参考图", `${base}.max_reference_images`, item.max_reference_images, "number", 'min="0" max="8" step="1"', "设为 0 时此模型仅用于文生图")}`}<label class="model-img-field model-img-inline"><span>启用模型</span><input type="checkbox" data-img-config-field="${base}.enabled"${item.enabled ? " checked" : ""}${disabled ? " disabled" : ""}></label>`;
       const tone = IMAGE_ROUTE_TONES[index % IMAGE_ROUTE_TONES.length];
       const support = imageRouteAvailable(config, ref, imageCurrentOperation(i));
       return `<article class="model-img-route" data-img-route-card="${esc(ref)}" style="--route-tone:${tone}"><header><span class="model-img-priority">${index + 1}</span><div class="model-img-route-title"><span class="model-img-route-name-wrap" title="点击修改模型显示名称；留空时显示模型 ID"><input type="text" class="model-img-route-name" data-img-config-field="${base}.name" value="${esc(item.name || "")}" maxlength="240" placeholder="${esc(imageEndpointLabel(item, "自定义名称"))}" aria-label="自定义模型名称"${disabled ? " disabled" : ""}><i data-lucide="pencil" aria-hidden="true"></i></span><div class="model-img-route-meta"><span class="model-img-route-id" title="${esc(item.model || "")}">${esc(item.model || "未设置模型 ID")}</span><span class="model-img-route-kind">${esc(IMAGE_PLATFORMS[item.platform] || "自动识别")}</span><span class="model-img-route-host" title="${esc(item.base_url || "")}">${esc(imageRouteHost(item.base_url))}</span></div></div><span class="model-img-route-support ${imageRouteSupportTone(support)}">${esc(support)}</span>${controls}</header>
         <details class="model-img-route-details"${expanded ? " open" : ""}>${imageRouteToggle(ref, expanded, "连接、测试与生图参数")}
-        <div class="model-img-endpoint-test"><button type="button" class="button small" data-img-endpoint-test="${esc(item.id)}"${testDisabled ? " disabled" : ""}>${testing ? "生成中…" : "生成测试图"}</button><span role="status" data-state="${esc(test?.status || "")}">${esc(testLabel)}</span></div>
+        <div class="model-img-endpoint-test"><button type="button" class="button small" data-img-endpoint-test="${esc(item.id)}" title="${recheckMode ? "核对同一次测试，不会再次提交生成请求" : "真实生成一张图片，可能产生费用"}"${testDisabled ? " disabled" : ""}>${testing ? (test?.recheck ? "核对中…" : "生成中…") : recheckable ? "核对原测试" : "生成测试图"}</button><span role="status" data-state="${esc(test?.status || "")}">${esc(testLabel)}</span></div>
         <fieldset class="model-schema-group"><legend>连接</legend><div class="model-img-route-grid">${connectionFields}</div></fieldset>
         <fieldset class="model-schema-group"><legend>生图参数</legend><div class="model-img-route-grid">${modelFields}</div></fieldset><div class="model-img-route-delete"><button type="button" class="button small danger" data-img-endpoint-remove="${esc(item.id)}"${disabled ? " disabled" : ""}>删除此模型</button></div></details></article>`;
     }
@@ -1657,7 +1766,8 @@ window.CompanionModelsPage = (() => {
       if (i.configDraft.endpoints.length >= max) return;
       const id = `image-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
       i.configDraft.endpoints.push({id, name: "", enabled: false,
-        platform: "openai", model: "", width: 1024, height: 1024, base_url: "", api_key_set: false, timeout_seconds: 180});
+        platform: "openai", model: "", width: 1024, height: 1024, base_url: "", api_key_set: false,
+        timeout_seconds: 180, quality: "", response_format: ""});
       i.expandedImageRoutes ||= {};
       i.expandedImageRoutes["online:" + id] = true;
       i.configDraft.operation_routes[imageCurrentOperation(i)].push(`online:${id}`); render(); return;
@@ -2184,7 +2294,7 @@ window.CompanionModelsPage = (() => {
       tab: "fn",
       voice: { data: null, draft: null, loaded: false, loading: false, busy: false, testing: false, bad: false, notice: "", ui: { lang: "ja" },
         editorOpen: false, catalog: null, catalogLoading: false, editorId: null, editorValues: {}, creating: false, ttsBusy: false, ttsTesting: false, ttsTestResults: {}, createDraft: { type: "", id: "" } },
-      image: { data: null, draft: null, loaded: false, loading: false, busy: false, testing: null, endpointTesting: null, endpointTests: {}, bad: false, notice: "",
+      image: { data: null, draft: null, loaded: false, loading: false, busy: false, testing: null, endpointTesting: null, endpointTests: {}, endpointTestKeys: {}, bad: false, notice: "",
         view: "generate", config: null, configBase: null, configDraft: null, configText: null, configTextBase: null,
         configLoading: false, configSaving: false, configBad: false, configNotice: "",
       },
@@ -2194,7 +2304,7 @@ window.CompanionModelsPage = (() => {
     state.layer ||= "role"; state.providerTests ||= {}; state.testing ||= new Set();
     /* 展开状态按对象保存：刷新、切任务、切页回来都保持上次展开的分组，
        不再每次回到“全收起”或“全展开”。 */
-    state.expOpen = { ...restoreExpanded(key), ...(state.expOpen || {}) }; state.voice.lastTest ||= null; state.voice.editorValues ||= {}; state.voice.ttsTestResults ||= {}; state.voice.ttsTesting ||= false; state.voice.createDraft ||= { type: "", id: "" }; state.image.endpointTests ||= {}; state.image.endpointTesting ||= null; state.configDraft ||= null; state.peak ||= { on: true, provider: "", start: "09:00", end: "12:00" }; state.testing ||= new Set(); state.peak.windows ||= "09:00-12:00\n14:00-18:00"; state.laya ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "", test: null, preview: null, previewText: "" }; state.search ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "" }; state.hoverProvider = "";
+    state.expOpen = { ...restoreExpanded(key), ...(state.expOpen || {}) }; state.voice.lastTest ||= null; state.voice.editorValues ||= {}; state.voice.ttsTestResults ||= {}; state.voice.ttsTesting ||= false; state.voice.createDraft ||= { type: "", id: "" }; state.image.endpointTests ||= {}; state.image.endpointTestKeys ||= {}; state.image.endpointTesting ||= null; state.configDraft ||= null; state.peak ||= { on: true, provider: "", start: "09:00", end: "12:00" }; state.testing ||= new Set(); state.peak.windows ||= "09:00-12:00\n14:00-18:00"; state.laya ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "", test: null, preview: null, previewText: "" }; state.search ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "" }; state.hoverProvider = "";
     states.set(key, state);
     state.sub = ["map", "cfg", "pol"].includes(options.sub) ? options.sub : "map";
     root.addEventListener("input", input); root.addEventListener("change", input); root.addEventListener("click", click); root.addEventListener("pointerover", providerHover); root.addEventListener("pointerout", providerHover); render();
@@ -2207,6 +2317,7 @@ window.CompanionModelsPage = (() => {
     const labels = {enabled:'启用开关', backend:'后端模式', base_url:'API 地址', model:'模型 ID', name:'自定义名称',
       platform:'协议', timeout_seconds:'超时秒数', api_key:'API Key', clear_api_key:'清除已保存密钥',
       custom_headers:'自定义请求头', clear_custom_headers:'清除已保存请求头', quality:'图片质量',
+      response_format:'返回格式',
       size_label:'尺寸标签', width:'宽度', height:'高度', max_reference_images:'最多参考图',
       comfyui:'ComfyUI', sd_webui:'SD WebUI', network:'下载网络', download_proxy:'下载代理',
       clear_download_proxy:'清除已保存代理', use_environment_proxy:'使用系统代理',
