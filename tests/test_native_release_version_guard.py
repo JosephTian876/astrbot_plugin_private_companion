@@ -58,6 +58,27 @@ class NativeReleaseVersionGuardTests(unittest.TestCase):
             self.assertEqual(json.loads((root / NATIVE_CAPABILITY_BASELINE).read_text(encoding="utf-8")), refreshed)
             verify_native_baseline("2.1.2", current, refreshed)
 
+    def test_image_hash_change_requires_version_advance_before_baseline_refresh(self):
+        # 7.0.7 -> 7.0.8 shipped image source changes after the previous baseline was
+        # pinned. Keep the guard proven for image itself, not only for a generic file.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.source_tree(root)
+            baseline = refresh_native_baseline(root, "7.0.8")
+            image = root / "astrbot_host/native_extensions/image_native/package.py"
+            image.write_bytes(b"VALUE = 2\n")
+            current = native_artifact_hashes(native_artifact_source_files(root))
+            self.assertNotEqual(current["image"], baseline["artifact_hashes"]["image"])
+
+            with self.assertRaisesRegex(ValueError, "without a package version bump: image"):
+                verify_native_baseline("7.0.8", current, baseline)
+            with self.assertRaisesRegex(ValueError, "must advance"):
+                refresh_native_baseline(root, "7.0.8")
+
+            refreshed = refresh_native_baseline(root, "7.0.9")
+            self.assertEqual(refreshed["package_version"], "7.0.9")
+            verify_native_baseline("7.0.9", current, refreshed)
+
     def test_build_requires_baseline_refresh_after_release_version_bump(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
