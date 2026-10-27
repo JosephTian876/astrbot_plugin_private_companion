@@ -904,7 +904,9 @@ class PrivateCompanionV2StagingPlugin(Star):
                 return
             suppress_default_reply(event)
             if failure.code == "private_access_dialogue_denied":
-                await self.staging.refuse_core_reply(event)
+                # Only this failed preparation owns the refused context; never
+                # let a concurrent event's notice or cooldown stand in for it.
+                await self.staging.refuse_core_reply(event, getattr(admission, "refusal", None))
             self._record_no_reply(event, failure.code, origin_key=origin_key,
                                   channel=channel, event_ref=event_ref, stage="admission",
                                   turn=event_ref, code=failure.code)
