@@ -10,7 +10,7 @@
   "files": {
     "README.md": "0ef284ac92d44c21301cf0becdbf68ccf0af00ce0ca001cd5ae10e1ec4074796",
     "action-page.css": "2eafa68aa7101e506758b26ec6b57199c3cab170d98e42f9fccb4a47f65cf3a8",
-    "app.js": "4b069a8e99ed6c5a3051fe2d2ddc53ef229e10cc70b09417763a4e0bb96e141c",
+    "app.js": "63f0f93d2aaa06606f19456c178dcf556ff7af245bfa9f3b1ce8a571d58ed74f",
     "appearance-page.css": "4e184760e3356eaf4cb320dcfb169707d3b0490b90b8b1d6738f6156cbe31ff6",
     "appearance-page.js": "2572fbad265eabf124d00198b41bcf6e71ca54604c0b7aea0dbc22e47f94a198",
     "assets/LUCIDE-LICENSE.txt": "b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57",
@@ -64,7 +64,7 @@
     "host-options-page.js": "cc3a1e599e111f29626f785b79f9e0e2ec88ea788b10ea2cdbc0b2444b6874d4",
     "host-options.css": "f5dad033ba835a44008fe1f2d7e6114302c2c694ec598197e7f577b050974085",
     "image-materials-page.js": "e69dff898f443616529aef67ffe90130e7f518ed140ea47f47adcb850cca041b",
-    "index.html": "7251410f58e7d37a06709382b90cb47d835a9705f45cd3195988d79902886cb1",
+    "index.html": "08b3bd89c53e1a390f41fe2bcb155fec5decfb89d10e03624028ec21168feca9",
     "learning-hub.css": "2493307fee9bd35c37f979ae57408a79f9d305c4dd8634e615bde0601d4238ef",
     "learning-overview.js": "1c562514d495d6033fd9f8703034d72855e3de88f8dc068c4afdf58b1d0dcd56",
     "learning-page.css": "53023c0e6f097bfd7285a3084beec0d4d84b5f9fbefd415f84d0e5febee6b235",
