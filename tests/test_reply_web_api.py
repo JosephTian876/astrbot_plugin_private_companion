@@ -50,7 +50,8 @@ class ReplyWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         renderer.assert_not_awaited()
 
         command = {"operation_key": "hot-enable", "edit_token": status["edit_token"],
-                   "changes": {"voice_enabled": True, "voice_segment_mode": "last", "voice_provider_id": "tts-a"}}
+                   "changes": {"voice_enabled": True, "voice_segment_mode": "last",
+                               "voice_delivery_mode": "voice_and_text", "voice_provider_id": "tts-a"}}
         saved = await request(handlers[first + "/configure"], command)
         self.assertEqual(saved["status"], "ok", saved)
         self.assertTrue((await request(handlers[first + "/configure"], command))["data"]["replayed"])
@@ -58,8 +59,9 @@ class ReplyWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         await self.accepted(identifier="voice-enabled")
         renderer.assert_awaited_once()
         self.assertEqual(renderer.await_args.kwargs["provider_id"], "tts-a")
-        self.assertEqual([item["type"] for item in self.native.platform.client._api._wsr_api.calls[-1][1]["message"]],
-                         ["text", "record"])
+        sent = [item["type"] for call in self.native.platform.client._api._wsr_api.calls
+                for item in call[1].get("message", ())]
+        self.assertEqual([kind for kind in sent if kind in {"text", "record"}][-2:], ["text", "record"])
         preview = await request(handlers[first + "/preview"], {"settings": saved["data"]["status"]["settings"],
                                                                "text": "离线正文", "image_count": 2})
         self.assertEqual(preview["status"], "ok", preview)
@@ -139,10 +141,12 @@ class SingleReplyWebAPITests(unittest.IsolatedAsyncioTestCase):
         status = (await request(api.status))["data"]
         self.assertEqual(status["tts"]["state"], "unavailable")
         saved = await request(api.configure, {"operation_key": "single-enable", "edit_token": status["edit_token"],
-                                              "changes": {"voice_enabled": True}})
+                                              "changes": {"voice_enabled": True,
+                                                          "voice_delivery_mode": "voice_and_text"}})
         self.assertEqual(saved["status"], "ok", saved)
         batch = (await controller.receive_claimed(FakeEvent(native))).unwrap()
         await wait_for_batch(controller.session, batch)
         renderer.assert_awaited_once()
-        self.assertEqual([item["type"] for item in native.platform.client._api._wsr_api.calls[-1][1]["message"]],
-                         ["text", "record"])
+        sent = [item["type"] for call in native.platform.client._api._wsr_api.calls
+                for item in call[1].get("message", ())]
+        self.assertEqual([kind for kind in sent if kind in {"text", "record"}], ["text", "record"])

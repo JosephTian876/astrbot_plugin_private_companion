@@ -1,4 +1,17 @@
 {
+  "performance": {
+    "description": "性能模式（低配置设备）",
+    "hint": "放在官方配置页顶部。开启并重载插件后，陪伴小屋页面只显示轻量状态页，不再加载 3D 小屋、全部样式与工作区脚本；插件同时跳过陪伴小屋的页面管理路由注册。聊天、记忆与已配置的主动功能继续运行。关闭并重载即可恢复小屋。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用性能模式",
+        "hint": "适合低配置设备或远程访问卡顿的环境。保存后请重载插件；性能模式下如需修改高级设置，请先关闭本项并重载。",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
   "storage": {
     "description": "资料存储与清理",
     "hint": "存储位置变更会在重启插件时迁移 V2 资料；清理策略只管理已完成的备份快照。",
@@ -455,11 +468,13 @@
         "description": "语音分段范围",
         "type": "string",
         "options": [
+          "whole",
           "each",
           "first",
           "last"
         ],
-        "default": "each"
+        "default": "whole",
+        "hint": "whole 等全部文字收齐后合成一次，语气和上下文更完整；each 每段分别合成，出音更早但会切碎语义。"
       },
       "delivery_mode": {
         "description": "发送形态",

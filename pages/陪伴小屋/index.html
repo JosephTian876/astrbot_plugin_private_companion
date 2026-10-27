@@ -1,6 +1,40 @@
 <!doctype html>
-<html lang="zh-CN">
+<html data-companion-booting lang="zh-CN">
 <head>
+  <style>
+    /* 首屏防闪：性能模式开关检查完成前不显示完整小屋 DOM。 */
+    html[data-companion-booting] body { visibility: hidden !important; }
+    .companion-performance-page {
+      box-sizing: border-box; min-height: 100vh; margin: 0; padding: 28px 18px;
+      display: grid; place-items: center; color: #243047;
+      background: radial-gradient(circle at 50% 0%, #eef5ff 0%, #f6f8fc 46%, #edf1f8 100%);
+      font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    .companion-performance-card {
+      width: min(620px, 100%); box-sizing: border-box; padding: 26px 24px;
+      border: 1px solid rgba(87, 111, 153, .16); border-radius: 22px;
+      background: rgba(255, 255, 255, .92); box-shadow: 0 18px 50px rgba(43, 62, 94, .12);
+    }
+    .companion-performance-badge {
+      display: inline-flex; align-items: center; gap: 7px; margin-bottom: 14px;
+      padding: 5px 11px; border-radius: 999px; color: #176b55;
+      background: #e8f7f1; font-weight: 650; letter-spacing: .02em;
+    }
+    .companion-performance-card h1 { margin: 0 0 10px; font-size: 24px; line-height: 1.3; }
+    .companion-performance-card p { margin: 0 0 12px; color: #52627b; }
+    .companion-performance-card ul { margin: 16px 0 20px; padding-left: 21px; color: #40516d; }
+    .companion-performance-card li { margin: 7px 0; }
+    .companion-performance-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    .companion-performance-button {
+      appearance: none; border: 0; border-radius: 10px; padding: 10px 15px;
+      color: #fff; background: #2e6bd6; font: inherit; font-weight: 650; cursor: pointer;
+    }
+    .companion-performance-button.secondary { color: #2e5ca8; background: #e9f0fd; }
+    .companion-performance-note { margin-top: 14px; font-size: 12px; color: #7a879b; }
+    .companion-performance-actions a { color: inherit; text-decoration: none; }
+  </style>
+  <noscript><style>html[data-companion-booting] body { visibility: visible !important; }</style></noscript>
+
   <meta name="companion-api-host" content="astrbot_plugin_private_companion">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -53,25 +87,165 @@
       root.dataset.roomBootGif=choices[Math.floor(Math.random()*choices.length)];
     })();
   </script>
-  <link rel="stylesheet" href="tokens.css?v=contrast-tokens-20261017">
-  <link rel="stylesheet" href="styles.css?v=shell-layout-20261017">
-  <link rel="stylesheet" href="confirmation-dialog.css?v=consolidated-20261024-r1">
-  <link rel="stylesheet" href="tokens-bridge.css?v=scale-system-20260930">
-  <link rel="stylesheet" href="memory-page.css?v=memory-config-ownership-20261001">
-  <link rel="stylesheet" href="workspace-loading.css?v=workspace-lazy-20261012">
-  <link rel="stylesheet" href="contact-page.css?v=proactive-day-window-filter-20261016">
-  <link rel="stylesheet" href="learning-page.css?v=learning-workbench-20261002">
-  <link rel="stylesheet" href="behavior-page.css?v=group-behavior-20261015">
-  <link rel="stylesheet" href="self-review-page.css?v=learning-workbench-20261002">
-  <link rel="stylesheet" href="learning-hub.css?v=expression-samples-20261008">
-  <link rel="stylesheet" href="state-page.css?v=status-manual-maintenance-20261007">
-  <link rel="stylesheet" href="state-config.css?v=status-settings-20261007">
-  <link rel="stylesheet" href="weather-source.css?v=weather-source-auth-mode-20261025">
-  <link rel="stylesheet" href="reply-page.css?v=astrbot-core-reply-20261010">
-  <link rel="stylesheet" href="expression-config.css?v=expression-container-layout-20261016">
-  <link rel="stylesheet" href="host-options.css?v=host-options-container-layout-20261016">
-  <link rel="stylesheet" href="config-editor.css?v=config-ownership-20261001">
-  <link rel="stylesheet" href="workbench.css?v=consolidated-20261024-r1">
+  <!-- 性能模式：完整小屋样式与脚本先放进惰性 template。宿主会照常重写
+       其中相对地址；只有确认官方配置未开启性能模式后才由 performance-gate.js
+       激活，低配置设备不会下载 3D 体素包和整套工作区脚本。 -->
+  <template id="companion-full-assets">
+    <link rel="stylesheet" href="tokens.css?v=contrast-tokens-20261017">
+    <link rel="stylesheet" href="styles.css?v=shell-layout-20261017">
+    <link rel="stylesheet" href="confirmation-dialog.css?v=consolidated-20261024-r1">
+    <link rel="stylesheet" href="tokens-bridge.css?v=scale-system-20260930">
+    <link rel="stylesheet" href="memory-page.css?v=memory-config-ownership-20261001">
+    <link rel="stylesheet" href="workspace-loading.css?v=workspace-lazy-20261012">
+    <link rel="stylesheet" href="contact-page.css?v=proactive-day-window-filter-20261016">
+    <link rel="stylesheet" href="learning-page.css?v=learning-workbench-20261002">
+    <link rel="stylesheet" href="behavior-page.css?v=group-behavior-20261015">
+    <link rel="stylesheet" href="self-review-page.css?v=learning-workbench-20261002">
+    <link rel="stylesheet" href="learning-hub.css?v=expression-samples-20261008">
+    <link rel="stylesheet" href="state-page.css?v=status-manual-maintenance-20261007">
+    <link rel="stylesheet" href="state-config.css?v=status-settings-20261007">
+    <link rel="stylesheet" href="weather-source.css?v=weather-source-auth-mode-20261025">
+    <link rel="stylesheet" href="reply-page.css?v=astrbot-core-reply-20261010">
+    <link rel="stylesheet" href="expression-config.css?v=expression-container-layout-20261016">
+    <link rel="stylesheet" href="host-options.css?v=host-options-container-layout-20261016">
+    <link rel="stylesheet" href="config-editor.css?v=config-ownership-20261001">
+    <link rel="stylesheet" href="workbench.css?v=consolidated-20261024-r1">
+    <link rel="stylesheet" href="console.css?v=config-experience-20261017">
+    <link rel="stylesheet" href="output-page.css?v=image-route-config-20261012">
+    <link rel="stylesheet" href="decision-page.css?v=reply-decision-split-20261001">
+    <link rel="stylesheet" href="action-page.css?v=action-workspace-20261007">
+    <link rel="stylesheet" href="home.css?v=mobile-ergonomics-20261027">
+    <link rel="stylesheet" href="models-page.css?v=image-model-name-20261026">
+    <link rel="stylesheet" href="product-page.css?v=no-host-state-20260929">
+    <link rel="stylesheet" href="native-extension-panel.css?v=mobile-mihome-controls-20261026">
+    <link rel="stylesheet" href="semantic-page.css?v=learning-semantic-layout-20261008">
+    <link rel="stylesheet" href="perception-subpages.css?v=perception-subpages-20261007">
+    <link rel="stylesheet" href="understanding-page.css?v=understanding-figma-layout-20261007">
+    <link rel="stylesheet" href="setup-guide.css?v=migration-guided-20261025">
+    <link rel="stylesheet" href="migration-config-table.css?v=consolidated-20261024-r1">
+    <link rel="stylesheet" href="backup-page.css?v=data-subpages-20261008-r2">
+    <link rel="stylesheet" href="storage-page.css?v=data-subpages-20261008-r2">
+    <link rel="stylesheet" href="maintenance-page.css?v=reply-trend-20261015-r2">
+    <link rel="stylesheet" href="navigation.css?v=shell-layout-20261017">
+    <link rel="stylesheet" href="appearance-page.css?v=appearance-workbench-20261008">
+    <link rel="stylesheet" href="entrance.css?v=cottage-title-in-scene-20261005-r1">
+    <link rel="stylesheet" href="shell.css?v=mobile-ergonomics-20261027">
+    <link rel="stylesheet" href="self-page.css?v=self-profile-avatar-20261014">
+    <link rel="stylesheet" href="theme-skins.css?v=theme-material-20261001">
+    <link rel="stylesheet" href="page-motion.css?v=page-interactions-20261011">
+    <link rel="preload" href="assets/voxel-room.js?v=home-v2-entrance-20260930" as="script">
+    <script defer src="assets/lucide.min.js"></script>
+    <script defer src="assets/voxel-room.js?v=home-v2-entrance-20260930" onload="document.documentElement.dataset.roomAsset=''" onerror="document.documentElement.dataset.roomAsset=''"></script>
+    <script defer src="theme.js?v=theme-material-20261001"></script>
+    <script defer src="shell.js?v=shell-layout-20261017"></script>
+    <script defer src="page-guards.js?v=consolidated-20261024-r1"></script>
+    <script defer src="page-motion.js?v=page-interactions-20261011"></script>
+    <script defer src="entrance.js?v=entrance-state-build-20261001"></script>
+    <script defer src="config-snapshot.js?v=brand-no-version-20261018"></script>
+    <script defer src="home-sidebar.js?v=planning-feedback-20261019"></script>
+    <script defer src="product-page.js?v=shared-role-source-20261027"></script>
+    <script defer src="confirmation-dialog.js?v=consolidated-20261024-r1"></script>
+    <script defer src="native-extension-management.js?v=mobile-mihome-controls-20261026"></script>
+    <script defer src="native-extension-panel.js?v=mobile-mihome-controls-20261026"></script>
+    <script defer src="self-relationship.js?v=core-user-profile-20261007"></script>
+    <script defer src="home-environment.js?v=mobile-clock-20261027"></script>
+    <script defer src="migration-config-review.js?v=consolidated-20261024-r1"></script>
+    <script defer src="migration-config-table.js?v=migration-guided-20261025"></script>
+    <script defer src="setup-guide.js?v=migration-role-fallback-20261025"></script>
+    <script defer src="semantic-page.js?v=consolidated-20261024-r1"></script>
+    <script defer src="perception-page.js?v=consolidated-20261024-r1"></script>
+    <script defer src="perception-native-page.js?v=perception-auto-dates-20261025"></script>
+    <script defer src="weather-source-page.js?v=weather-source-auth-mode-20261025"></script>
+    <script defer src="perception-overview.js?v=perception-auto-dates-20261025"></script>
+    <script defer src="reality-access.js?v=reality-readonly-consent-20261002"></script>
+    <script defer src="game-access.js?v=game-room-consent-20261014"></script>
+    <link rel="stylesheet" href="screen-observation.css?v=screen-retained-20261014">
+    <script defer src="screen-observation.js?v=screen-retained-20261014"></script>
+    <script defer src="screen-access.js?v=screen-retained-20261014"></script>
+    <script defer src="room-editor.js?v=transient-time-preview-20261004"></script>
+    <script defer src="memory-page.js?v=directory-names-20261002"></script>
+    <script defer src="contact-page.js?v=auto-milestones-20261025"></script>
+    <script defer src="learning-page.js?v=learning-record-ownership-20261012"></script>
+    <script defer src="behavior-page.js?v=group-behavior-20261015"></script>
+    <script defer src="learning-overview.js?v=learning-record-ownership-20261012"></script>
+    <script defer src="learning-review-page.js?v=learning-record-ownership-20261012"></script>
+    <script defer src="expression-signals-page.js?v=expression-samples-20261008"></script>
+    <script defer src="expression-samples-page.js?v=learning-record-ownership-20261012"></script>
+    <script defer src="self-review-page.js?v=learning-record-ownership-20261012"></script>
+    <script defer src="state-maintenance.js?v=typing-lifecycle-20261018"></script>
+    <script defer src="state-contact.js?v=contact-event-freshness-20261016"></script>
+    <script defer src="calendar-editor.js?v=schedule-workspace-20261003-r2"></script>
+    <script defer src="state-editor.js?v=presence-role-scope-20261027"></script>
+    <script defer src="state-page.js?v=presence-role-scope-20261027"></script>
+    <script defer src="reply-page.js?v=tts-channel-bindings-20261027"></script>
+    <script defer src="host-options-page.js?v=forward-intake-settings-20261004"></script>
+    <script defer src="workbench-page.js?v=normalize-draft-20261027"></script>
+    <script defer src="memory-settings-section.js?v=memory-config-ownership-20261001"></script>
+    <script defer src="config-editor.js?v=legacy-enum-normalize-20261027"></script>
+    <script defer src="output-page.js?v=image-model-name-20261026"></script>
+    <script defer src="role-profile-draft.js?v=consolidated-20261024-r1"></script>
+    <script defer src="role-profile-migration.js?v=migration-ui-20261015"></script>
+    <script defer src="decision-page.js?v=role-wakeup-shared-20261013"></script>
+    <script defer src="expression-page.js?v=expression-completion-20261008"></script>
+    <script defer src="models-page.js?v=tts-channel-bindings-20261027"></script>
+    <script defer src="image-materials-page.js?v=reference-usage-persistence-20261007"></script>
+    <script defer src="maintenance-page.js?v=meal-topics-auto-dates-20261025"></script>
+    <script defer src="appearance-page.js?v=appearance-workbench-20261008"></script>
+    <script defer src="backup-page.js?v=data-subpages-20261008-r2"></script>
+    <script defer src="storage-page.js?v=data-subpages-20261008-r2"></script>
+    <script defer src="understanding-page.js?v=understanding-figma-layout-20261007"></script>
+    <script defer src="app.js?v=qzone-config-mount-20261027"></script>
+    <script>
+        (function(){
+          var root=document.documentElement;
+          var source=root.dataset.roomBootGif;
+          var image=document.getElementById("roomBootGif");
+          var templates=document.querySelectorAll("template[data-room-boot-gif]");
+          if(!source||!image||templates.length<2)return;
+          var images=[];
+          for(var i=0;i<templates.length;i++){
+            var candidate=templates[i].content&&templates[i].content.firstElementChild;
+            if(candidate)images.push({source:templates[i].getAttribute("data-room-boot-gif"),image:candidate});
+          }
+          var current=images.findIndex(function(item){return item.source===source;});
+          if(current<0)return;
+          var candidate=images[current].image;
+          var preload=document.createElement("link");
+          preload.rel="preload";
+          preload.as="image";
+          preload.href=candidate.src;
+          preload.setAttribute("fetchpriority","low");
+          document.head.appendChild(preload);
+          var clone=candidate.cloneNode(true);
+          clone.id=image.id;
+          clone.hidden=false;
+          image.replaceWith(clone);
+          image=clone;
+          function playNext(){
+            if(root.hasAttribute("data-room-ready"))return;
+            var next=(current+1)%images.length;
+            var candidate=images[next].image;
+            var probe=new Image();
+            probe.onload=function(){
+              if(root.hasAttribute("data-room-ready"))return;
+              var nextImage=candidate.cloneNode(true);
+              nextImage.id="roomBootGif";
+              nextImage.hidden=false;
+              image.replaceWith(nextImage);
+              image=nextImage;
+              current=next;
+              root.dataset.roomBootGif=images[current].source;
+              window.setTimeout(playNext,1900);
+            };
+            probe.onerror=function(){window.setTimeout(playNext,1900);};
+            probe.src=candidate.src;
+          }
+          window.setTimeout(playNext,1900);
+        })();
+    </script>
+  </template>
+  <script defer src="performance-gate.js?v=performance-mode-20261027"></script>
+
   <!-- 配置控制台外壳。
        console.css 定义 .console / .console-section / .console-section-head /
        .console-row / .console-mount-head 等管理页的全部结构样式，
@@ -81,31 +255,8 @@
        控件同字号同灰度一路铺下来，就是用户说的「一坨文字」。
        预览构建器按这里的引用收集样式，所以漏引时预览也同样无样式，
        两边表现一致，一直没被察觉。 -->
-  <link rel="stylesheet" href="console.css?v=config-experience-20261017">
-  <link rel="stylesheet" href="output-page.css?v=image-route-config-20261012">
-  <link rel="stylesheet" href="decision-page.css?v=reply-decision-split-20261001">
-  <link rel="stylesheet" href="action-page.css?v=action-workspace-20261007">
-  <link rel="stylesheet" href="home.css?v=mobile-ergonomics-20261027">
-  <link rel="stylesheet" href="models-page.css?v=image-model-name-20261026">
-  <link rel="stylesheet" href="product-page.css?v=no-host-state-20260929">
-  <link rel="stylesheet" href="native-extension-panel.css?v=mobile-mihome-controls-20261026">
-  <link rel="stylesheet" href="semantic-page.css?v=learning-semantic-layout-20261008">
-  <link rel="stylesheet" href="perception-subpages.css?v=perception-subpages-20261007">
-  <link rel="stylesheet" href="understanding-page.css?v=understanding-figma-layout-20261007">
-  <link rel="stylesheet" href="setup-guide.css?v=migration-guided-20261025">
-  <link rel="stylesheet" href="migration-config-table.css?v=consolidated-20261024-r1">
-  <link rel="stylesheet" href="backup-page.css?v=data-subpages-20261008-r2">
-  <link rel="stylesheet" href="storage-page.css?v=data-subpages-20261008-r2">
-  <link rel="stylesheet" href="maintenance-page.css?v=reply-trend-20261015-r2">
-  <link rel="stylesheet" href="navigation.css?v=shell-layout-20261017">
-  <link rel="stylesheet" href="appearance-page.css?v=appearance-workbench-20261008">
-  <link rel="stylesheet" href="entrance.css?v=cottage-title-in-scene-20261005-r1">
   <!-- 外壳布局：小屋常驻 + 左栏 + 右栏 + 下方面板。必须在 styles.css 之后，
        它覆盖旧的固定定位左栏与顶栏栅格。 -->
-  <link rel="stylesheet" href="shell.css?v=mobile-ergonomics-20261027">
-  <link rel="stylesheet" href="self-page.css?v=self-profile-avatar-20261014">
-  <link rel="stylesheet" href="theme-skins.css?v=theme-material-20261001">
-  <link rel="stylesheet" href="page-motion.css?v=page-interactions-20261011">
   <!-- 小屋就绪闸门（见 tokens.css）。
        体素包 677 KB，它是首屏唯一一个「到了才能画」的资源：在它解析完之前，
        app.js 的 mountStage() 不会执行，.room-stage 是个空盒子。所以在这一行
@@ -129,9 +280,6 @@
        开始下载，而不是排在 lucide 之后才轮到——代价只是多一条 link。
        地址（含 ?v=）必须与下面那条 script 完全一致，否则会被当成两个资源，
        反而下载两遍。 -->
-  <link rel="preload" href="assets/voxel-room.js?v=home-v2-entrance-20260930" as="script">
-  <script defer src="assets/lucide.min.js"></script>
-  <script defer src="assets/voxel-room.js?v=home-v2-entrance-20260930" onload="document.documentElement.dataset.roomAsset=''" onerror="document.documentElement.dataset.roomAsset=''"></script>
   <script>
     /* 兜底放行。
      *
@@ -149,82 +297,23 @@
      * 所以宁可给宽——卡在一个看不见的界面上比多等两秒糟得多。 */
     setTimeout(function(){document.documentElement.dataset.roomReady="";},7000);
   </script>
-  <script defer src="theme.js?v=theme-material-20261001"></script>
   <!-- 外壳状态：选中的家具与配置分区。app.js 依赖它决定下方渲染什么，
        所以在 app.js 之前。 -->
-  <script defer src="shell.js?v=shell-layout-20261017"></script>
   <!-- 页面级未保存守卫的注册表。app.js 的离开判断会汇总它，
        所以必须排在 app.js 之前。 -->
-  <script defer src="page-guards.js?v=consolidated-20261024-r1"></script>
-  <script defer src="page-motion.js?v=page-interactions-20261011"></script>
   <!-- 入场序列：只驱动体素控制器的公开接口，必须在 app.js 之前就位。 -->
-  <script defer src="entrance.js?v=entrance-state-build-20261001"></script>
-  <script defer src="config-snapshot.js?v=brand-no-version-20261018"></script>
   <!-- 工作区采用按需拆包；静态地址留在 inert template 中，运行时才请求。 -->
   <template data-workspace-bundle="host"><script src="workspace-bundles/host.js?v=shared-role-merge-20261026"></script></template>
   <template data-workspace-bundle="life"><script src="workspace-bundles/life.js?v=workspace-lazy-20261012"></script></template>
   <template data-workspace-bundle="relationships"><script src="workspace-bundles/relationships.js?v=workspace-lazy-20261012"></script></template>
   <template data-workspace-bundle="identity"><script src="workspace-bundles/identity.js?v=tts-channel-bindings-20261027"></script></template>
   <template data-workspace-bundle="persona"><script src="workspace-bundles/persona.js?v=workspace-lazy-20261012"></script></template>
-  <script defer src="home-sidebar.js?v=planning-feedback-20261019"></script>
-  <script defer src="product-page.js?v=shared-role-source-20261027"></script>
-  <script defer src="confirmation-dialog.js?v=consolidated-20261024-r1"></script>
-  <script defer src="native-extension-management.js?v=mobile-mihome-controls-20261026"></script>
-  <script defer src="native-extension-panel.js?v=mobile-mihome-controls-20261026"></script>
-  <script defer src="self-relationship.js?v=core-user-profile-20261007"></script>
-  <script defer src="home-environment.js?v=mobile-clock-20261027"></script>
   <!-- 设置与迁移工作区：依赖 product-page.js 的桥接与错误翻译。 -->
-  <script defer src="migration-config-review.js?v=consolidated-20261024-r1"></script>
-  <script defer src="migration-config-table.js?v=migration-guided-20261025"></script>
-  <script defer src="setup-guide.js?v=migration-role-fallback-20261025"></script>
-  <script defer src="semantic-page.js?v=consolidated-20261024-r1"></script>
-  <script defer src="perception-page.js?v=consolidated-20261024-r1"></script>
-  <script defer src="perception-native-page.js?v=perception-auto-dates-20261025"></script>
-  <script defer src="weather-source-page.js?v=weather-source-auth-mode-20261025"></script>
-  <script defer src="perception-overview.js?v=perception-auto-dates-20261025"></script>
-  <script defer src="reality-access.js?v=reality-readonly-consent-20261002"></script>
-  <script defer src="game-access.js?v=game-room-consent-20261014"></script>
-  <link rel="stylesheet" href="screen-observation.css?v=screen-retained-20261014">
-  <script defer src="screen-observation.js?v=screen-retained-20261014"></script>
-  <script defer src="screen-access.js?v=screen-retained-20261014"></script>
-  <script defer src="room-editor.js?v=transient-time-preview-20261004"></script>
-  <script defer src="memory-page.js?v=directory-names-20261002"></script>
-  <script defer src="contact-page.js?v=auto-milestones-20261025"></script>
-  <script defer src="learning-page.js?v=learning-record-ownership-20261012"></script>
-  <script defer src="behavior-page.js?v=group-behavior-20261015"></script>
-  <script defer src="learning-overview.js?v=learning-record-ownership-20261012"></script>
-  <script defer src="learning-review-page.js?v=learning-record-ownership-20261012"></script>
-  <script defer src="expression-signals-page.js?v=expression-samples-20261008"></script>
-  <script defer src="expression-samples-page.js?v=learning-record-ownership-20261012"></script>
-  <script defer src="self-review-page.js?v=learning-record-ownership-20261012"></script>
-  <script defer src="state-maintenance.js?v=typing-lifecycle-20261018"></script>
-  <script defer src="state-contact.js?v=contact-event-freshness-20261016"></script>
-  <script defer src="calendar-editor.js?v=schedule-workspace-20261003-r2"></script>
-  <script defer src="state-editor.js?v=typing-lifecycle-20261018"></script>
-  <script defer src="state-page.js?v=state-feedback-20261019"></script>
-  <script defer src="reply-page.js?v=tts-channel-bindings-20261027"></script>
-  <script defer src="host-options-page.js?v=forward-intake-settings-20261004"></script>
   <!-- 工作台内核必须先于使用它的编辑器加载（config-editor / expression-page
        都依赖 CompanionWorkbench）。 -->
-  <script defer src="workbench-page.js?v=normalize-draft-20261027"></script>
   <!-- 忆忆策略位于忆忆页的独立视图。 -->
-  <script defer src="memory-settings-section.js?v=memory-config-ownership-20261001"></script>
-  <script defer src="config-editor.js?v=legacy-enum-normalize-20261027"></script>
-  <script defer src="output-page.js?v=image-model-name-20261026"></script>
-  <script defer src="role-profile-draft.js?v=consolidated-20261024-r1"></script>
-  <script defer src="role-profile-migration.js?v=migration-ui-20261015"></script>
-  <script defer src="decision-page.js?v=role-wakeup-shared-20261013"></script>
-  <script defer src="expression-page.js?v=expression-completion-20261008"></script>
-  <script defer src="models-page.js?v=tts-channel-bindings-20261027"></script>
-  <script defer src="image-materials-page.js?v=reference-usage-persistence-20261007"></script>
-  <script defer src="maintenance-page.js?v=meal-topics-auto-dates-20261025"></script>
-  <script defer src="appearance-page.js?v=appearance-workbench-20261008"></script>
   <!-- 备份与还原：后端 backup_api.py 有六条真实路由，而这一页此前没有任何
        入口加载它——资料与维护页的挂载点永远停在「正在读取快照列表…」。 -->
-  <script defer src="backup-page.js?v=data-subpages-20261008-r2"></script>
-  <script defer src="storage-page.js?v=data-subpages-20261008-r2"></script>
-  <script defer src="understanding-page.js?v=understanding-figma-layout-20261007"></script>
-  <script defer src="app.js?v=7.0.8-qzone-config-mount-20261027"></script>
 </head>
 <body>
   <!-- 启动幕：首屏闸门（tokens.css 的 data-room-ready）在体素包解析完之前
@@ -247,54 +336,6 @@
     </div>
     <span class="room-boot-text">正在打开小屋…</span>
   </div>
-  <script>
-    (function(){
-      var root=document.documentElement;
-      var source=root.dataset.roomBootGif;
-      var image=document.getElementById("roomBootGif");
-      var templates=document.querySelectorAll("template[data-room-boot-gif]");
-      if(!source||!image||templates.length<2)return;
-      var images=[];
-      for(var i=0;i<templates.length;i++){
-        var candidate=templates[i].content&&templates[i].content.firstElementChild;
-        if(candidate)images.push({source:templates[i].getAttribute("data-room-boot-gif"),image:candidate});
-      }
-      var current=images.findIndex(function(item){return item.source===source;});
-      if(current<0)return;
-      var candidate=images[current].image;
-      var preload=document.createElement("link");
-      preload.rel="preload";
-      preload.as="image";
-      preload.href=candidate.src;
-      preload.setAttribute("fetchpriority","low");
-      document.head.appendChild(preload);
-      var clone=candidate.cloneNode(true);
-      clone.id=image.id;
-      clone.hidden=false;
-      image.replaceWith(clone);
-      image=clone;
-      function playNext(){
-        if(root.hasAttribute("data-room-ready"))return;
-        var next=(current+1)%images.length;
-        var candidate=images[next].image;
-        var probe=new Image();
-        probe.onload=function(){
-          if(root.hasAttribute("data-room-ready"))return;
-          var nextImage=candidate.cloneNode(true);
-          nextImage.id="roomBootGif";
-          nextImage.hidden=false;
-          image.replaceWith(nextImage);
-          image=nextImage;
-          current=next;
-          root.dataset.roomBootGif=images[current].source;
-          window.setTimeout(playNext,1900);
-        };
-        probe.onerror=function(){window.setTimeout(playNext,1900);};
-        probe.src=candidate.src;
-      }
-      window.setTimeout(playNext,1900);
-    })();
-  </script>
   <a class="skip-link" href="#shellSide">跳到主要内容</a>
   <!-- 外壳栅格。小屋在 .stage-region 里，是 #main 的兄弟而不是它的内容——
        首页内的面板切换（点家具、看家具目录）因此不会重挂 3D 场景。

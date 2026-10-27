@@ -193,6 +193,18 @@ class RoleProfileMigrationAPITests(unittest.IsolatedAsyncioTestCase):
     def write_v1_config(self):
         self.v1_config_path.write_text(json.dumps(self.v1_config, ensure_ascii=False), encoding="utf-8")
 
+    def write_persona_profile(self, persona_id, settings):
+        """Write one V1 secondary profile into both possible source roots."""
+        roots = (self.data_root, self.data_root.parent / "astrbot_plugin_private_companion")
+        for root in roots:
+            (root / "persona_profiles").mkdir(parents=True, exist_ok=True)
+            marker = root / "companions.json"
+            if not marker.exists():
+                marker.write_text("{}\n", encoding="utf-8")
+            (root / "persona_profiles" / f"{persona_id}.json").write_text(
+                json.dumps({"persona_settings": settings}, ensure_ascii=False),
+                encoding="utf-8", newline="\n")
+
     async def initialize(self):
         result = await self.controller.initialize_profile()
         self.assertTrue(result.is_success, result.failure)
@@ -211,8 +223,8 @@ class RoleProfileMigrationAPITests(unittest.IsolatedAsyncioTestCase):
                    NS(username=username, query={}, body=reader)):
             return await self.routes[PREFIX + route]()
 
-    async def migration_plan(self):
-        return await self.post_route("/profile-migration-plan", {"persona_id": "original"})
+    async def migration_plan(self, persona_id="original"):
+        return await self.post_route("/profile-migration-plan", {"persona_id": persona_id})
 
     async def test_plan_and_apply_use_the_configuration_service_without_model_calls(self):
         await self.initialize()
@@ -353,6 +365,139 @@ class RoleProfileMigrationAPITests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "ok", result)
         self.assertEqual(result["data"]["source"]["kind"], "astrbot_persona")
+
+    async def test_multi_persona_single_entry_is_supported(self):
+        self.v1_config = {
+            "basic_config": {"enable_multi_persona_mode": True,
+                             "multi_persona_ids": ["original"],
+                             "plugin_specific_persona_id": "original"},
+            "life_schedule_config": {"schedule_persona_prompt": self.V1_ROLE_PROFILE},
+            "message_debounce_config": {"private_image_self_recognition_hint": "角色图像线索"},
+        }
+        self.write_v1_config()
+        await self.initialize()
+
+        result = await self.migration_plan()
+
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["data"]["source"]["kind"], "v1_world_knowledge")
+        self.assertEqual(result["data"]["changes"]["name"], "澄溪")
+
+    async def test_multi_persona_reads_the_selected_secondary_profile(self):
+        self.v1_config = {
+            "basic_config": {"enable_multi_persona_mode": True,
+                             "multi_persona_ids": ["original", "default"],
+                             "plugin_specific_persona_id": "original"},
+            "life_schedule_config": {"schedule_persona_prompt": self.V1_ROLE_PROFILE},
+            "message_debounce_config": {"private_image_self_recognition_hint": "角色图像线索"},
+        }
+        self.write_v1_config()
+        self.native.persona_manager.personas_v3.append({"name": "default", "prompt": "默认人格"})
+        self.native.persona_manager.personas_v3.append({"name": "unknown", "prompt": "未知人格"})
+        self.write_persona_profile("default", {
+            "schedule_persona_prompt": "姓名：默认角色\n性别：女\n性格描述：温和。",
+            "schedule_worldview_prompt": "所处世界：默认世界。",
+        })
+        await self.initialize()
+
+        plan = (await self.migration_plan("default"))["data"]
+        self.assertEqual(plan["source"]["persona_id"], "default")
+        self.assertEqual(plan["changes"]["name"], "默认角色")
+        self.assertEqual(plan["changes"]["world_name"], "默认世界。")
+        self.assertEqual(plan["changes"]["image_identity_hint"], "角色图像线索")
+
+        primary = (await self.migration_plan("original"))["data"]
+        self.assertEqual(primary["changes"]["name"], "澄溪")
+
+        unknown = await self.migration_plan("unknown")
+        self.assertEqual(unknown["data"]["code"], "role_profile_migration_source_persona_mismatch")
+
+    async def test_multi_persona_without_secondary_profile_inherits_primary(self):
+        self.v1_config = {
+            "basic_config": {"enable_multi_persona_mode": True,
+                             "multi_persona_ids": ["original", "default"],
+                             "plugin_specific_persona_id": "original"},
+            "life_schedule_config": {"schedule_persona_prompt": self.V1_ROLE_PROFILE},
+        }
+        self.write_v1_config()
+        self.native.persona_manager.personas_v3.append({"name": "default", "prompt": "默认人格"})
+        await self.initialize()
+
+        result = await self.migration_plan("default")
+
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["data"]["changes"]["name"], "澄溪")
+
+    async def test_multi_persona_ambiguous_secondary_profile_is_rejected(self):
+        self.v1_config = {
+            "basic_config": {"enable_multi_persona_mode": True,
+                             "multi_persona_ids": ["original", "default"],
+                             "plugin_specific_persona_id": "original"},
+            "life_schedule_config": {"schedule_persona_prompt": self.V1_ROLE_PROFILE},
+        }
+        self.write_v1_config()
+        self.native.persona_manager.personas_v3.append({"name": "default", "prompt": "默认人格"})
+        self.write_persona_profile("default", {"schedule_persona_prompt": "姓名：默认角色"})
+        for root in (self.data_root, self.data_root.parent / "astrbot_plugin_private_companion"):
+            (root / "persona_profiles" / "default.db").write_bytes(b"ambiguous")
+        await self.initialize()
+
+        result = await self.migration_plan("default")
+        self.assertEqual(result["data"]["code"], "role_profile_migration_source_invalid")
+
+    async def test_multi_persona_unreadable_secondary_profile_is_rejected(self):
+        self.v1_config = {
+            "basic_config": {"enable_multi_persona_mode": True,
+                             "multi_persona_ids": ["original", "default"],
+                             "plugin_specific_persona_id": "original"},
+            "life_schedule_config": {"schedule_persona_prompt": self.V1_ROLE_PROFILE},
+        }
+        self.write_v1_config()
+        self.native.persona_manager.personas_v3.append({"name": "default", "prompt": "默认人格"})
+        self.write_persona_profile("default", {"schedule_persona_prompt": "姓名：默认角色"})
+        for root in (self.data_root, self.data_root.parent / "astrbot_plugin_private_companion"):
+            path = root / "persona_profiles" / "default.json"
+            path.unlink()
+            path.mkdir(parents=True, exist_ok=True)
+        await self.initialize()
+
+        result = await self.migration_plan("default")
+        self.assertEqual(result["data"].get("code"), "role_profile_migration_source_invalid", result)
+
+    async def test_multi_persona_symlinked_secondary_profile_is_rejected(self):
+        self.v1_config = {
+            "basic_config": {"enable_multi_persona_mode": True,
+                             "multi_persona_ids": ["original", "default"],
+                             "plugin_specific_persona_id": "original"},
+            "life_schedule_config": {"schedule_persona_prompt": self.V1_ROLE_PROFILE},
+        }
+        self.write_v1_config()
+        self.native.persona_manager.personas_v3.append({"name": "default", "prompt": "默认人格"})
+        self.write_persona_profile("default", {"schedule_persona_prompt": "姓名：默认角色"})
+        await self.initialize()
+
+        with patch.object(Path, "is_symlink", return_value=True):
+            result = await self.migration_plan("default")
+        self.assertEqual(result["data"].get("code"), "role_profile_migration_source_invalid", result)
+
+    async def test_multi_persona_empty_secondary_fields_inherit_primary(self):
+        self.v1_config = {
+            "basic_config": {"enable_multi_persona_mode": True,
+                             "multi_persona_ids": ["original", "default"],
+                             "plugin_specific_persona_id": "original"},
+            "life_schedule_config": {"schedule_persona_prompt": self.V1_ROLE_PROFILE},
+        }
+        self.write_v1_config()
+        self.native.persona_manager.personas_v3.append({"name": "default", "prompt": "默认人格"})
+        self.write_persona_profile("default", {
+            "schedule_persona_prompt": "",
+            "schedule_worldview_prompt": "",
+        })
+        await self.initialize()
+
+        result = await self.migration_plan("default")
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["data"]["changes"]["name"], "澄溪")
 
     async def test_migration_routes_require_dashboard_identity(self):
         await self.initialize()

@@ -12,9 +12,23 @@ from unittest.mock import AsyncMock, patch
 
 from tests import test_astrbot_staging_host as support
 from tests.multi_host_support import MultiFixture
-from astrbot_host.model_api import PREFIX
+from astrbot_host.model_api import PREFIX, _probe_error_summary
 from astrbot.api.web import PluginMultiDict, PluginRequest, bind_request_context
 from starlette.requests import Request
+
+
+class ProbeLogTests(unittest.TestCase):
+    def test_probe_failure_summary_is_bounded_and_redacted(self):
+        summary = _probe_error_summary(RuntimeError(
+            "upstream https://provider.invalid/v1?api_key=secret-value "
+            "api_key=another-secret Bearer token-value"))
+        self.assertLessEqual(len(summary), 320)
+        self.assertNotIn("provider.invalid", summary)
+        self.assertNotIn("secret-value", summary)
+        self.assertNotIn("another-secret", summary)
+        self.assertNotIn("token-value", summary)
+        self.assertIn("[URL]", summary)
+        self.assertIn("[REDACTED]", summary)
 
 
 class FakeProviderManager:

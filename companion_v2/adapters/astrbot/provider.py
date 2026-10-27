@@ -300,8 +300,10 @@ class AstrBotTextProvider:
         native.client = self.client.with_options(max_retries=0)
         if native.client.max_retries != 0:
             raise ValueError("native probe retries could not be disabled")
+        # AstrBot 的 `_query` 固定以 stream=False 调用原生 client；payload 里
+        # 再带 stream 会触发 `multiple values for keyword argument 'stream'`。
         payload = {"model": self.model, "messages": [{"role": "user", "content": "Reply OK."}],
-                   self.output_parameter: 8, "stream": False}
+                   self.output_parameter: 8}
         result = await native._query(payload, None, request_max_retries=1)
         self._current()
         if result is None:

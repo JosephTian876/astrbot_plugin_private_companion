@@ -21,6 +21,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from astrbot_host.persona_workshop_api import (COMMANDS, PREFIX, PERSONA_TRYOUT_SCENARIOS,
+    PersonaWorkshopWebAPI, _session_provider_id,
     build_persona_standardization_prompt, parse_persona_standardization_draft)
 from companion_v2.adapters.astrbot.native import persona_instruction
 from companion_v2.knowledge.catalog import EntryDocument, KnowledgeCatalog, SourceBinding
@@ -72,6 +73,37 @@ class RecordingPersonaManager:
         if name in self.READ or name == "personas_v3":
             return getattr(self._manager, name)
         raise AssertionError(f"the persona workshop must not touch persona_manager.{name}")
+
+
+class SessionProviderTests(unittest.TestCase):
+    def test_multi_host_uses_common_provider_and_single_host_falls_back_to_profile(self):
+        multi = NS(settings=NS(common=NS(provider_id="multi-provider")), profile=NS(provider_id="single-provider"))
+        self.assertEqual(_session_provider_id(multi), "multi-provider")
+        single = NS(settings=NS(common=NS(provider_id="")), profile=NS(provider_id="single-provider"))
+        self.assertEqual(_session_provider_id(single), "single-provider")
+        empty = NS(settings=NS(common=NS(provider_id=" ")), profile=NS(provider_id=""))
+        self.assertEqual(_session_provider_id(empty), "")
+
+    def test_profile_workshop_accepts_matching_multi_host_provider(self):
+        provider = NS(_current=lambda: None, text_chat=lambda **_: None)
+        model = NS(native=provider, provider_id="multi-provider", _current=lambda: None)
+        session = NS(model=model, application=object(),
+                     settings=NS(common=NS(provider_id="multi-provider")), profile=NS(provider_id="old"))
+        owner = NS(session=session, last_session=None)
+        controller = NS(controller=owner)
+        selected, application = PersonaWorkshopWebAPI._text_provider(controller)
+        self.assertIs(selected, provider)
+        self.assertIs(application, session.application)
+
+    def test_profile_workshop_rejects_mismatched_provider(self):
+        provider = NS(_current=lambda: None, text_chat=lambda **_: None)
+        model = NS(native=provider, provider_id="other-provider")
+        session = NS(model=model, application=object(),
+                     settings=NS(common=NS(provider_id="multi-provider")))
+        controller = NS(controller=NS(session=session, last_session=None))
+        with self.assertRaises(Exception) as raised:
+            PersonaWorkshopWebAPI._text_provider(controller)
+        self.assertEqual(raised.exception.code, "role_profile_model_unavailable")
 
 
 class PersonaWorkshopFixture(unittest.IsolatedAsyncioTestCase):

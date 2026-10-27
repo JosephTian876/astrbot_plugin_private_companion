@@ -13,6 +13,7 @@ from companion_v2.legacy.migration import LegacyMigration
 from companion_v2.legacy.private_contacts import private_contacts
 from companion_v2.legacy.relationship_profiles import relationship_profiles
 from companion_v2.relationships.profile import (
+    FIELD_LIMITS,
     GROUP,
     RelationshipProfileConfigurationOwner,
     configuration_fields,
@@ -22,6 +23,7 @@ from tests.multi_host_support import MultiFixture
 
 
 PROFILE_FIELDS = ("default_nickname", "role_relation", "extra")
+ALL_PROFILE_FIELDS = tuple(FIELD_LIMITS)
 
 
 def old_user(participant="200", **changes):
@@ -120,10 +122,22 @@ class RelationshipProfileMigrationTests(MultiFixture, unittest.IsolatedAsyncioTe
             json.dumps({"users": users}, ensure_ascii=False), encoding="utf-8", newline="\n")
         return LegacyMigration(v1_root=root), root
 
-    def profile_values(self, context):
+    def host_configuration(self, prompt, user_id="200"):
+        temporary = TemporaryDirectory(prefix="companion-v2-host-config-")
+        self.addCleanup(temporary.cleanup)
+        host = Path(temporary.name)
+        (host / "config").mkdir()
+        (host / "plugin_data" / "astrbot_plugin_private_companion").mkdir(parents=True)
+        (host / "config" / "astrbot_plugin_private_companion_config.json").write_text(
+            json.dumps({"basic_config": {"target_user_ids": [user_id]},
+                        "life_schedule_config": {"roleplay_user_profile_prompt": prompt}},
+                       ensure_ascii=False), encoding="utf-8", newline="\n")
+        return host / "plugin_data" / "astrbot_plugin_private_companion"
+
+    def profile_values(self, context, fields=PROFILE_FIELDS):
         owner = RelationshipProfileConfigurationOwner(self.controller.runtime)
         snapshot = owner.read(target_for(context), configuration_fields())
-        return {name: snapshot.fields[f"{GROUP}.{name}"].value for name in PROFILE_FIELDS}
+        return {name: snapshot.fields[f"{GROUP}.{name}"].value for name in fields}
 
     def stored_values(self):
         return [dict(row) for row in self.controller.runtime.read_all(
@@ -188,6 +202,29 @@ class RelationshipProfileMigrationTests(MultiFixture, unittest.IsolatedAsyncioTe
         self.assertEqual(self.profile_values(context),
                          {"default_nickname": "小舟", "role_relation": "亲近",
                           "extra": "喜欢一起看晚霞"})
+
+    async def test_profile_prompt_seed_imports_all_profile_fields(self):
+        app = await self.start_host()
+        session = NS(profile=NS(target=self.controller.session.authority.context("first", "role-a")),
+                     application=app)
+        context = session.profile.target
+        api = self.api()
+        api.controller.default_data_root = str(self.host_configuration(
+            "对用户的称呼：小舟\n用户性别：男\n用户生日：2002-10-24\n用户职业：开发者\n"
+            "与角色的相处方式：喜欢一起看晚霞，偶尔拌嘴。\n其他补充信息：喜欢一起看晚霞"))
+        migration, root = self.migration({"200": old_user()})
+
+        preview = api._data_plan(migration, root, session).unwrap()
+        changes = preview["relationship_profiles"]["samples"][0]["changes"]
+        for field in ("user_gender", "user_birthday", "user_occupation", "interaction"):
+            self.assertIn(field, changes)
+
+        applied = api._data_apply_sync(migration, root, session,
+            plan_token=preview["plan_token"], **self.apply_kwargs()).unwrap()
+        self.assertEqual(applied["relationship_profiles"]["imported"], 1)
+        values = self.profile_values(context, ALL_PROFILE_FIELDS)
+        self.assertEqual(values["user_gender"], "男")
+        self.assertEqual(values["interaction"], "喜欢一起看晚霞，偶尔拌嘴。")
 
     async def test_non_empty_v2_profile_is_unchanged(self):
         app = await self.start_host()

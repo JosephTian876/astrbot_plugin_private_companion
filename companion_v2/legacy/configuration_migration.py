@@ -1094,6 +1094,11 @@ def convert_configuration(config, *, registry, rules=None, window_kind=None) -> 
         present, raw = _source_value(config, source)
         if not present:
             continue
+        if (rule["target"].startswith("model.") and rule["target"].endswith(".provider")
+                and (raw is None or (isinstance(raw, str) and not raw.strip()))):
+            # 旧版空 provider 表示跟随默认；写成显式空值会覆盖任务档默认的
+            # 主 provider，导致调路由时拿不到可用适配器。
+            continue
         if _source_precedence_conflict(config, source):
             differences.append(ConfigurationDifference(
                 rule["target"], "group_precedence",

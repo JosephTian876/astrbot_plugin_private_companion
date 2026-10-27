@@ -66,7 +66,8 @@ class ReactionLibrary:
         manual_fields = sorted(k for k in fields if payload[k].strip()) \
             if collection_source in ("manual", "legacy_migration") else []
         payload.update(descriptor=asdict(image.descriptor),
-                       analysis="auto_reviewed" if auto_reviewed else "manual" if payload["description"] else "pending",
+                       analysis="auto_reviewed" if auto_reviewed else "legacy_imported"
+                       if collection_source == "legacy_migration" else "manual" if payload["description"] else "pending",
                        collection_source=collection_source, manual_fields=manual_fields)
         if collection_source == "legacy_migration":
             payload["legacy_source_id"] = str(metadata.get("legacy_source_id") or "")[:100]

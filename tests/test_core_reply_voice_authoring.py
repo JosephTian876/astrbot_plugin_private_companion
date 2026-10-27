@@ -61,7 +61,8 @@ class CoreVoiceAuthoringTests(unittest.IsolatedAsyncioTestCase):
                         segmentation=None, presentation=None):
         event = FakeEvent()
         event.get_platform_name = lambda: "aiocqhttp"
-        policy = policy or VoiceReplyPolicy(generation_mode="model_tag", language="ja", foreign_text_mode="translation")
+        policy = policy or VoiceReplyPolicy(generation_mode="model_tag", segment_mode="each",
+                                            language="ja", foreign_text_mode="translation")
         prepared = {"context": object(), "event_id": "voice-turn", "event_ref": "voice-reference",
                     "channel": "private", "native_input": NS(text=prompt), "voice_reply_policy": policy,
                     "voice_provider_instruction": provider_instruction}

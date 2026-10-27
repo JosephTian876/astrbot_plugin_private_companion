@@ -126,7 +126,7 @@ class VoiceReplyPolicy:
     trigger_mode: str = "always"
     generation_mode: str = "plain"
     conversion_scope: str = "full"
-    segment_mode: str = "each"
+    segment_mode: str = "whole"
     delivery_mode: str = "voice_and_text"
     position: str = "after_media"
     language: str = "zh"
@@ -159,7 +159,7 @@ class VoiceReplyPolicy:
         choices = ((self.trigger_mode, {"always", "request", "adaptive"}),
                    (self.generation_mode, {"plain", "model_tag"}),
                    (self.conversion_scope, {"full", "partial"}),
-                   (self.segment_mode, {"each", "first", "last"}),
+                   (self.segment_mode, {"whole", "each", "first", "last"}),
                    (self.delivery_mode, {"voice_and_text", "voice_only"}),
                    (self.position, {"after_media", "after_text", "before_text"}),
                    (self.language, {"zh", "ja", "en"}),
@@ -328,7 +328,8 @@ def speech_decisions(text, parts, spans, policy, *, candidates=None):
         candidates = speech_candidates(text, parts, spans, policy)
     if len(candidates) != len(parts):
         raise ValueError("speech candidates must match their visible segments")
-    selected = {"each": range(len(parts)), "first": (0,), "last": (len(parts) - 1,)}[policy.segment_mode]
+    selected = {"whole": range(len(parts)), "each": range(len(parts)),
+                "first": (0,), "last": (len(parts) - 1,)}[policy.segment_mode]
     decisions = []
     for index, candidate in enumerate(candidates):
         if not parts[index].strip():

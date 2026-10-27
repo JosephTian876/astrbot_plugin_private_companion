@@ -18,6 +18,12 @@ REPORTED_USAGE = Amount(40, 90, input_tokens=30, cached_input_tokens=10, output_
 
 
 class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_probe_does_not_pass_stream_to_native_query(self):
+        await self.native_model.probe()
+        payload, _ = self.native.provider.client.state.calls[-1]
+        self.assertNotIn("stream", payload)
+        self.assertEqual(payload["max_tokens"], 8)
+
     async def test_state_and_planning_use_json_mode_and_end_with_their_task_contract(self):
         envelope = await self.envelope()
         for kind in ("role_state", "calendar_planning"):

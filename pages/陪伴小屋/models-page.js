@@ -1594,6 +1594,9 @@ window.CompanionModelsPage = (() => {
     const testBtn = t.closest("[data-img-test]"); if (testBtn) imageTest(s, testBtn.dataset.imgTest);
   }
   /* ---------- top-level render & routing ---------- */
+  function semanticBanner() {
+    return `<div class="model-note cfg"><span>向量嵌入、候选重排和视觉分析不在任务路由里，而在「学习与成长 → 语义目录」统一配置；列表为空时先在 AstrBot 模型服务中加载对应模型。</span><button type="button" class="button small" data-go="manage" data-manage="learning" data-manage-subtab="semantic">打开向量模型配置</button></div>`;
+  }
   function tabBar(s) { const tabs = [["fn", "功能模型", ICONS.fn, snapshot(s).length],
       ["voice", "语音模型", ICONS.voice, s.voice.data ? s.voice.data.providers.length : ""],
       ["image", "生图模型", ICONS.image, s.image.data ? s.image.data.actions.length : ""],
@@ -2049,7 +2052,7 @@ window.CompanionModelsPage = (() => {
       <div class="model-sec"><h4>作为备用 · ${asFb.length} 项</h4>${asFb.map(t => `<div class="li">${esc(taskName(t.kind).label)}<span>${esc(taskName(t.kind).description)}</span></div>`).join("") || '<span class="model-mono">无</span>'}</div>
       <div class="model-sec"><button type="button" class="button primary" style="width:100%" data-drawer-goto="${esc(id)}">在精确配置中调整</button></div></aside>`; }
   function render() { if (!root || !state) return; const s = state;
-    root.innerHTML = `<div class="model-workspace">${tabBar(s)}${pane(s)}${drawer(s)}</div>`;
+    root.innerHTML = `<div class="model-workspace">${s.tab === "fn" ? semanticBanner() : ""}${tabBar(s)}${pane(s)}${drawer(s)}</div>`;
     window.lucide?.createIcons?.({attrs: {"aria-hidden": "true"}}); }
   function input(event) { const s = state; if (!s || !root?.isConnected) return;
     if (s.tab === "voice") { voiceInput(s, event); return; }

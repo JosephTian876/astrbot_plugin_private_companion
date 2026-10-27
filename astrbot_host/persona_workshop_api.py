@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 from astrbot.api.web import request
 from companion_v2.execution.models import TaskError, digest, require
@@ -28,6 +29,7 @@ from companion_v2.knowledge.catalog import KnowledgeCatalog
 from companion_v2.knowledge.configuration import read_settings as read_knowledge_settings
 from companion_v2.knowledge.retrieval import KnowledgeCandidate, KnowledgeRetriever, query_for_context
 from companion_v2.persona_craft import PersonaSnapshot, PersonaWorkshop
+from companion_v2.legacy.data_migration import persona_profile_settings
 from companion_v2.role_profile.configuration import (FIELD_LIMITS as ROLE_PROFILE_FIELD_LIMITS,
     GROUP as ROLE_PROFILE_GROUP, RoleProfileConfigurationOwner,
     configuration_fields as role_profile_configuration_fields,
@@ -46,8 +48,21 @@ from companion_v2.relationships.profile_drafts import (build_relationship_profil
     parse_relationship_profile_draft)
 
 from .management_identity import dashboard_operator
-from .legacy_config import read_v1_host_configuration, v1_setting
+from .legacy_config import find_v1_data_root, read_v1_host_configuration, v1_setting
 from .persona_catalog import persona_choices
+
+logger = logging.getLogger(__name__)
+
+
+def _session_provider_id(session):
+    """Read the selected provider from either the single-host or multi-host session."""
+    common = getattr(getattr(session, "settings", None), "common", None)
+    configured = getattr(common, "provider_id", None)
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    profile = getattr(session, "profile", None)
+    configured = getattr(profile, "provider_id", None)
+    return configured.strip() if isinstance(configured, str) and configured.strip() else ""
 
 
 PREFIX = "/astrbot_plugin_private_companion/persona"
@@ -251,7 +266,7 @@ class PersonaWorkshopWebAPI:
         model = getattr(model_session, "model", None)
         provider = getattr(model, "native", None)
         provider_id = getattr(model, "provider_id", "")
-        if (model is None or provider is None or provider_id != model_session.profile.provider_id
+        if (model is None or provider is None or provider_id != _session_provider_id(model_session)
                 or not callable(getattr(provider, "text_chat", None))):
             raise TaskError("role_profile_model_unavailable", "the selected model cannot create persona drafts")
         model._current()
@@ -379,7 +394,7 @@ class PersonaWorkshopWebAPI:
                 model = getattr(model_session, "model", None)
                 provider = getattr(model, "native", None)
                 provider_id = getattr(model, "provider_id", "")
-                if (model is None or provider is None or provider_id != model_session.profile.provider_id
+                if (model is None or provider is None or provider_id != _session_provider_id(model_session)
                         or not callable(getattr(provider, "text_chat", None))):
                     raise TaskError("role_profile_model_unavailable", "the selected model cannot create a profile draft")
                 model._current()
@@ -466,6 +481,7 @@ class PersonaWorkshopWebAPI:
         except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
             return outcome_response(Outcome.failed("role_profile_draft_invalid", "the profile draft response was invalid"))
         except Exception:
+            logger.warning("[CompanionV2] 角色档案草稿生成失败", exc_info=True)
             return outcome_response(Outcome.failed("role_profile_draft_failed", "the profile could not be drafted; check the selected model and try again"))
 
     @staticmethod
@@ -508,23 +524,53 @@ class PersonaWorkshopWebAPI:
             image_hint = v1_setting(legacy_config, "message_debounce_config.private_image_self_recognition_hint", "")
             # 旧版把世界蓝图单独存一份；只读角色那一段会让世界设定整块丢失。
             worldview_text = v1_setting(legacy_config, "life_schedule_config.schedule_worldview_prompt", "")
-            if role_prompt or image_hint or worldview_text:
-                if v1_setting(legacy_config, "basic_config.enable_multi_persona_mode"):
-                    raise TaskError("role_profile_migration_source_ambiguous",
-                                    "select the V1 persona-specific role profile before importing")
-                source_persona_id = v1_setting(legacy_config, "basic_config.plugin_specific_persona_id")
+            multi_enabled = bool(v1_setting(legacy_config, "basic_config.enable_multi_persona_mode", False))
+            primary_persona = v1_setting(legacy_config, "basic_config.plugin_specific_persona_id", "")
+            multi_ids = v1_setting(legacy_config, "basic_config.multi_persona_ids", [])
+            if not isinstance(multi_ids, (list, tuple, set)):
+                multi_ids = ()
+            allowed_personas = {str(item).strip() for item in multi_ids if str(item).strip()}
+            if type(primary_persona) is str and primary_persona.strip():
+                allowed_personas.add(primary_persona.strip())
+            if multi_enabled:
+                # 多人物模式下，每个已启用人物都可以作为来源；角色档案按
+                # 该人格的 persona_settings 读取，没有独立档案时继承主配置。
+                if persona_id not in allowed_personas:
+                    raise TaskError("role_profile_migration_source_persona_mismatch",
+                                    "the V1 role profile belongs to another persona")
+            else:
+                source_persona_id = primary_persona
                 if type(source_persona_id) is not str or not source_persona_id.strip():
                     raise TaskError("role_profile_migration_source_unbound",
                                     "the V1 role profile is not bound to a persona")
                 if source_persona_id != persona_id:
                     raise TaskError("role_profile_migration_source_persona_mismatch",
                                     "the V1 role profile belongs to another persona")
+            source_persona_id = persona_id
+            v1_root, _ = find_v1_data_root(self._v1_configuration_root())
+            payload, issue, source_path = persona_profile_settings(v1_root, legacy_config, persona_id)
+            if issue in ("persona_profile_ambiguous", "persona_profile_unreadable"):
+                raise TaskError("role_profile_migration_source_invalid",
+                                "the selected V1 persona profile could not be read safely")
+            settings = payload.get("persona_settings") if isinstance(payload, dict) else None
+            if isinstance(settings, dict):
+                profile_role = settings.get("schedule_persona_prompt")
+                profile_world = settings.get("schedule_worldview_prompt")
+                if isinstance(profile_role, str) and profile_role.strip():
+                    role_prompt = profile_role.strip()
+                if isinstance(profile_world, str) and profile_world.strip():
+                    worldview_text = profile_world.strip()
+            if role_prompt or image_hint or worldview_text:
                 try:
                     mapped = map_v1_world_knowledge_role_profile(
                         role_prompt, image_hint, worldview_text=worldview_text,
                         configuration_fingerprint=digest({
                             "file": config_fingerprint,
                             "persona_id": source_persona_id,
+                            "profile": source_path,
+                            "role_prompt": role_prompt,
+                            "worldview": worldview_text,
+                            "image_hint": image_hint,
                         }),
                     )
                 except RoleProfileMigrationError as error:
@@ -717,7 +763,7 @@ class PersonaWorkshopWebAPI:
                 model = getattr(model_session, "model", None)
                 provider = getattr(model, "native", None)
                 provider_id = getattr(model, "provider_id", "")
-                if (model is None or provider is None or provider_id != model_session.profile.provider_id
+                if (model is None or provider is None or provider_id != _session_provider_id(model_session)
                         or not callable(getattr(provider, "text_chat", None))):
                     raise TaskError("role_profile_model_unavailable", "the selected model cannot create a persona draft")
                 model._current()

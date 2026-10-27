@@ -553,6 +553,11 @@ class BehaviorConfigurationMigrationTests(unittest.TestCase):
         self.assertIn("自然接话", result.changes["proactive.contact.style_prompt"])
         self.assertNotIn("conflict", {item.kind for item in result.differences})
 
+    def test_empty_task_provider_stays_unset_for_the_task_default(self):
+        result = self.convert({"proactive_generation_config": {
+            "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID": ""}})
+        self.assertNotIn("model.proactive.judge.provider", result.changes)
+
     def test_disabled_review_does_not_override_the_active_persona_judge_or_its_model(self):
         result = self.convert({"proactive_generation_config": {
             "enable_llm_proactive_persona_judge": True, "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID": "judge"},

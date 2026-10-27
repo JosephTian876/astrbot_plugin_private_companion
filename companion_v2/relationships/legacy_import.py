@@ -39,7 +39,9 @@ MAPPED_FIELDS = {
     "role_relation": "role_relation",
     "extra": "extra",
 }
-PROFILE_FIELDS = tuple(MAPPED_FIELDS.values())
+# 旧配置的「用户档案」提示词还会带来性别、生日、职业和相处方式；必须按
+# 完整档案字段读取当前值，否则 mapped 出现 interaction 等键时会 KeyError。
+PROFILE_FIELDS = tuple(FIELD_LIMITS)
 
 
 def relationship_target(context, subject_id):

@@ -70,6 +70,30 @@ class CoreReplyVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([type(part) for part in event.sent[0].chain], [Plain, Record])
         self.assertEqual(event.sent[0].chain[1]._companion_v2_spoken_text, "你好")
 
+    async def test_whole_reply_mode_collects_all_segments_before_one_tts_render(self):
+        event = FakeEvent()
+        policy = VoiceReplyPolicy(segment_mode="whole", position="after_text")
+        prepared = {"context": object(), "event_id": "whole-1", "event_ref": "whole-ref",
+                    "voice_reply_policy": policy}
+        rendered = []
+
+        async def renderer(_, text, **__):
+            rendered.append(text)
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+
+        async def prepare(current, message, check, segment_index, segment_count):
+            return await prepare_core_reply_voice_message(
+                event, current, message, renderer=renderer, delivery=None, authorize=check,
+                segment_index=segment_index, segment_count=segment_count)
+
+        prepare_core_reply_event(event, prepared, authorize=_allow, prepare_send=prepare)
+        first = await prepare(prepared, MessageChain(chain=[Plain("第一段。")]), _allow, 0, 2)
+        second = await prepare(prepared, MessageChain(chain=[Plain("第二段。")]), _allow, 1, 2)
+
+        self.assertEqual(rendered, ["第一段。\n第二段。"])
+        self.assertEqual([type(part) for part in first.chain], [Plain])
+        self.assertEqual([type(part) for part in second.chain], [Plain, Record])
+
     async def test_model_tags_speak_only_tagged_text_and_voice_only_keeps_translation(self):
         event = FakeEvent()
         policy = VoiceReplyPolicy(generation_mode="model_tag", language="en",
@@ -172,7 +196,7 @@ class CoreReplyVoiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_captured_performance_is_preserved_after_visible_reply_is_segmented(self):
         event = FakeEvent()
-        policy = VoiceReplyPolicy(generation_mode="model_tag")
+        policy = VoiceReplyPolicy(generation_mode="model_tag", segment_mode="each")
         prepared = {"voice_reply_policy": policy, "context": object(), "event_id": "drama"}
         event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": prepared})
         response = LLMResponse(role="assistant",

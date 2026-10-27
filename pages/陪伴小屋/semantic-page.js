@@ -42,7 +42,7 @@ window.CompanionSemanticPage = (() => {
     ["reactions_collection_group_enabled","从群聊自动收录"],
     ["slang_enabled","群聊黑话目录"],["slang_learning","黑话自动学习"],
     ["slang_web_search_enabled","黑话联网参考"],["vision_review","识图复核"]];
-  const providerFields = [["embedding_provider","嵌入模型","embedding"],["rerank_provider","候选重排","rerank"],["analysis_provider","视觉与词义分析","analysis"]];
+  const providerFields = [["embedding_provider","向量模型（嵌入）","embedding"],["rerank_provider","候选重排","rerank"],["analysis_provider","视觉与词义分析","analysis"]];
   const semanticNumberFields = [["timeout_seconds","模型超时 / 秒",1,30],["batch_size","索引批次",1,64],
     ["learning_interval_seconds","群词义整理间隔 / 分钟",1,1440],
     ["slang_web_search_candidates","联网检索词数 / 个",1,12],["slang_web_search_results","每词参考条数",1,5]];
@@ -118,7 +118,8 @@ window.CompanionSemanticPage = (() => {
       if(result)html+='<div class="semantic-results"><strong>检索结果</strong><span>'+(result.embedded||0)+'/'+(result.eligible||0)+' 已建索引</span>'+(result.items||[]).map((item,index)=>'<button data-semantic-open="'+escape(item.id)+'" data-semantic-kind="'+escape(item.kind||kind)+'">'+escape(item.payload.name||item.payload.term||'未命名条目 '+(index+1))+'</button>').join('')+'</div>';
       const rows=(state.items||[]).map(item=>{
         const payload=item.payload||{},itemKind=item.kind||kind,slang=itemKind==="slang";
-        const source={private_capture:"私聊归纳",group_capture:"群聊归纳"}[payload.collection_source]||"手工收录";
+        const migrated=payload.collection_source==="legacy_migration"||Boolean(payload.legacy_source_id||payload.legacy_filename);
+        const source={private_capture:"私聊归纳",group_capture:"群聊归纳",legacy_migration:"V1 表情迁移"}[payload.collection_source]||(migrated?"V1 表情迁移":"手工收录");
         const title=payload.name||payload.term||"未命名";
         const detail=payload.meaning||payload.description||payload.usage||"";
         const sourceUrl=imageSource(item.thumbnail_url||item.image_url||payload.image_url||payload.url);
@@ -142,7 +143,8 @@ window.CompanionSemanticPage = (() => {
     const coreNumbers=semanticNumberFields.filter(([id])=>["timeout_seconds","batch_size"].includes(id));
     const memoryNumbers=semanticNumberFields.filter(([id])=>!coreNumbers.some(([field])=>field===id));
     const flagMarkup=items=>'<div class="semantic-flags">'+items.map(([id,label])=>toggle(id,label,current(id))).join('')+'</div>';
-    const providerMarkup='<div class="semantic-providers">'+providerFields.map(([id,label,type])=>'<label>'+label+'<select name="'+id+'">'+options(state.providers?.[type],current(id))+'</select></label>').join('')+'</div>';
+    const providerMarkup='<div class="semantic-providers">'+providerFields.map(([id,label,type])=>'<label>'+label+'<select name="'+id+'">'+options(state.providers?.[type],current(id))+'</select></label>').join('')+'</div>'
+      +(!(state.providers?.embedding||[]).length?'<p class="semantic-meta">没有读到向量模型。请先在 AstrBot 的模型服务页添加 embedding 类型的 Provider，再回到这里选择。</p>':'');
     const numberMarkup=items=>'<div class="semantic-providers">'+items.map(([id,label,min,max,step])=>{
       const raw=current(id),value=id==="learning_interval_seconds"&&Number.isFinite(Number(raw))?Math.round(Number(raw)/60):raw;
       return '<label>'+label+'<input name="'+id+'" type="number" min="'+min+'" max="'+max+'" step="'+(step||1)+'" value="'+escape(value??'')+'"></label>';
@@ -193,6 +195,7 @@ window.CompanionSemanticPage = (() => {
       html+='<label>'+label+'<input name="'+id+'" type="number" min="'+min+'" max="'+max+'" step="'+(step||1)+'" value="'+value+'"></label>';});
     currentViewSelects.forEach(([id,label,choices])=>html+='<label>'+label+'<select name="'+id+'">'+choices.map(([value,text])=>'<option value="'+escape(value)+'" '+(shown[id]===value?'selected':'')+'>'+escape(text)+'</option>').join('')+'</select></label>');
     if(currentViewProviders.length||currentViewNumbers.length||currentViewSelects.length)html+='</div>';
+    if(currentViewProviders.length&&!(state.providers?.embedding||[]).length)html+='<p class="semantic-meta">没有读到向量模型。请先在 AstrBot 的模型服务页添加 embedding 类型的 Provider，再回到这里选择。</p>';
     html+='<div class="semantic-actions"><button class="button primary" type="submit" '+(busy?"disabled":"")+'>'+(draft?'保存草稿':'保存配置')+'</button>';
     /* 冲突时更要能放弃：否则用户只剩「按新版本再存一次」一条路。 */
     if(draft)html+='<button class="button" type="button" data-semantic="discard">放弃草稿</button>';
@@ -218,8 +221,10 @@ window.CompanionSemanticPage = (() => {
       html+=`<div id="semantic-panel" role="tabpanel"${kinds.length>1?` aria-labelledby="semantic-tab-${kind}"`:""}>`;
       if(kind==="reaction")html+='<label class="semantic-import button"><span>导入素材</span><input id="semanticFile" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" '+(busy?"disabled":"")+'></label>';
       if(result)html+='<div class="semantic-results"><strong>检索结果 · '+(result.mode==="hybrid"?"语义与关键词":"关键词")+'</strong><span>'+(result.embedded||0)+'/'+(result.eligible||0)+' 已建索引'+(result.fallback_reason?" · 模型暂不可用":"")+'</span>'+(result.items||[]).map((item,index)=>'<button data-semantic-open="'+escape(item.id)+'">'+escape(item.payload.name||item.payload.term||'未命名素材 '+(index+1))+' · '+Number(item.score).toFixed(2)+'</button>').join("")+'</div>';
-      html+='<div class="semantic-list">'+(state.items||[]).map(item=>{const payload=item.payload||{};const source={private_capture:"私聊自动收录",group_capture:"群聊自动收录"}[payload.collection_source]||"手动收录";
-        const analysis={auto_reviewed:"已通过视觉审核",analyzed:"已识别",pending:"待识别",manual:"手工标注"}[payload.analysis]||"待标注";
+      html+='<div class="semantic-list">'+(state.items||[]).map(item=>{const payload=item.payload||{};const migrated=payload.collection_source==="legacy_migration"||Boolean(payload.legacy_source_id||payload.legacy_filename);const source={private_capture:"私聊自动收录",group_capture:"群聊自动收录",legacy_migration:"V1 表情迁移"}[payload.collection_source]||(migrated?"V1 表情迁移":"手动收录");
+        const analysisCode=migrated&&(!payload.analysis||payload.analysis==="pending")
+          ?(payload.manual_fields?.length?"legacy_imported":"legacy_pending"):payload.analysis;
+        const analysis={auto_reviewed:"已通过视觉审核",analyzed:"已识别",legacy_imported:"V1 迁移保留标注",legacy_pending:"V1 迁移 · 待补全",pending:"待识别",manual:"手工标注"}[analysisCode]||"待标注";
         const collectionState=payload.collection_state==="awaiting_confirmation"?"待人工确认":"";
         const sourceUrl=imageSource(item.thumbnail_url||item.image_url||payload.image_url||payload.url);
         const media=sourceUrl?'<img src="'+escape(sourceUrl)+'" alt="" loading="lazy">':'<span class="semantic-row-placeholder" aria-hidden="true"><i data-lucide="image"></i></span>';

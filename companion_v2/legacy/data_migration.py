@@ -676,12 +676,17 @@ def _selected_profile(root: Path, persona_id: str, persona_sources, primary):
     if info["state"] != "ready":
         return None, "persona_profile_ambiguous", ""
     directory = root / "persona_profiles"
-    candidates = [directory / (child.name) for child in directory.iterdir()
-                  if child.suffix.lower() in (".json", ".db")
-                  and _persona_id_from_filename(child.name[:-len(child.suffix)]) == persona_id]
+    try:
+        candidates = [directory / (child.name) for child in directory.iterdir()
+                      if child.suffix.lower() in (".json", ".db")
+                      and _persona_id_from_filename(child.name[:-len(child.suffix)]) == persona_id]
+    except OSError:
+        return None, "persona_profile_unreadable", ""
     if len(candidates) != 1:
         return None, "persona_profile_ambiguous", ""
     path = candidates[0]
+    if path.is_symlink() or not path.is_file():
+        return None, "persona_profile_unreadable", ""
     if path.suffix.lower() == ".json":
         payload = _read_json(path, max_bytes=MAX_PROFILE_JSON_BYTES)
         return (payload, "", str(path.relative_to(root))) if isinstance(payload, dict) \
@@ -697,6 +702,31 @@ def _profile_data(payload):
     if isinstance(nested, dict) and not any(key in payload for key in ("bot_diaries", "daily_dream", "groups")):
         return nested
     return payload
+
+
+def persona_profile_settings(root, configuration, persona_id):
+    """Return the V1 profile payload and source for one persona.
+
+    A secondary persona without its own profile inherits the primary store,
+    matching V1's ``inherit_primary`` contract. Ambiguous or unreadable
+    secondary profiles are reported instead of silently falling back.
+    """
+    root = Path(root)
+    primary = primary_profile(root, configuration)
+    if primary.payload is None:
+        return None, primary.error, ""
+    if not persona_id:
+        return _profile_data(primary.payload), "", str(primary.selected_path(root))
+    try:
+        inventory, _ = _persona_sources(root, primary)
+        selected, issue, relative = _selected_profile(root, persona_id, inventory, primary)
+    except OSError:
+        return None, "persona_profile_unreadable", ""
+    if selected is None and issue in ("persona_profile_ambiguous", "persona_profile_unreadable"):
+        return None, issue, ""
+    if selected is None:
+        return _profile_data(primary.payload), "", str(primary.selected_path(root))
+    return _profile_data(selected), "", relative
 
 
 def _date_key(value):

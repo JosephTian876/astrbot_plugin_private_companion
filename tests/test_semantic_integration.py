@@ -239,6 +239,17 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(analyzed["payload"]["visible_text"], "旧文字")
         self.assertEqual(analyzed["payload"]["intents"], "旧用途")
 
+    async def test_legacy_reaction_import_keeps_migration_provenance(self):
+        host = await self.semantic_host(images=True)
+        owner = "legacy-reaction-owner"
+        item, created = self.semantic.reactions.import_image_with_status(owner, picture(), {
+            "name": "旧版挥手", "description": "V1 表情迁移",
+        }, collection_source="legacy_migration")
+        self.assertTrue(created)
+        self.assertEqual(item["payload"]["collection_source"], "legacy_migration")
+        self.assertEqual(item["payload"]["analysis"], "legacy_imported")
+        self.assertIn("name", item["payload"]["manual_fields"])
+
     async def test_approved_collection_can_wait_for_manual_confirmation(self):
         await self.semantic_host(images=True, automatic_reactions=False)
         settings = self.semantic.store.settings()

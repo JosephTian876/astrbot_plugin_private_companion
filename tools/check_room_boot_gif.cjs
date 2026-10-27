@@ -45,9 +45,15 @@ function createServer() {
 
 async function inspectBoot(page, url) {
   await page.goto(url, {waitUntil: "commit"});
+  /* Performance mode activates the inert stylesheet/script bundle after its
+     bridge check.  Wait for that gate before reading the boot frame; the GIF
+     can otherwise load a beat before entrance.css is present. */
+  await page.waitForFunction(() => document.documentElement.dataset.companionPerformanceReady === "");
   await page.waitForFunction(() => {
     const image = document.querySelector("#roomBootGif");
-    return image && !image.hidden && image.complete && image.naturalWidth === 300;
+    const boot = document.querySelector(".room-boot");
+    return image && boot && !image.hidden && image.complete && image.naturalWidth === 300
+      && getComputedStyle(boot).visibility === "visible";
   });
   return page.evaluate(() => {
     const root = document.documentElement;
@@ -90,7 +96,7 @@ async function inspectBoot(page, url) {
     const visible = await inspectBoot(page, url);
     assert.match(visible.source, /room-loading-(tea-coffee|mug)\.gif/);
     const expectedSource = new URL(visible.source, url).href;
-    assert.match(visible.preload, /room-loading-tea-coffee\.gif/);
+    assert.equal(visible.preload, expectedSource);
     assert.equal(visible.imageSrc, expectedSource);
     assert.equal(visible.ready, false);
     assert.equal(visible.visibility, "visible");
@@ -98,8 +104,9 @@ async function inspectBoot(page, url) {
     assert.equal(visible.hidden, false);
     assert.equal(visible.width, 300);
     assert.equal(visible.height, 300);
-    await page.waitForFunction(() => document.documentElement.dataset.roomBootGif.includes("room-loading-mug.gif"),
-      undefined, {timeout: 6000});
+    const initialSource = visible.source;
+    await page.waitForFunction((source) => document.documentElement.dataset.roomBootGif !== source,
+      initialSource, {timeout: 6000});
     assert(bootGifRequests.some(source => source.includes("room-loading-tea-coffee.gif")));
     assert(bootGifRequests.some(source => source.includes("room-loading-mug.gif")));
     assert.deepEqual(workspaceRequests, [], "workspace scripts are not fetched during cottage startup");
@@ -120,6 +127,7 @@ async function inspectBoot(page, url) {
       if (/room-loading-(tea-coffee|mug)\.gif/.test(request.url())) gifRequests.push(request.url());
     });
     await reduced.goto(url, {waitUntil: "commit"});
+    await reduced.waitForFunction(() => document.documentElement.dataset.companionPerformanceReady === "");
     await reduced.waitForSelector(".room-boot");
     await reduced.waitForTimeout(300);
     const reducedState = await reduced.evaluate(() => ({

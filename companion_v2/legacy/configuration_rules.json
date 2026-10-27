@@ -2899,7 +2899,7 @@
     "voice_reply.enabled": false,
     "voice_reply.trigger_mode": "always",
     "voice_reply.generation_mode": "plain",
-    "voice_reply.segment_mode": "each",
+    "voice_reply.segment_mode": "whole",
     "voice_reply.delivery_mode": "voice_and_text",
     "voice_reply.position": "after_media",
     "voice_reply.language": "zh",

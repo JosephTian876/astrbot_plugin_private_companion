@@ -42,6 +42,7 @@ from .storage_api import StorageWebAPI
 from .display_names import display_names
 from .identity_derivation import role_display_name
 from .role_paths import HOST_PREFIX as PREFIX, role_legacy_paths
+from .performance_mode import performance_enabled, performance_status
 
 
 INSTALLATION_CONFIGURATION_SECTIONS = ("proactive.contact", "reaction", "budget")
@@ -124,6 +125,21 @@ class MultiHostWebAPI:
         self.controller = controller
         self._registered_routes = []
 
+    def _register_routes(self, register, routes):
+        registered = getattr(self.controller.context, "registered_web_apis", None)
+        snapshot = list(registered) if isinstance(registered, list) else None
+        try:
+            for route, handler, methods, description in routes:
+                register(route, handler, methods, description)
+                self._registered_routes.append((route, handler))
+        except Exception:
+            if snapshot is not None:
+                registered[:] = snapshot
+                self._registered_routes.clear()
+            else:
+                self.unregister()
+            raise
+
     def target_inventory(self):
         settings = self.controller.settings
         if settings is None:
@@ -195,6 +211,15 @@ class MultiHostWebAPI:
         except TaskError as error:
             return outcome_response(Outcome.failed(error.code, str(error)))
 
+    async def api_performance(self):
+        try:
+            self._admin()
+            return {"status": "ok", "data": performance_status(
+                getattr(self.controller, "config", {}),
+                enabled=getattr(self.controller, "_performance_mode_enabled", None))}
+        except TaskError as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+
     def control(self, method, *, target=False):
         async def handle():
             try:
@@ -234,7 +259,16 @@ class MultiHostWebAPI:
         register = getattr(self.controller.context, "register_web_api", None)
         if not callable(register):
             raise TaskError("host_web_api_unavailable", "this host does not support plugin Web APIs")
-        routes = [(PREFIX + "/status", self.api_status, ["GET"], "Companion V2 multi-target status")] + PageWebAPI(self.controller).routes() + IntegrationWebAPI(self.controller).routes() + AcquaintanceWebAPI(self.controller).routes()
+        routes = [
+            (PREFIX + "/status", self.api_status, ["GET"], "Companion V2 multi-target status"),
+            (PREFIX + "/performance", self.api_performance, ["GET"], "Companion V2 page performance mode"),
+        ]
+        lite_mode = performance_enabled(getattr(self.controller, "config", {}))
+        self.controller._performance_mode_enabled = lite_mode
+        if lite_mode:
+            self._register_routes(register, routes)
+            return
+        routes += PageWebAPI(self.controller).routes() + IntegrationWebAPI(self.controller).routes() + AcquaintanceWebAPI(self.controller).routes()
         routes += SemanticWebAPI(self.controller).routes()
         routes += SetupWebAPI(self.controller).routes()
         routes += AccountSessionWebAPI(self.controller).routes()
@@ -318,16 +352,4 @@ class MultiHostWebAPI:
                 routes.extend((role["image_material_api"] + path.removeprefix(IMAGE_MATERIAL_PREFIX),
                                handler, methods, description)
                               for path, handler, methods, description in ImageMaterialsWebAPI(view).routes())
-        registered = getattr(self.controller.context, "registered_web_apis", None)
-        snapshot = list(registered) if isinstance(registered, list) else None
-        try:
-            for route, handler, methods, description in routes:
-                register(route, handler, methods, description)
-                self._registered_routes.append((route, handler))
-        except Exception:
-            if snapshot is not None:
-                registered[:] = snapshot
-                self._registered_routes.clear()
-            else:
-                self.unregister()
-            raise
+        self._register_routes(register, routes)
