@@ -183,17 +183,20 @@ class MultiTargetInstallApiTests(multi_support.MultiFixture, unittest.IsolatedAs
 
         calls = []
         applied = {"applied": True, "reason": "test-restore"}
+        state = {"state": "applied", "blocking": False, "startup_allowed": True,
+                 "code": None, "detail": None, "journals": [], "pending": None,
+                 "recovered_journals": []}
 
         def recorder(root, *, installation_id, backup_directory):
             # 记录当时运行实例还没有打开——那正是唯一能安全换文件的时刻。
             calls.append((root, installation_id, backup_directory, self.controller.runtime))
-            return dict(applied)
+            return dict(applied), dict(state)
 
-        with patch.object(multi_controller, "apply_staged_restore", recorder):
+        with patch.object(multi_controller, "guard_restore_startup", recorder):
             initialized = await self.controller.initialize_profile()
         self.assertTrue(initialized.is_success, initialized.failure)
 
-        self.assertEqual(len(calls), 1, "开库路径必须调用一次 apply_staged_restore")
+        self.assertEqual(len(calls), 1, "开库路径必须调用一次启动闸")
         root, installation_id, backup_directory, runtime_at_call = calls[0]
         self.assertEqual(Path(root), self.controller.profile_root / "runtime")
         self.assertEqual(installation_id, self.controller.settings.installation_id)
@@ -201,6 +204,47 @@ class MultiTargetInstallApiTests(multi_support.MultiFixture, unittest.IsolatedAs
         self.assertIsNone(runtime_at_call, "必须在开库之前应用，否则会留下孤儿连接")
         # 结果要留在运行实例上，「还原到底生效了没有」才有地方读。
         self.assertEqual(self.controller.last_restore, applied)
+        self.assertEqual(self.controller.restore_state, state)
+        self.assertFalse(self.controller.restore_blocked)
+
+    async def test_rollback_incomplete_blocks_initialize_profile_and_preserves_the_scene(self):
+        """A startup gate refusal must leave the journal and request untouched.
+
+        ``StorageRuntime.open`` creates a missing database. When the previous
+        restore could not be rolled back, opening would fork the installation and
+        hide the only copy of the old bytes; the controller has to fail instead.
+        """
+        runtime_root = self.controller.profile_root / "runtime"
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        database = runtime_root / "companion-v2.sqlite3"
+        database.mkdir()  # the journaled original cannot be moved back onto a directory
+        journal = runtime_root / ".restore-aaaaaaaa-12345678"
+        (journal / "rollback").mkdir(parents=True)
+        (journal / "rollback" / "companion-v2.sqlite3").write_bytes(b"original-bytes")
+        (journal / "journal.json").write_text(json.dumps({
+            "format": "companion-v2.restore-journal.v1", "phase": "prepared",
+            "snapshot_id": "a" * 32, "content_hash": "b" * 64,
+            "artifacts": [{"path": "companion-v2.sqlite3", "kind": "sqlite"}],
+            "roots": ["companion-v2.sqlite3"]}))
+        pending = runtime_root / "restore-pending.json"
+        pending.write_text(json.dumps({
+            "format": "companion-v2.restore-request.v1", "snapshot_id": "a" * 32,
+            "content_hash": "b" * 64}))
+
+        initialized = await self.controller.initialize_profile()
+
+        self.assertIsNotNone(initialized.failure, initialized)
+        self.assertEqual(initialized.failure.code, "backup_restore_rollback_incomplete")
+        self.assertIsNone(self.controller.runtime, "the controller opened a store anyway")
+        self.assertTrue(self.controller.restore_blocked)
+        self.assertEqual(self.controller.restore_state["state"], "blocked")
+        self.assertTrue(self.controller.restore_state["blocking"])
+        self.assertEqual(self.controller.last_failure["code"], "backup_restore_rollback_incomplete")
+        self.assertTrue(pending.is_file(), "the staged request was cleared")
+        self.assertTrue((journal / "journal.json").is_file(), "the journal was cleared")
+        self.assertEqual((journal / "rollback" / "companion-v2.sqlite3").read_bytes(),
+                         b"original-bytes")
+        self.assertFalse(database.is_file(), "an empty database was created next to the journal")
 
     async def test_legacy_routes_are_mounted_once_per_role(self):
         self.controller.register_routes()
