@@ -103,8 +103,6 @@ class RoleReader:
                 require(self.tasks.submit(TaskSpec(task_id, context, READ_KIND, digest(job),
                     activity.work.request_id, now, now + timedelta(seconds=180))))
                 result = await self.runner.run(context, task_id)
-                if result.is_success and result.unwrap().task.state in ("created", "retry_scheduled"):
-                    return Outcome.success(RunResult(require(self.tasks.discard_queued(task_id, reason="owner_unavailable"))))
                 return result
             finally:
                 self._pending.pop(task_id, None)

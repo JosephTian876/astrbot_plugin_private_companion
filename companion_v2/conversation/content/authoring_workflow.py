@@ -325,10 +325,8 @@ class ContentAuthoringWorkflow:
             if not execution.is_success:
                 raise TaskError(execution.failure.code, execution.failure.reason)
             task = execution.unwrap().task
-            if task is None or task.state in ("created", "retry_scheduled"):
-                if task is not None:
-                    require(self.tasks.cancel(job.context, task_id, expected_revision=task.revision))
-                raise TaskError("content_authoring_capacity", "no background model slot is available")
+            if task is None:
+                raise TaskError("content_authoring_capacity", "the dedicated writing task was not admitted")
             if task.state != "succeeded" or job.result is None:
                 raise TaskError(task.reason or "content_authoring_failed", "the dedicated writing task did not finish")
             return job.result

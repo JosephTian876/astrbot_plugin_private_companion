@@ -17,7 +17,7 @@ from typing import Awaitable, Callable, Mapping
 
 from companion_v2.foundation.outcome import Outcome
 
-from .models import Lane, TaskClaim, TaskDeferred, TaskError, TaskRecord, TaskResult, require
+from .models import Lane, QUEUED, TaskClaim, TaskDeferred, TaskError, TaskRecord, TaskResult, require
 from .service import TaskSupervisor
 
 
@@ -26,9 +26,18 @@ logger = getLogger(__name__)
 
 @dataclass(frozen=True)
 class RunResult:
+    """What one run attempt produced.
+
+    ``task`` is the authoritative record afterwards. ``refused`` names a transient
+    queue refusal, where nothing ran and nothing changed. ``failure_code`` is the
+    stable code when the attempt produced no owner result, and ``retry_at`` marks
+    the subset that a fresh owner task may attempt again later.
+    """
+
     task: TaskRecord | None
     failure_code: str | None = None
     retry_at: datetime | None = None
+    refused: str | None = None
 
 
 @dataclass(frozen=True)
@@ -100,9 +109,10 @@ class _TaskRunner:
         claim = None
         worker = None
         try:
-            claim = require(select()).claim
+            claim_result = require(select())
+            claim = claim_result.claim
             if claim is None:
-                return Outcome.success(RunResult(None))
+                return Outcome.success(RunResult(None, refused=claim_result.refused))
             task = require(self.supervisor.begin(claim))
             definition = self.supervisor.registrations[task.spec.kind].definition
             budget = min(definition.timeout_seconds, (task.spec.deadline_at - self.supervisor.now()).total_seconds())
@@ -228,9 +238,30 @@ class ExactTaskRunner(_TaskRunner):
                 self._waiting.pop(invocation, None)
             result = await self._run(lambda: selected)
         if result.is_success and result.unwrap().task is None:
-            current = self.supervisor.read(context, task_id)
-            return Outcome(failure=current.failure) if current.failure else Outcome.success(RunResult(current.unwrap()))
+            return self._unrun(context, task_id, result.unwrap())
         return result
+
+    def _unrun(self, context, task_id: str, attempt: RunResult) -> Outcome[RunResult]:
+        """Report an exact task this invocation did not execute.
+
+        The owner's prepared inputs die with the invocation that submitted them,
+        so a still-queued reservation can never be served later. Retire it with
+        its real cause instead of a generic shutdown label, and never report
+        unexecuted work as an owner result.
+        """
+        current = self.supervisor.read(context, task_id)
+        if current.failure:
+            return current
+        task = current.unwrap()
+        if task.state not in QUEUED:
+            # Settled before this invocation could begin: the row is authoritative.
+            return Outcome.success(RunResult(task, task.reason))
+        code = attempt.refused or "task_not_admitted"
+        logger.info("[CompanionV2] 后台任务未获准入 task=%s kind=%s code=%s", task_id, task.spec.kind, code)
+        retired = self.supervisor.discard_queued(task_id, reason="owner_unavailable", code=code)
+        if retired.failure:
+            return Outcome(failure=retired.failure)
+        return Outcome.success(RunResult(retired.unwrap(), code))
 
     async def close(self):
         self._closed = True

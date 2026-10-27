@@ -147,15 +147,23 @@ class TaskSupervisor:
             return self.generation
 
     @outcome
-    def discard_queued(self, task_id: str, *, reason: str) -> TaskRecord:
-        """Owner lifecycle cleanup; never cancel or release a potentially running attempt."""
+    def discard_queued(self, task_id: str, *, reason: str, code: str | None = None) -> TaskRecord:
+        """Owner lifecycle cleanup; never cancel or release a potentially running attempt.
+
+        ``code`` carries the actual cause when the owner knows it, so the task
+        ledger and every receipt derived from it stay diagnosable instead of
+        collapsing unrelated refusals into a generic owner shutdown.
+        """
         if reason not in ("owner_closed", "owner_expired", "owner_unavailable"):
             raise ValueError("unsupported owner cleanup reason")
+        if code is not None:
+            from companion_v2.identity_policy.models import _opaque
+            _opaque(code, field="task discard code")
         with self.runtime.transaction():
             self._active()
             row = self._row(task_id)
             if row["state"] in QUEUED:
-                row = self._change(row, "cancelled", reason, self._now())
+                row = self._change(row, "cancelled", code or reason, self._now())
             return self._record(row)
 
     @outcome
@@ -384,13 +392,19 @@ class TaskSupervisor:
 
     @outcome
     def claim_task(self, context: TaskContext, task_id: str) -> ClaimResult:
-        """Claim one trusted latency-critical child without consuming another queued task."""
+        """Claim one trusted latency-critical child without consuming another queued task.
+
+        A refusal names the transient condition that left the row queued; only the
+        deadline, authorization and attempt-budget transitions settle the row here.
+        """
         with self.runtime.transaction() as connection:
             self._active()
             now = self._now()
             row = self._owned(context, task_id, now)
-            if row["state"] not in QUEUED or row["next_run_at"] > stamp(now):
-                return ClaimResult(None)
+            if row["state"] not in QUEUED:
+                return ClaimResult(None, "task_not_queued")
+            if row["next_run_at"] > stamp(now):
+                return ClaimResult(None, "task_not_due")
             if row["deadline_at"] <= stamp(now):
                 self._change(row, "expired", "deadline_before_start", now)
                 return ClaimResult(None)
@@ -399,7 +413,7 @@ class TaskSupervisor:
                                       (lane.value,)).fetchone()[0]
             capacity = self.limits.foreground_slots if lane is Lane.FOREGROUND else self.limits.background_slots
             if held >= capacity:
-                return ClaimResult(None)
+                return ClaimResult(None, "task_lane_full")
             try:
                 entry, data, spec = self._authorize(row, now)
             except TaskError as error:
@@ -413,7 +427,7 @@ class TaskSupervisor:
                 COALESCE(SUM(scope_key = ?), 0) AS scope_total FROM execution_attempts
                 WHERE slot_held = 1 AND kind = ?""", (spec.context.scope.key, row["kind"])).fetchone()
             if slots["total"] >= definition.concurrency or slots["scope_total"] >= definition.per_scope_concurrency:
-                return ClaimResult(None)
+                return ClaimResult(None, "task_concurrency_limited")
             attempt_id = uuid4().hex
             lease = min(spec.deadline_at, now + timedelta(seconds=definition.timeout_seconds))
             attempt = {"claimed_at": stamp(now), "started_at": None, "finished_at": None,

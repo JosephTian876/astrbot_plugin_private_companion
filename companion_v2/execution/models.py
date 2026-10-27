@@ -251,7 +251,20 @@ class WorkerStopRecovery:
 
 @dataclass(frozen=True)
 class ClaimResult:
+    """One exact-task claim attempt: a new attempt, or why the queue refused one.
+
+    ``refused`` names a *transient* condition that left the row untouched and
+    still queued, so the caller can retry or keep the reservation. A terminal
+    transition is never reported here: the row's own state and reason are
+    authoritative then.
+    """
+
     claim: TaskClaim | None
+    refused: str | None = None
+
+    def __post_init__(self):
+        if self.claim is not None and self.refused is not None:
+            raise ValueError("an admitted claim cannot also be refused")
 
 
 @dataclass(frozen=True)

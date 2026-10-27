@@ -700,9 +700,6 @@ class ProactiveContacts:
                 if administrator_test and result.is_success and result.unwrap().failure_code:
                     return Outcome.failed(result.unwrap().failure_code,
                                           "administrator diagnostic task failed before delivery")
-                if result.is_success and (result.unwrap().task is None or result.unwrap().task.state in ("created", "retry_scheduled")):
-                    task = require(self.tasks.discard_queued(task_id, reason="owner_unavailable"))
-                    return Outcome.success(RunResult(task))
                 return result
             finally:
                 self._pending.pop(task_id, None)
