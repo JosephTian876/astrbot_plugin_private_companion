@@ -167,7 +167,10 @@ class GeminiNativeVideoProvider:
             raise TaskError("model_capability_mismatch", "Gemini route received unsupported or incomplete media history")
         wire = build_wire(envelope, model_name=envelope.model_override or self.model)
         self.reserve(envelope)
-        await self.bridge.verify_role(request.event.scope, request.role_binding, request.role_instruction)
+        # Background tasks may replace the model-facing role with the self page.
+        # The native guard must still compare the host persona captured behind
+        # that substitution, otherwise Gemini rejects a legitimate task role.
+        await self.bridge.verify_role(request.event.scope, request.role_binding, request.host_role_instruction)
         self._current()
         system_instruction = "\n".join(message["content"] for message in wire.messages
                                         if message["role"] == "system")

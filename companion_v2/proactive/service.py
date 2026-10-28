@@ -306,9 +306,13 @@ class ProactiveContacts:
             return False
         if limit > 0:
             start = local_day_start(at, preferences.values["quiet_timezone"])
+            # Count both sealed reaction images and judged drafts that have
+            # reserved a reaction intent. Otherwise two concurrent judgements
+            # can both observe zero and exceed the daily proactive-image cap.
             count = self.runtime.read_one("""SELECT COUNT(*) FROM proactive_contacts
                 WHERE origin_key = ? AND created_at >= ?
-                AND json_extract(record_json, '$.reaction') IS NOT NULL""",
+                AND (json_extract(record_json, '$.reaction') IS NOT NULL
+                     OR json_extract(record_json, '$.pending_reaction_intent') IS NOT NULL)""",
                 (context.key, stamp(start)))[0]
             if count >= limit:
                 return False
@@ -960,17 +964,22 @@ class ProactiveContacts:
                 else:
                     skip_reason = "no_sendable_content"
             offered = None
+            deferred_reaction_intent = None
             # An image offer publishes original bytes, so it is never chosen before a
-            # pending judgement: the judged payload stays body-only until it is allowed.
-            if (body is not None and reaction_intent and reactions_available and judge_task is None
+            # pending judgement: the judged payload stays body-only until it is allowed,
+            # and the chosen reaction_intent is resolved once the judge approves it.
+            if (body is not None and reaction_intent and reactions_available
                     and self._proactive_image_available(job.context, job, preferences, self.tasks.now())):
-                try:
-                    if self._reaction_available(job.context, contact_id,
-                            diagnostic=job.diagnostic_image_intent is not None):
-                        offered = await self.semantics.reactions.select_for_contact(job.context, reaction_intent)
-                except (TaskError, ValueError, OSError):
-                    offered = None
-            if body is not None and job.diagnostic_image_intent is not None and offered is None:
+                if judge_task is not None:
+                    deferred_reaction_intent = reaction_intent
+                else:
+                    try:
+                        if self._reaction_available(job.context, contact_id,
+                                diagnostic=job.diagnostic_image_intent is not None):
+                            offered = await self.semantics.reactions.select_for_contact(job.context, reaction_intent)
+                    except (TaskError, ValueError, OSError):
+                        offered = None
+            if body is not None and job.diagnostic_image_intent is not None and offered is None and deferred_reaction_intent is None:
                 raise TaskError("proactive_diagnostic_image_unavailable",
                                 "no authorized reaction image matched the diagnostic intent")
             run.validate()
@@ -1042,6 +1051,8 @@ class ProactiveContacts:
                         images = (reaction["manifest"],) if reaction is not None and index == len(segments) - 1 else ()
                         part_documents.append({"text": text, "payload_hash": manifest_hash(text, images)})
                 document["parts"] = part_documents
+                if deferred_reaction_intent is not None:
+                    document["pending_reaction_intent"] = deferred_reaction_intent
                 if reaction is not None:
                     document["reaction"] = reaction
                 if voice is not None:
@@ -1303,22 +1314,62 @@ class ProactiveContacts:
             raise
         threshold = preferences.values["proactive_persona_judge_threshold"]
         allowed = decision == "send" and score >= threshold
+        pending_reaction_intent = data.get("pending_reaction_intent") if isinstance(data.get("pending_reaction_intent"), str) else None
+        diagnostic_image = data.get("diagnostic_image") is True
+        offered = None
+        if allowed and pending_reaction_intent:
+            try:
+                if self._reaction_available(context, contact_id, diagnostic=diagnostic_image):
+                    offered = await self.semantics.reactions.select_for_contact(context, pending_reaction_intent)
+            except (TaskError, ValueError, OSError):
+                offered = None
+        if allowed and diagnostic_image and pending_reaction_intent and offered is None:
+            raise TaskError("proactive_diagnostic_image_unavailable",
+                            "no authorized reaction image matched the diagnostic intent")
         with self.runtime.transaction() as connection:
             run.validate()
-            current = connection.execute("""SELECT record_json FROM proactive_contacts
+            current = connection.execute("""SELECT body, payload_hash, record_json FROM proactive_contacts
                 WHERE contact_id = ?""", (contact_id,)).fetchone()
             document = json.loads(current["record_json"])
             if (document.get("decision") != "judge_pending"
                     or (document.get("judge") or {}).get("task_id") != run.task.task_id):
                 raise TaskError("contact_judge_unavailable", "draft already has a resolved judgement")
+            document.pop("pending_reaction_intent", None)
+            reaction = None
+            if allowed and offered is not None and pending_reaction_intent:
+                try:
+                    if self._reaction_available(context, contact_id, diagnostic=diagnostic_image):
+                        with self.runtime.transaction():
+                            issued_at = self.tasks.now()
+                            evidence = tuple(source_from_document(ref) for ref in document.get("sources", ()))
+                            image = self.semantics.reactions.contact_image(context, contact_id, offered, issued_at,
+                                publish=True, evidence=evidence)
+                            reaction = {**offered, "intent": pending_reaction_intent, "issued_at": issued_at,
+                                        "manifest": image_manifest(image)}
+                except (TaskError, ValueError, OSError):
+                    reaction = None
+            if allowed and diagnostic_image and pending_reaction_intent and reaction is None:
+                raise TaskError("proactive_diagnostic_image_unavailable",
+                                "the authorized image changed or could not be sealed for delivery")
+            payload_hash = current["payload_hash"]
+            if reaction is not None:
+                body_text = current["body"] or ""
+                payload_hash = manifest_hash(body_text, (reaction["manifest"],))
+                parts = document.get("parts") or [{"text": body_text, "payload_hash": current["payload_hash"]}]
+                part_documents = []
+                for index, part in enumerate(parts):
+                    images = (reaction["manifest"],) if index == len(parts) - 1 else ()
+                    part_documents.append({"text": part["text"], "payload_hash": manifest_hash(part["text"], images)})
+                document["parts"] = part_documents
+                document["reaction"] = reaction
             document["decision"] = "send" if allowed else "skip"
             document["judge"] = {**judge, "state": "resolved", "decision": decision, "score": score,
                                  "reason": reason, "allowed": allowed, "cached": False,
                                  "model_call_id": completion.call_id, "failure": None}
             document["skip_reason"] = None if allowed else "persona_review"
             run.begin_effect()
-            connection.execute("UPDATE proactive_contacts SET record_json = ? WHERE contact_id = ?",
-                               (encode(document), contact_id))
+            connection.execute("UPDATE proactive_contacts SET record_json = ?, payload_hash = ? WHERE contact_id = ?",
+                               (encode(document), payload_hash, contact_id))
             if not allowed and isinstance(origin, dict):
                 open_loop = origin.get("open_loop_event")
                 if isinstance(open_loop, dict) and isinstance(open_loop.get("memo_id"), str):
@@ -1619,6 +1670,10 @@ class ProactiveContacts:
                     "image_attachment": {"state": "passed" if data.get("reaction") else
                                          "failed" if data.get("diagnostic_image") else "not_required",
                                          "attached": bool(data.get("reaction"))},
+                    "media": {"reaction": "attached" if data.get("reaction") else
+                                         "pending_review" if data.get("pending_reaction_intent") else "not_selected",
+                              "voice": "sealed" if data.get("voice") else "not_selected",
+                              "poke": "sealed" if data.get("poke") else "not_selected"},
                     "delivery": delivery_metrics}}
 
     @outcome

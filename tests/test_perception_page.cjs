@@ -246,12 +246,13 @@ test('the current navigation keeps perception reachable and its secondary panels
     'navHref 的入参必须是插件相对路径');
   assert.match(app, /class="perception-config-nav" role="tablist" aria-label="感知设置"/,
     '感知配置按设计提供四个正式子页签');
-  assert.equal((app.match(/role="tab" aria-selected="false" aria-controls="perception-page-/g)||[]).length,4,
-    '感知配置应提供四个可切换子页');
+  assert.equal((app.match(/role="tab" aria-selected="false" aria-controls="perception-page-/g)||[]).length,5,
+    '感知配置应提供五个可切换子页');
   assert.match(app, /id="perception-page-environment" role="tabpanel"/);
   assert.match(app, /id="perception-page-models" role="tabpanel"/);
   assert.match(app, /id="perception-page-reality" role="tabpanel"/);
   assert.match(app, /id="perception-page-external" role="tabpanel"/);
+  assert.match(app, /id="perception-page-health" role="tabpanel"/);
   assert.match(app, /String\(destination\)\.split\(':',2\)/,
     '看板来源应能同时定位配置分区与二级面板');
   for (const slot of ['modelWorkspace', 'contextImageWorkspace', 'perceptionOnlineQueryWorkspace',

@@ -71,6 +71,14 @@ function harness() {
     }};
 }
 
+test("navigation is exposed to the setup guide and workspace modules", () => {
+  const h = harness();
+  assert.equal(typeof h.window.navigate, "function");
+  assert.equal(h.window.navigate("manage", "data", "migration"), true);
+  assert.equal(h.window.location.hash, "#manage/data/migration");
+  assert.equal(h.run("currentNavigationHref()"), "#manage/data/migration");
+});
+
 test("returning home clears configuration, diary and furniture selections", () => {
   const h = harness(), shell = h.window.CompanionShell;
   for (const destination of ["navigate('manage','models')", "navigate('life','diary','sleep')",

@@ -37,6 +37,7 @@ from .astrbot_host.core_reply import (
     inject_core_reply_prompt,
     prepare_core_reply_event,
     restore_core_reply_event,
+    restore_core_reply_prepared,
 )
 from .astrbot_host.core_reply_tools import inject_core_reply_tools
 from .astrbot_host.core_reply_preparation import measure_core_preparation
@@ -72,6 +73,7 @@ from .astrbot_host.reset_command import receive_reset_command
 from companion_v2.conversation.group_llm_block import GroupLLMBlock
 from companion_v2.conversation import debounce_log
 from .astrbot_host.private_debounce import PrivateDebounce
+from .astrbot_host.private_reply_followup import PrivateReplyFollowUps
 from .astrbot_host.event_routing import (
     COMPANION_INTAKE_PRIORITY, competing_command_handler, suppress_default_reply,
 )
@@ -233,6 +235,56 @@ class PrivateCompanionV2StagingPlugin(Star):
             manager = PrivateDebounce()
             self._private_debounce = manager
         return manager
+
+    def _private_reply_followups(self):
+        manager = getattr(self, "_private_followup", None)
+        if manager is None:
+            manager = PrivateReplyFollowUps()
+            self._private_followup = manager
+        return manager
+
+    def _fold_private_follow_up(self, event, target, event_ref, text):
+        """Join a post-debounce message to the first model request when possible."""
+        target_key = getattr(target, "target_id", None)
+        if not isinstance(target_key, str) or not target_key:
+            return False
+        active = self._private_reply_followups().fold(target_key, event, text)
+        if active is None:
+            return False
+        self._suppress_merged_private_event(
+            event, target, event_ref, reason="private_reply_follow_up_merged")
+        logger.info(
+            "[CompanionV2] 私聊后续消息并入待发送回复 event_ref=%s owner_event_ref=%s target=%s message=%s",
+            event_ref, active.event_ref, target_key, str(text)[:120])
+        return True
+
+    def _apply_private_follow_ups_to_request(self, event, request):
+        """Append messages that arrived after debounce but before provider dispatch."""
+        prepared_state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        resolved = self._private_reply_followups().for_request(event)
+        if resolved is None:
+            return
+        pending, entries = resolved
+        if not pending:
+            return
+        extra_text = "\n".join(str(item[1]).strip() for item in pending if str(item[1]).strip())
+        if not extra_text:
+            return
+        prompt = getattr(request, "prompt", None)
+        if isinstance(prompt, str) and prompt.strip():
+            request.prompt = prompt.rstrip() + "\n" + extra_text
+        else:
+            request.prompt = extra_text
+        prepared = prepared_state.get("prepared") if isinstance(prepared_state, dict) else None
+        if isinstance(prepared, dict):
+            base = str(prepared.get("text") or "").rstrip()
+            prepared["text"] = (base + "\n" + extra_text).strip() if base else extra_text
+            prepared["debounced_inputs"] = merged_input_sequence(entries)
+            prepared["debounced_message_count"] = len(entries)
+        logger.info(
+            "[CompanionV2] 首轮模型请求前合并私聊后续消息 event_ref=%s count=%d message=%s",
+            (prepared or {}).get("event_ref") if isinstance(prepared, dict) else None,
+            len(pending), extra_text[:120])
 
     def _suppress_merged_private_event(self, event, target, event_ref, *, reason="private_debounce_merged"):
         suppress_default_reply(event)
@@ -583,6 +635,8 @@ class PrivateCompanionV2StagingPlugin(Star):
             target = None
         owner = self._core_reply_owner_token()
         changed_owner = state.get("owner") is not owner
+        if changed_owner:
+            prepared = restore_core_reply_prepared(prepared)
         callbacks = self._core_reply_delivery_callbacks(event, prepared, target=target)
         if not adopt_core_reply_event(event, owner=owner, prepared=prepared, **callbacks):
             return False
@@ -701,14 +755,17 @@ class PrivateCompanionV2StagingPlugin(Star):
                 return
         is_calendar_command = (channel == "private"
                                and parse_calendar_command(str(getattr(event, "message_str", "") or "")))
+        plain_text = (PrivateDebounce.private_plain_text(event)
+                      if channel == "private" and not is_calendar_command else None)
+        target_key = getattr(target, "target_id", None) if channel == "private" else None
+        if (plain_text is not None and isinstance(target_key, str) and target_key
+                and self._fold_private_follow_up(event, target, event_ref, plain_text)):
+            return
         debounce_manager = None
         debounce_pending = None
-        if channel == "private" and not is_calendar_command:
-            plain_text = PrivateDebounce.private_plain_text(event)
-            target_key = getattr(target, "target_id", None)
-            if plain_text is not None and isinstance(target_key, str) and target_key:
-                debounce_manager = self._private_debounce_manager()
-                debounce_pending = debounce_manager.reserve(target_key, event, plain_text)
+        if plain_text is not None and isinstance(target_key, str) and target_key:
+            debounce_manager = self._private_debounce_manager()
+            debounce_pending = debounce_manager.reserve(target_key, event, plain_text)
         group_admission = None
         if channel == "group":
             try:
@@ -948,6 +1005,12 @@ class PrivateCompanionV2StagingPlugin(Star):
         prepare_core_reply_streaming_boundary(event)
         event.is_wake = True
         event.is_at_or_wake_command = True
+        if channel == "private":
+            entries = (debounced_entries if debounced_entries is not None else
+                       ((event, str(prepared.get("text") or event.message_str or ""),
+                         getattr(event, "created_at", None)),))
+            self._private_reply_followups().start(
+                target_key or getattr(target, "target_id", ""), event, event_ref, entries)
         logger.info("[CompanionV2] 交由 AstrBot 核心回复管线 event_ref=%s channel=%s",
                     event_ref, channel)
 
@@ -962,6 +1025,7 @@ class PrivateCompanionV2StagingPlugin(Star):
             prepare_native_host_request(self.staging, event, req)
             return
         self._adopt_core_reply_delivery(event)
+        self._apply_private_follow_ups_to_request(event, req)
         prepared = state.get("prepared")
         try:
             with measure_core_preparation(event, "request_authorization", now=self.staging.now):
@@ -1033,6 +1097,7 @@ class PrivateCompanionV2StagingPlugin(Star):
     @filter.on_agent_done()
     async def observe_companion_core_agent_done(self, event: AstrMessageEvent, run_context, response):
         from .astrbot_host.core_reply_voice_authoring import restore_core_voice_authoring
+        self._private_reply_followups().finish(event)
         restore_core_voice_authoring(event)
         restore_core_tool_dispatch(event, run_context)
         observe_core_agent_done(event, run_context, response)
@@ -1054,6 +1119,7 @@ class PrivateCompanionV2StagingPlugin(Star):
     @filter.after_message_sent(priority=1000000)
     async def observe_companion_core_reply_sent(self, event: AstrMessageEvent):
         from .astrbot_host.core_reply_voice_authoring import restore_core_voice_authoring
+        self._private_reply_followups().finish(event)
         restore_core_voice_authoring(event)
         state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
         if isinstance(state, dict):

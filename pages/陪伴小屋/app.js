@@ -358,6 +358,8 @@ function navigate(next,tab,subtab='',{replace=false,scroll=true}={}){
   if(same){commit();return true;}
   return afterPageLeave(ticket,commit);
 }
+/* Cross-page modules and workspace iframes use this public entry point. */
+window.navigate = navigate;
 function navigateToReplySection(next,tab,subtab,section){
   const navigation=navigate(next,tab,subtab);
   if(navigation&&typeof navigation.then==='function'){
@@ -3427,7 +3429,7 @@ function renderOutputOriginal(){
                 <figcaption class="output-image-status" role="status">${I('image-off')}<span>正在读取最近产出…</span></figcaption>
                 <span class="output-image-tag">角色视觉</span>
               </figure>
-              <div class="output-preview-caption output-preview-copy"><h2>图像生成</h2><button type="button" class="output-preview-action" data-output-open="visual">生图设置 ${I('arrow-up-right')}</button></div>
+              <div class="output-preview-caption output-preview-copy"><h2>图像生成</h2><div class="output-preview-actions"><button type="button" class="output-preview-action" data-output-open="visual">生图设置 ${I('arrow-up-right')}</button><button type="button" class="output-preview-action" data-output-open="gallery">产出图库 ${I('arrow-up-right')}</button></div></div>
             </section>
             <section class="output-preview-view output-preview-view--story" id="output-preview-story" role="tabpanel" aria-labelledby="output-mode-story" tabindex="0" data-output-view hidden>
               <article class="output-manuscript">
@@ -3451,9 +3453,10 @@ function renderOutputOriginal(){
       <section class="output-config" id="output-config" aria-label="产出配置">
         <div class="output-config-tabs" role="tablist" aria-label="产出配置分区">
           ${configTab('visual','生图与审核','image',0)}
-          ${configTab('materials','参考素材','images',1)}
-          ${configTab('creation','创作与作品','notebook-pen',2)}
-          ${configTab('capabilities','生图能力与提示词','sparkles',3,' output-config-tab--capabilities')}
+          ${configTab('gallery','产出图库','images',1)}
+          ${configTab('materials','参考素材','images',2)}
+          ${configTab('creation','创作与作品','notebook-pen',3)}
+          ${configTab('capabilities','生图能力与提示词','sparkles',4,' output-config-tab--capabilities')}
         </div>
         <div class="output-config-panels">
           <section class="output-config-panel" id="output-panel-visual" role="tabpanel" aria-labelledby="output-tab-visual" tabindex="0" data-output-panel>
@@ -3465,6 +3468,13 @@ function renderOutputOriginal(){
             </section>
             <div class="output-workbench-block" id="imageControlWorkspace" data-output-config aria-label="生图额度与审核配置">${consoleLoading('正在读取生图额度与审核设置…')}</div>
             <div class="output-provider-strip"><header><h2>生成能力</h2><button type="button" class="output-inline-link" data-output-open="capabilities">模型路线 ${I('arrow-up-right')}</button></header>${outputProviderLine('image','图像生成')}</div>
+          </section>
+          <section class="output-config-panel" id="output-panel-gallery" role="tabpanel" aria-labelledby="output-tab-gallery" tabindex="0" data-output-panel hidden>
+            <section class="output-gallery-panel" aria-labelledby="output-gallery-heading">
+              <header class="output-panel-heading output-gallery-heading"><div><h2 id="output-gallery-heading">产出图库</h2><p>当前角色已经生成并保存的图片。可多选导出；删除只从图库移除，不删除原始来源记录。</p></div><button type="button" class="button small output-gallery-refresh" data-output-native-action="album-refresh">刷新图库</button></header>
+              <div id="outputAlbumWorkspace" class="output-album-workspace" role="status" aria-live="polite"></div>
+            </section>
+            <div id="outputAlbumLightbox" class="output-album-lightbox" role="dialog" aria-modal="true" aria-label="产出图片预览" hidden></div>
           </section>
           <section class="output-config-panel" id="output-panel-materials" role="tabpanel" aria-labelledby="output-tab-materials" tabindex="0" data-output-panel hidden>
             <div id="materialControlWorkspace" class="output-workbench-block output-material-settings" data-output-config aria-label="参考图与衣柜配置">${consoleLoading('正在读取参考图与衣柜设置…')}</div>

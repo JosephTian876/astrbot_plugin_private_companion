@@ -104,7 +104,7 @@ function harness({status, responses = {}, targets = [], refreshedTargets = targe
     navigation,
     prompts,
     get html() { return html; },
-    mount: () => sandbox.window.CompanionSetup.mount(node),
+    mount: options => sandbox.window.CompanionSetup.mount(node, options),
     mountMigration: () => sandbox.window.CompanionSetup.mountMigration(node),
     promptUpgradeAtStartup: callback => sandbox.window.CompanionSetup.promptUpgradeAtStartup(callback),
     continueUpgrade: upgrade => sandbox.window.CompanionSetup.continueUpgrade(upgrade),
@@ -335,6 +335,27 @@ test('first upgrade opens migration with the newly saved destination available',
   assert.equal(page.calls.filter(call => call.method === 'GET' && call.route === route).length, 1,
     '进入核对页不应重复扫描');
   assert.match(page.html, /data-migration-step="2"/);
+});
+
+test('a configured legacy connection falls through to the remaining setup and verification', async () => {
+  const states = [];
+  const page = harness({status: {
+    upgrade: {present: true, configured: true, can_prepare: false},
+    prepared: true, ready: false, step: 'proactive_test',
+    completed: ['model', 'knowledge', 'relationships', 'proactive', 'life', 'group'],
+    skipped: [], proactive_test: null,
+    binding: {participant_id: 'u-1', platform_id: 'aiocqhttp', account_id: 'bot-1'},
+    model: {provider_id: 'provider-1', providers: [{}]}, host: {accepting: true},
+  }});
+  page.mount({onState: info => states.push(info)});
+  await settle();
+  assert.match(page.html, /旧版连接已接续/);
+  assert.match(page.html, /直接继续下方设置与主动消息测试即可/);
+  assert.match(page.html, /继续迁移/);
+  assert.match(page.html, /第 8 步 · 约 1 分钟/);
+  assert.match(page.html, /测试主动消息/);
+  assert.doesNotMatch(page.html, /setup-upgrade-steps|STEP [0-9]|第 5 步 · 约 1 分钟/);
+  assert.equal(states.at(-1)?.upgrading, false);
 });
 
 test('upgrade navigation survives a pre-staging directory refresh failure', async () => {

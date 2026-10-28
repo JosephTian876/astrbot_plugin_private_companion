@@ -65,9 +65,9 @@ window.CompanionSetup = (() => {
       checks: ["选择群聊参与方式", "按需设置唤醒与插话", "只在需要的群里生效"],
     },
     proactive_test: {
-      tag: "第 5 步 · 约 1 分钟",
-      body: "最后跑一次主动消息测试：默认只生成候选、复核与发送闸结果，真实发送仍需二次确认，避免首次配置时误发。",
-      checks: ["生成一次主动候选", "确认复核与发送闸判断", "不开启主动也可以直接完成配置"],
+      tag: "第 8 步 · 约 1 分钟",
+      body: "最后向已绑定的管理员私聊发一条主动测试消息，把主动联系模型、策略检查与真实投递完整跑通一次；只有你勾选同意后才会发送。",
+      checks: ["勾选同意后向管理员私聊发送一次测试消息", "核对模型生成、策略检查与平台投递回执", "收到后即可进入陪伴小屋日常使用"],
     },
   };
   const stepMeta = step => STEP_META[step] || STEP_META.binding;
@@ -102,6 +102,13 @@ window.CompanionSetup = (() => {
       host.innerHTML = `<p class="setup-inline-unavailable">当前角色的设置工作台暂不可用，请重新读取后再试。</p>`;
     }
   }
+  function nextStepPreview(step) {
+    const index = ORDER.indexOf(step);
+    const next = index >= 0 ? ORDER[index + 1] : "";
+    if (!next) return "";
+    return `<aside class="setup-next-step" aria-label="下一步"><span>接下来</span><b>${String(index + 2).padStart(2, "0")} · ${escape(LABELS[next] || next)}</b><small>${escape(stepMeta(next).tag)}，可以稍后回来调整。</small></aside>`;
+  }
+
   function renderSettingsStep(step) {
     const complete = (state?.completed || []).includes(step);
     const skipped = (state?.skipped || []).includes(step);
@@ -626,7 +633,8 @@ window.CompanionSetup = (() => {
         </li>`;
       }).join("");
       const complete = group.steps.every(id => byId.get(id)?.complete);
-      return `<li class="setup-progress-group ${complete ? "complete" : ""}">
+      const currentGroup = group.steps.includes(step);
+      return `<li class="setup-progress-group ${complete ? "complete" : ""} ${currentGroup ? "current" : ""}">
         <strong>${escape(group.title)}</strong>
         <ol class="setup-progress-steps">${rows}</ol>
       </li>`;
@@ -2866,19 +2874,19 @@ window.CompanionSetup = (() => {
     const command = "我会永远陪着你";
     if (binding.pending) {
       return `<section class="setup-stage">
-        <p class="setup-kicker">STEP 1</p><h3>核对核心管理员窗口</h3>
+        <p class="setup-kicker">第 1 步 · 核对窗口</p><h3>核对核心管理员窗口</h3>
         <p>已收到这条私聊里的绑定指令。核对它是你希望当前版本接收管理员指令、也作为主动消息主要投递窗口的私聊。</p>
         <p class="setup-command"><code>${escape(command)}</code></p>
         ${connectionDiagnostic()}
         ${bindingFacts(binding)}
-        <p class="setup-confirm-copy">候选绑定仅保存在当前版本数据根，不会触发聊天回复。平台、Bot 账号、私聊对象和人格均正确后，点击确认。</p>
+        <p class="setup-confirm-copy">候选绑定只保存在本插件目录，不会触发聊天回复。平台、Bot 账号、私聊对象和人格都正确后，点「确认此窗口」。</p>
         ${noticeMarkup()}
         <div class="setup-actions">${button("confirm-binding", "确认此窗口", {primary: true})}${button("refresh", "重新读取")}</div>
       </section>`;
     }
     if (state?.binding_confirmed) {
       return `<section class="setup-stage">
-        <p class="setup-kicker">STEP 1</p><h3>核心管理员窗口已绑定</h3>
+        <p class="setup-kicker">第 1 步 · 已完成</p><h3>核心管理员窗口已绑定</h3>
         ${bindingFacts(binding)}
         <p>这个私聊窗口用于管理员控制，也是主动消息测试的目标。下一步配置模型后，当前版本才会建立运行实例。</p>
         ${noticeMarkup()}
@@ -2886,10 +2894,10 @@ window.CompanionSetup = (() => {
       </section>`;
     }
     return `<section class="setup-stage">
-      <p class="setup-kicker">STEP 1</p><h3>绑定核心管理员窗口</h3>
+      <p class="setup-kicker">第 1 步 · 约 2 分钟</p><h3>绑定核心管理员窗口</h3>
       <p>在希望当前版本接收管理员指令、也作为主动消息主要投递窗口的私聊中，发送固定指令：</p>
       <p class="setup-command"><code>${escape(command)}</code></p>
-      <p>回到这里核对平台、Bot 账号、私聊对象和人格，再由 Dashboard 管理员确认。若该账号使用多个人格，可发送 <code>我会永远陪着你 人格名</code> 指定。</p>
+      <p>回到这里核对平台、Bot 账号、私聊对象和人格，再由管理面板确认。若该账号使用多个人格，可发送 <code>我会永远陪着你 人格名</code> 指定。</p>
       ${connectionDiagnostic()}
       ${state?.settings_error ? `<p class="setup-inline-error">${escape(product()?.errorLabel?.(state.settings_error) || "运行设置尚未就绪，请核对账号、人格与模型。")}</p>` : ""}
       ${noticeMarkup()}
@@ -2899,8 +2907,8 @@ window.CompanionSetup = (() => {
 
   function renderSection(step) {
     const definitions = {
-      knowledge: {number: "STEP 3", title: "从人格整理角色设定", target: "role_profile", canSkip: true},
-      relationships: {number: "STEP 4", title: "整理熟人卡", target: "relationship_profile", canSkip: true},
+      knowledge: {number: "第 3 步 · 可选", title: "从人格整理角色设定", target: "role_profile", canSkip: true},
+      relationships: {number: "第 4 步 · 可选", title: "整理熟人卡", target: "relationship_profile", canSkip: true},
     }[step];
     const complete = state?.completed?.includes(step);
     const skipped = state?.skipped?.includes(step);
@@ -2941,6 +2949,7 @@ window.CompanionSetup = (() => {
     const providerId = modelDraft || model.provider_id || "";
     const taskProviders = Array.isArray(modelTasks?.providers) ? modelTasks.providers : [];
     const tasks = Array.isArray(modelTasks?.tasks) ? modelTasks.tasks : [];
+    const selectedProvider = providers.find(item => item.id === providerId);
     const taskMarkup = tasks.map(task => {
       const draft = modelTaskDrafts[task.kind] || {};
       const provider = draft.provider ?? task.fields.provider.value;
@@ -2948,19 +2957,37 @@ window.CompanionSetup = (() => {
       const choices = taskProviders.filter(item => task.capabilities.every(capability => item.capabilities.includes(capability)));
       return `<details class="setup-task-route"><summary><strong>${escape(taskLabel(task.kind))}</strong><small>${escape(task.kind)} · ${escape(task.lane)}</small></summary><div class="setup-task-route-fields"><label><span>主 Provider</span><select data-setup-model-task="${escape(task.kind)}" data-setup-model-field="provider" ${busy || !choices.length ? "disabled" : ""}>${choices.map(item => `<option value="${escape(item.id)}" ${provider === item.id ? "selected" : ""}>${escape(item.name || item.id)}</option>`).join("")}</select></label><label><span>备用 Provider</span><select data-setup-model-task="${escape(task.kind)}" data-setup-model-field="fallback" ${busy || !choices.length ? "disabled" : ""}><option value="">不设置</option>${choices.filter(item => item.id !== provider).map(item => `<option value="${escape(item.id)}" ${fallback === item.id ? "selected" : ""}>${escape(item.name || item.id)}</option>`).join("")}</select></label>${button(`save-task:${task.kind}`, "保存路由", {disabled: !choices.length})}</div></details>`;
     }).join("");
-    return `<section class="setup-stage">
-      <p class="setup-kicker">STEP 2</p><h3>配置插件模型</h3>
-      <p>选择初始 Provider。初始化后，任务路由可直接使用 AstrBot 中已加载的文本 Provider。</p>
+    return `<section class="setup-stage setup-question-stage">
       ${connectionDiagnostic()}
-      ${providers.length ? `<label class="setup-model-field"><span>初始主 Provider</span>
-        <select name="setup-provider" ${busy ? "disabled" : ""}>
-          <option value="">选择 Provider</option>
-          ${providers.map(item => `<option value="${escape(item.id)}" ${providerId === item.id ? "selected" : ""}>${escape(item.name)} · ${escape(item.id)}</option>`).join("")}
-        </select></label>` : `<p class="setup-inline-error">AstrBot 当前没有已加载的文本 Provider。请先在 AstrBot 的提供方管理中加载模型，再回来刷新。</p>`}
-      ${state?.settings_error ? `<p class="setup-inline-error">${escape(state.settings_error)}</p>` : ""}
-      ${noticeMarkup()}
-      <div class="setup-actions">${button("save-model", state?.prepared ? "保存 Provider 并载入路由" : "初始化并载入任务路由", {primary: true, disabled: !providers.length || !providerId})}${providers.length ? button("refresh", "刷新 Provider") : ""}${state?.prepared ? button("complete-step", "继续到角色设定", {primary: true}) : ""}</div>
-      ${state?.prepared ? `<section class="setup-model-routes"><header><div><h4>任务模型路由</h4><p>为对话、主动联系和其他插件任务分别指定主模型及备用模型。</p></div><span>${tasks.length} 项</span></header>${taskMarkup || `<p class="setup-inline-error">${modelTasks ? "当前没有已注册的任务路由。" : "任务路由尚未读取，请刷新后重试。"}</p>`}</section>` : ""}
+      <div class="setup-question-card">
+        <p class="setup-kicker">本步只问一件事</p>
+        <h3>先选一个插件通用模型</h3>
+        <p>日常聊天仍然使用 AstrBot 当前人格和主模型；这里只决定主动联系、日程、状态和记忆整理这些后台任务用哪个模型。</p>
+        <ul class="setup-question-points">
+          <li>选择插件通用模型：先选一个能稳定调用的文本模型即可，不必一开始就分得很细</li>
+          <li>保存后会沿用为后台任务的默认模型，仍可逐项覆盖</li>
+          <li>任务路由可以稍后在「模型与连接」中调整，不影响角色设定</li>
+        </ul>
+        ${providers.length ? `<label class="setup-model-field"><span>初始主 Provider（插件通用模型） <span class="setup-recommendation">推荐只选这里</span></span>
+          <select name="setup-provider" ${busy ? "disabled" : ""}>
+            <option value="">选择 Provider</option>
+            ${providers.map(item => `<option value="${escape(item.id)}" ${providerId === item.id ? "selected" : ""}>${escape(item.name)} · ${escape(item.id)}</option>`).join("")}
+          </select></label>
+          ${selectedProvider ? `<p class="setup-question-note">当前选择：${escape(selectedProvider.name || selectedProvider.id)}。保存后先作为插件后台任务的默认入口。</p>` : ""}`
+          : `<p class="setup-inline-error">AstrBot 当前没有已加载的文本 Provider。请先在 AstrBot 的提供商管理中添加模型，再回来刷新。</p>`}
+        ${state?.settings_error ? `<p class="setup-inline-error">${escape(state.settings_error)}</p>` : ""}
+        ${noticeMarkup()}
+        <div class="setup-actions">${state?.prepared
+          ? button("complete-step", "继续到角色设定", {primary: true})
+          : button("save-model", "保存并继续", {primary: true, disabled: !providers.length || !providerId})}
+          ${providers.length ? button("refresh", "刷新 Provider") : ""}
+        </div>
+      </div>
+      ${state?.prepared ? `<details class="setup-model-advanced">
+        <summary>任务模型路由 · 高级设置（${tasks.length} 项，可稍后再改）</summary>
+        <p class="setup-question-note">不打开也可以正常使用。只有当你希望主动联系、日程或记忆使用不同模型时，才需要在这里逐项覆盖。</p>
+        ${taskMarkup || `<p class="setup-inline-error">${modelTasks ? "当前没有已注册的任务路由。" : "任务路由尚未读取，请刷新后重试。"}</p>`}
+      </details>` : ""}
     </section>`;
   }
 
@@ -2978,19 +3005,19 @@ window.CompanionSetup = (() => {
     }
     if (test?.state === "started" || test?.state === "unknown") {
       return `<section class="setup-stage">
-        <p class="setup-kicker">STEP 8</p><h3>主动测试结果未知</h3>
-        <p>主动联系已经经过模型生成与策略检查，但投递结果没有得到确定回执。为避免重复发送，本次不会重放。请到已绑定的私聊核对结果。</p>
+        <p class="setup-kicker">第 8 步 · 验证使用</p><h3>主动测试结果未知</h3>
+        <p>主动联系已经过模型生成与策略检查，但投递结果尚未拿到确定回执。为避免重复发送，本次不会自动重放；请到已绑定的管理员私聊核对是否已收到。</p>
         <p class="setup-test-receipt">${test?.state === "started" ? "等待平台确认" : "结果未知"}</p>
         ${noticeMarkup()}
         <div class="setup-actions">${button("confirm-test-received", "已收到测试消息", {primary: true})}${button("refresh", "刷新状态")}</div>
       </section>`;
     }
     if (test?.state === "failed") {
-      return `<section class="setup-stage"><p class="setup-kicker">STEP 8</p><h3>主动联系没有送达</h3><p>本次模型或投递链路明确失败，可以检查目标私聊和模型路由后重试。</p>${noticeMarkup()}<label class="setup-opt-in"><input type="checkbox" data-setup-proactive-opt-in ${proactiveOptIn ? "checked" : ""} ${busy ? "disabled" : ""}><span>我同意当前版本向已绑定的管理员私聊发送一次主动联系测试</span></label><div class="setup-actions">${button("proactive-test", "重新运行主动联系", {primary: true, disabled: !proactiveOptIn})}${button("refresh", "刷新状态")}</div></section>`;
+      return `<section class="setup-stage"><p class="setup-kicker">第 8 步 · 验证使用</p><h3>主动联系没有送达</h3><p>本次模型或投递链路明确失败，可以检查目标私聊连接与模型路由后重试。</p>${noticeMarkup()}<label class="setup-opt-in"><input type="checkbox" data-setup-proactive-opt-in ${proactiveOptIn ? "checked" : ""} ${busy ? "disabled" : ""}><span>我同意当前版本向已绑定的管理员私聊发送一次主动联系测试</span></label><div class="setup-actions">${button("proactive-test", "重新运行主动联系", {primary: true, disabled: !proactiveOptIn})}${button("refresh", "刷新状态")}</div></section>`;
     }
     return `<section class="setup-stage">
-      <p class="setup-kicker">STEP 8</p><h3>测试主动消息</h3>
-      <p>当前版本会为当前角色建立一次性联系机会，经过主动联系模型、策略检查和真实投递。只有明确同意后才开始；未知结果不会重复发送。</p>
+      <p class="setup-kicker">第 8 步 · 约 1 分钟</p><h3>测试主动消息</h3>
+      <p>当前版本会为当前角色发起一次主动联系，完整经过主动联系模型、策略检查与真实投递。只有勾选同意后才会发送；若平台回执未知，不会重复补发。</p>
       <label class="setup-opt-in"><input type="checkbox" data-setup-proactive-opt-in ${proactiveOptIn ? "checked" : ""} ${busy ? "disabled" : ""}><span>我同意当前版本向已绑定的管理员私聊发送一次主动联系测试</span></label>
       ${noticeMarkup()}
       <div class="setup-actions">${button("proactive-test", "运行主动联系测试", {primary: true, disabled: !proactiveOptIn})}</div>
@@ -3027,10 +3054,11 @@ window.CompanionSetup = (() => {
     }
     const install = legacyFinding?.install;
     if (upgrade?.present && upgrade.configured && !install) {
-      return `<section class="setup-upgrade-review" aria-labelledby="setup-upgrade-title">
-        <header class="setup-upgrade-review-header"><h3 id="setup-upgrade-title">旧版连接已接续</h3></header>
-        <footer class="setup-upgrade-review-actions"><p>继续迁移配置和资料。</p>
-          ${button("open-migration", "继续迁移", {primary: true})}</footer></section>`;
+      return `<section class="setup-upgrade-card" aria-labelledby="setup-upgrade-title">
+        <div><span class="setup-kicker">旧版升级</span><h3 id="setup-upgrade-title">旧版连接已接续</h3>
+        <p class="setup-upgrade-path">账号、人格与模型连接已沿用。需要导入旧版配置或历史资料可随时点右侧「继续迁移」；若已迁完或暂不导入，直接继续下方设置与主动消息测试即可。</p></div>
+        ${button("open-migration", "继续迁移")}
+      </section>`;
     }
     if (!install?.v1_present || install.phase === "new_user") return "";
     if (install.phase === "upgrade_restart_check") {
@@ -3114,8 +3142,9 @@ window.CompanionSetup = (() => {
       <button type="button" class="button small" data-setup-open-block="${escape(item.id)}">展开设置</button>
     </li>`).join("");
     return `<div class="setup-shell setup-complete-shell setup-guide-shell">
-      <header class="setup-header"><div><span class="setup-kicker">我会永远陪着你</span><h2>开始使用</h2></div>
-        <div class="setup-header-actions"><button type="button" class="button" data-setup-action="advanced-open">快速配置</button></div></header>
+      <header class="setup-header"><div class="setup-header-copy"><span class="setup-kicker">我会永远陪着你</span><h2>开始使用 · 常用设置导览</h2>
+        <p class="setup-header-sub">首次连接与主动测试已完成。下面按使用频率整理了 6 组常用设置，点「展开设置」即可就地修改，不必在多个页面来回寻找。</p></div>
+        <div class="setup-header-actions"><button type="button" class="button" data-setup-action="advanced-open">快速配置</button>${homeButton("进入陪伴小屋")}</div></header>
       ${upgradeCard()}
       <p class="setup-guide-status" role="status">首次设置已完成 · 之后随时可以回来调整这些设置。</p>
       <ol class="setup-guide-list" aria-label="配置引导">${items}</ol>
@@ -3131,7 +3160,7 @@ window.CompanionSetup = (() => {
     }
     stopLegacySettings();
     stopQuickWorkspace();
-    onState?.({upgrading: state?.upgrade?.present === true});
+    onState?.({upgrading: Boolean(state?.upgrade?.present && !state?.upgrade?.configured)});
     if (migrationOnly && legacySettingsKey) {
       root.innerHTML = legacySettingsMarkup();
       mountLegacySettings();
@@ -3156,7 +3185,7 @@ window.CompanionSetup = (() => {
       mountQuickWorkspace();
       return;
     }
-    if (state.upgrade?.present) {
+    if (state.upgrade?.present && !state.upgrade?.configured) {
       root.innerHTML = `<div class="setup-shell setup-upgrade-shell">
         <ol class="setup-upgrade-steps" aria-label="升级进度">
           <li ${state.upgrade.configured ? 'class="complete"' : 'aria-current="step"'}><span>${state.upgrade.configured ? "✓" : "1"}</span><strong>接续配置</strong></li>
@@ -3180,9 +3209,13 @@ window.CompanionSetup = (() => {
       : renderSection(step);
     const current = stepIndex(step);
     root.innerHTML = `<div class="setup-shell">
-      <header class="setup-header"><div><span class="setup-kicker">我会永远陪着你</span><h2>开始使用</h2></div>
-        <div class="setup-header-actions">${state.prepared ? `<button type="button" class="button" data-setup-action="advanced-open">快速配置</button>` : ""}<span class="setup-step-count">${String(current + 1).padStart(2, "0")} / ${String(ORDER.length).padStart(2, "0")}</span></div></header>
-      ${renderRail(step)}<div class="setup-content">${upgradeCard()}${stageBanner(step)}${content}</div>
+      <header class="setup-header">
+        <div class="setup-header-copy"><span class="setup-kicker">我会永远陪着你</span><h2>开始使用</h2>
+          <p class="setup-header-sub">第 ${current + 1} 步 / 共 ${ORDER.length} 步 · ${escape((STEP_GROUPS.find(group => group.steps.includes(step)) || {}).title || "")} · 可随时跳过或回来继续</p></div>
+        <div class="setup-header-actions">${state.prepared ? `<button type="button" class="button" data-setup-action="advanced-open">快速配置</button>` : ""}<span class="setup-step-count">${String(current + 1).padStart(2, "0")} / ${String(ORDER.length).padStart(2, "0")}</span></div>
+        <div class="setup-header-progress" aria-hidden="true"><i style="width:${((current + 1) / ORDER.length * 100).toFixed(1)}%"></i></div>
+      </header>
+      ${renderRail(step)}<div class="setup-content${step === "model" ? " setup-question-mode" : ""}">${upgradeCard()}${stageBanner(step)}${content}${nextStepPreview(step)}</div>
     </div>`;
     if (STEP_EDITORS[step] && state.prepared) mountStepEditor(step);
   }

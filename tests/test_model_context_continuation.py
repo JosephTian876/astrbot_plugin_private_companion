@@ -56,6 +56,7 @@ class ModelContextContinuationTests(ModelFixture, unittest.IsolatedAsyncioTestCa
             ("role_binding", replace(original, role_binding=replace(original.role_binding,
                 revision=original.role_binding.revision + 1))),
             ("role_instruction", replace(original, role_instruction="private replacement persona")),
+            ("host_role_instruction", replace(original, role_guard_instruction="private replacement guard")),
             ("streaming", replace(original, streaming=True)),
             ("streaming_mode", replace(original, streaming_mode="incremental")),
             ("output_format", replace(original, output_format="journal")),

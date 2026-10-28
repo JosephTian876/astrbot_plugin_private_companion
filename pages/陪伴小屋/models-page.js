@@ -264,6 +264,9 @@ window.CompanionModelsPage = (() => {
     voice: '<path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
     image: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="1.6"/><path d="m4 18 5-5 3 3 3-3 5 5"/>',
     search: '<circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4.5 4.5"/>',
+    map: '<circle cx="12" cy="12" r="2.2"/><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7a5 5 0 1 0 5 5"/>',
+    cfg: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
+    pol: '<path d="M4 7h4l3 10h4M14 7h6M17 4l3 3-3 3M8 17H4M5 14l-3 3 3 3"/>',
     reply: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>',
     memory: '<circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/>',
     life: '<rect x="3" y="4" width="18" height="17" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/>',
@@ -1405,6 +1408,17 @@ window.CompanionModelsPage = (() => {
       `<label class="model-img-field model-img-inline"><span>请求头</span><span><input type="checkbox" data-img-config-field="${base}.clear_custom_headers"${item.clear_custom_headers ? " checked" : ""}${disabled ? " disabled" : ""}>清除已保存请求头</span></label>` : ""}`;
     return `<label class="model-img-field"><span>协议</span><select data-img-config-field="${base}.platform"${disabled ? " disabled" : ""}>${options}</select><small>${esc(IMAGE_PROTOCOL_SUPPORT[item.platform] || "请按服务商文档选择")}</small></label>${imageConfigField("API 根地址", `${base}.base_url`, item.base_url, "url", 'placeholder="https://api.example.com/v1"', "", disabled)}${imageConfigField("超时秒数", `${base}.timeout_seconds`, item.timeout_seconds, "number", 'min="1" max="1800" step="1"', "", disabled)}${keyField}${headersField}`;
   }
+  const IMAGE_ROUTE_TONES = ["#4f7f64", "#5b70a6", "#9a6a3d", "#795b96", "#a65353", "#3f7b89"];
+  function imageRouteHost(value) {
+    try { return new URL(String(value || "")).host || "未配置地址"; }
+    catch { return String(value || "").replace(/^https?:\/\//, "").split("/")[0] || "未配置地址"; }
+  }
+  function imageRouteSupportTone(value) {
+    return /可用于|可调用|就绪|可用/.test(String(value || "")) ? "is-ready" : "is-off";
+  }
+  function imageRouteToggle(ref, expanded, label) {
+    return `<summary data-img-route-expand="${esc(ref)}" class="model-img-route-toggle" aria-expanded="${expanded}"><span class="model-img-route-toggle-mark"><i data-lucide="${expanded ? "chevron-up" : "chevron-down"}" aria-hidden="true"></i></span><span class="model-img-route-toggle-copy"><b>${expanded ? "收起配置" : "展开配置"}</b><small>${esc(label)}</small></span><span class="model-img-route-toggle-state">${expanded ? "收起" : "展开"}</span></summary>`;
+  }
   function imageRouteCard(i, ref, index, config) {
     const disabled = i.configSaving || i.configLoading || !!i.endpointTesting;
     const expanded = i.expandedImageRoutes?.[ref] ?? index === 0;
@@ -1423,8 +1437,10 @@ window.CompanionModelsPage = (() => {
         ["bailian", "modelscope", "gemini"].includes(imageEffectivePlatform(item));
       const connectionFields = imageEndpointConnectionFields(i, item, base, disabled);
       const modelFields = `${imageConfigField("模型 ID", `${base}.model`, item.model, "text", 'maxlength="240" placeholder="服务商提供的模型 ID"', "")}${imageConfigField("尺寸标签", `${base}.size_label`, item.size_label || `${item.width}x${item.height}`, "text", 'maxlength="64" placeholder="如 1024x1024、1K、auto"', "服务商接受标签时保留原值；宽高用于通用协议")}${imageConfigField("宽度", `${base}.width`, item.width, "number", 'min="64" max="8192" step="64"', "像素")}${imageConfigField("高度", `${base}.height`, item.height, "number", 'min="64" max="8192" step="64"', "像素")}${item.platform === "minimax" ? "" : `<label class="model-img-field"><span>图片质量</span><select data-img-config-field="${base}.quality"${disabled ? " disabled" : ""}>${[["auto", "自动"], ["low", "低"], ["medium", "中"], ["high", "高"], ["standard", "标准"], ["hd", "高清"]].map(([value, label]) => `<option value="${value}"${item.quality === value ? " selected" : ""}>${label}</option>`).join("")}</select></label>${imageConfigField("最多参考图", `${base}.max_reference_images`, item.max_reference_images, "number", 'min="0" max="8" step="1"', "设为 0 时此模型仅用于文生图")}`}<label class="model-img-field model-img-inline"><span>启用模型</span><input type="checkbox" data-img-config-field="${base}.enabled"${item.enabled ? " checked" : ""}${disabled ? " disabled" : ""}></label>`;
-      return `<article class="model-img-route"><header><span class="model-img-priority">${index + 1}</span><div class="model-img-route-title"><span class="model-img-route-name-wrap" title="点击修改模型显示名称；留空时显示模型 ID"><input type="text" class="model-img-route-name" data-img-config-field="${base}.name" value="${esc(item.name || "")}" maxlength="240" placeholder="${esc(imageEndpointLabel(item, "自定义名称"))}" aria-label="自定义模型名称"${disabled ? " disabled" : ""}><i data-lucide="pencil" aria-hidden="true"></i></span><small>${esc(item.model || "未设置模型 ID")} · ${esc(IMAGE_PLATFORMS[item.platform] || item.platform || "自动识别")}</small></div><span class="model-img-route-support">${esc(imageRouteAvailable(config, ref, imageCurrentOperation(i)))}</span>${controls}</header>
-        <details class="model-img-route-details"${expanded ? " open" : ""}><summary data-img-route-expand="${esc(ref)}">连接与生图参数</summary>
+      const tone = IMAGE_ROUTE_TONES[index % IMAGE_ROUTE_TONES.length];
+      const support = imageRouteAvailable(config, ref, imageCurrentOperation(i));
+      return `<article class="model-img-route" data-img-route-card="${esc(ref)}" style="--route-tone:${tone}"><header><span class="model-img-priority">${index + 1}</span><div class="model-img-route-title"><span class="model-img-route-name-wrap" title="点击修改模型显示名称；留空时显示模型 ID"><input type="text" class="model-img-route-name" data-img-config-field="${base}.name" value="${esc(item.name || "")}" maxlength="240" placeholder="${esc(imageEndpointLabel(item, "自定义名称"))}" aria-label="自定义模型名称"${disabled ? " disabled" : ""}><i data-lucide="pencil" aria-hidden="true"></i></span><div class="model-img-route-meta"><span class="model-img-route-id" title="${esc(item.model || "")}">${esc(item.model || "未设置模型 ID")}</span><span class="model-img-route-kind">${esc(IMAGE_PLATFORMS[item.platform] || "自动识别")}</span><span class="model-img-route-host" title="${esc(item.base_url || "")}">${esc(imageRouteHost(item.base_url))}</span></div></div><span class="model-img-route-support ${imageRouteSupportTone(support)}">${esc(support)}</span>${controls}</header>
+        <details class="model-img-route-details"${expanded ? " open" : ""}>${imageRouteToggle(ref, expanded, "连接、测试与生图参数")}
         <div class="model-img-endpoint-test"><button type="button" class="button small" data-img-endpoint-test="${esc(item.id)}"${testDisabled ? " disabled" : ""}>${testing ? "生成中…" : "生成测试图"}</button><span role="status" data-state="${esc(test?.status || "")}">${esc(testLabel)}</span></div>
         <fieldset class="model-schema-group"><legend>连接</legend><div class="model-img-route-grid">${connectionFields}</div></fieldset>
         <fieldset class="model-schema-group"><legend>生图参数</legend><div class="model-img-route-grid">${modelFields}</div></fieldset><div class="model-img-route-delete"><button type="button" class="button small danger" data-img-endpoint-remove="${esc(item.id)}"${disabled ? " disabled" : ""}>删除此模型</button></div></details></article>`;
@@ -1442,7 +1458,9 @@ window.CompanionModelsPage = (() => {
     const workflowSection = ref === "comfyui"
       ? `<fieldset class="model-schema-group"><legend>工作流</legend><div class="model-img-route-grid">${flowFields}</div></fieldset>`
       : flowFields;
-    return `<article class="model-img-route"><header><span class="model-img-priority">${index + 1}</span><div class="model-img-route-title"><strong>${name}</strong><small>${esc(item.base_url || "尚未配置连接地址")}</small></div><span class="model-img-route-support">${esc(imageRouteAvailable(config, ref, op))}</span>${controls}</header><details class="model-img-route-details"${expanded ? " open" : ""}><summary data-img-route-expand="${esc(ref)}">连接与工作流</summary><fieldset class="model-schema-group"><legend>连接</legend><div class="model-img-route-grid">${connectionFields}</div></fieldset>${workflowSection}</details></article>`;
+    const tone = IMAGE_ROUTE_TONES[index % IMAGE_ROUTE_TONES.length];
+    const support = imageRouteAvailable(config, ref, op);
+    return `<article class="model-img-route" data-img-route-card="${esc(ref)}" style="--route-tone:${tone}"><header><span class="model-img-priority">${index + 1}</span><div class="model-img-route-title"><strong>${name}</strong><div class="model-img-route-meta"><span class="model-img-route-kind">${ref === "comfyui" ? "ComfyUI" : "SD WebUI"}</span><span class="model-img-route-host" title="${esc(item.base_url || "")}">${esc(imageRouteHost(item.base_url))}</span></div></div><span class="model-img-route-support ${imageRouteSupportTone(support)}">${esc(support)}</span>${controls}</header><details class="model-img-route-details"${expanded ? " open" : ""}>${imageRouteToggle(ref, expanded, "连接与工作流")}<fieldset class="model-schema-group"><legend>连接</legend><div class="model-img-route-grid">${connectionFields}</div></fieldset>${workflowSection}</details></article>`;
   }
   function imageConfigEditor(s) {
     const i = s.image, config = i.configDraft;
@@ -1495,8 +1513,17 @@ window.CompanionModelsPage = (() => {
     if (!i.data) return '<p class="model-empty">正在读取生图模型配置…</p>';
     const actions = i.data.actions, loaded = actions.filter(item => item.loaded).length, ready = actions.filter(item => item.state === "ready").length;
     const view = i.view || "generate", active = IMAGE_VIEWS[view];
-    return `<div class="model-image"><div class="model-card model-img-status"><div class="model-phead"><div class="model-grow"><span class="model-eb">模型与连接</span><h3>生图模型配置</h3></div><button type="button" class="button small" data-img-refresh${i.loading || i.busy ? " disabled" : ""}>刷新状态</button></div><div class="model-kpis">${kpi(actions.length, "内置动作")}${kpi(`${loaded}/${actions.length}`, "已加载")}${kpi(`${ready}/${actions.length}`, "当前可调用", ready ? "g" : "a")}${kpi(i.data.authorization === "checked_for_each_invocation" ? "逐次校验" : "未确认", "调用授权")}</div>${imageModuleNotice(i.data) ? `<p class="model-img-module-note" role="status">${esc(imageModuleNotice(i.data))}</p>` : ""}</div>
-      <section class="model-imgconfig"><header class="model-imgconfig-head"><div><span class="model-eb">按功能独立设置模型</span><h3>文生图与改图</h3><p>两个功能分别维护模型、连接参数与优先级；改图包含普通改图和蒙版局部改图。</p></div></header><div class="model-img-workbench"><nav class="model-img-nav" role="tablist" aria-label="生图功能">${Object.entries(IMAGE_VIEWS).map(([id, item], index) => `<button type="button" role="tab" data-img-view="${id}" aria-selected="${view === id}" class="${view === id ? "on" : ""}"><span class="model-img-nav-no">0${index + 1}</span><span><b>${item.label}</b><small>${id === "generate" ? "文本生成图片" : "普通与局部改图 · 共用模型顺序"}</small></span><i>›</i></button>`).join("")}</nav><div class="model-img-main"><section class="model-img-view"><div class="model-img-sectionhead"><div><b>${active.label}能力</b><span>${view === "generate" ? "检查文生图动作是否已注册并开启。" : "参考图改图与蒙版局部改图分别检查能力，模型队列共用。"}</span></div></div><ul class="model-pvl">${active.actions.map((action, index) => imageActionRow(i, action, index)).join("")}</ul><div class="model-editor-actions"><button type="button" class="button primary" data-img-save${i.busy || i.loading || !imageDirty(i) ? " disabled" : ""}>保存能力开关</button></div>${imageConfigEditor(s)}</section></div></div></section>${i.bad ? `<div class="model-notice error" role="status">${esc(i.notice)}</div>` : i.notice ? `<div class="model-notice" role="status">${esc(i.notice)}</div>` : ""}</div>`;
+    const configState = i.configLoading ? "读取配置中" : i.configDraft ? (i.configDraft.enabled ? "生图后端已启用" : "生图后端未启用") : "配置未读取";
+    const configTone = i.configDraft?.enabled ? "is-ready" : "is-off";
+    return `<div class="model-image">
+      <section class="model-img-overview" aria-label="生图模型概览">
+        <div class="model-img-overview-copy"><span class="model-eb">模型与连接</span><div class="model-img-overview-title"><h3>生图模型</h3><span class="model-img-backend-state ${configTone}">${configState}</span></div><p>文生图与改图各自维护模型队列。队列顺序决定优先尝试的模型，失败时按顺序继续。</p></div>
+        <div class="model-img-overview-side"><div class="model-img-statusline"><span><b>${actions.length}</b>内置动作</span><span><b>${loaded}/${actions.length}</b>已加载</span><span><b>${ready}/${actions.length}</b>可调用</span><span><b>${i.data.authorization === "checked_for_each_invocation" ? "逐次" : "待确认"}</b>调用授权</span></div><button type="button" class="button small" data-img-refresh${i.loading || i.busy ? " disabled" : ""}>刷新状态</button></div>
+      </section>
+      ${imageModuleNotice(i.data) ? `<p class="model-img-module-note" role="status">${esc(imageModuleNotice(i.data))}</p>` : ""}
+      <section class="model-imgconfig"><header class="model-imgconfig-head"><div><span class="model-eb">按功能独立设置模型</span><h3>文生图与改图</h3><p>两个功能分别维护模型、连接参数与优先级；改图包含普通改图和蒙版局部改图。</p></div><span class="model-tag">${active.label}</span></header><div class="model-img-workbench"><nav class="model-img-nav" role="tablist" aria-label="生图功能">${Object.entries(IMAGE_VIEWS).map(([id, item], index) => `<button type="button" role="tab" data-img-view="${id}" aria-selected="${view === id}" class="${view === id ? "on" : ""}"><span class="model-img-nav-no">0${index + 1}</span><span><b>${item.label}</b><small>${id === "generate" ? "文本生成图片" : "普通与局部改图 · 共用模型顺序"}</small></span><i>›</i></button>`).join("")}</nav><div class="model-img-main"><section class="model-img-view model-img-capabilities"><div class="model-img-sectionhead"><div><b>${active.label}能力</b><span>${view === "generate" ? "检查文生图动作是否已注册并开启。" : "参考图改图与蒙版局部改图分别检查能力，模型队列共用。"}</span></div><span class="model-tag">${active.actions.length} 个动作</span></div><ul class="model-pvl">${active.actions.map((action, index) => imageActionRow(i, action, index)).join("")}</ul><div class="model-editor-actions"><button type="button" class="button primary" data-img-save${i.busy || i.loading || !imageDirty(i) ? " disabled" : ""}>保存能力开关</button></div>${imageConfigEditor(s)}</section></div></div></section>
+      ${i.bad ? `<div class="model-notice error" role="status">${esc(i.notice)}</div>` : i.notice ? `<div class="model-notice" role="status">${esc(i.notice)}</div>` : ""}
+    </div>`;
   }
   function imageInput(s, event) {
     const i = s.image, t = event.target;
@@ -1649,8 +1676,12 @@ window.CompanionModelsPage = (() => {
     return `<div class="model-tabs" role="tablist" aria-label="模型配置分类">${tabs.map(([id, label, ic, count]) =>
       `<button type="button" role="tab" data-model-tab="${id}" aria-selected="${s.tab === id}" class="${s.tab === id ? "on" : ""}">${icon(ic)}${label}${count !== "" ? `<span class="c">${count}</span>` : ""}</button>`).join("")}</div>`; }
   /* ---------- functional subtabs (design migration) ---------- */
-  function subtabBar(s) { const tabs = [["map", "态势图"], ["cfg", "模型配置"], ["pol", "替换策略"]];
-    return `<div class="model-subtabs" role="tablist" aria-label="功能模型视图">${tabs.map(([id, label]) => `<button type="button" role="tab" data-model-sub="${id}" aria-selected="${s.sub === id}" class="${s.sub === id ? "on" : ""}">${label}</button>`).join("")}</div>`; }
+  function subtabBar(s) { const tabs = [
+      ["map", "态势图", "map", "查看任务当前路由、备用与风险"],
+      ["cfg", "模型配置", "cfg", "逐项编辑主模型、备用链与提示"],
+      ["pol", "替换策略", "pol", "统一管理回退、拒答替代与窗口"],
+    ];
+    return `<div class="model-subtabs" role="tablist" aria-label="功能模型视图">${tabs.map(([id, label, ic, desc]) => `<button type="button" role="tab" data-model-sub="${id}" aria-selected="${s.sub === id}" class="${s.sub === id ? "on" : ""}"><span class="model-subtab-icon">${icon(ICONS[ic])}</span><span class="model-subtab-copy"><b>${label}</b><small>${desc}</small></span></button>`).join("")}</div>`; }
   function kpi(n, label, tone = "") { return `<div class="model-kpi ${tone}"><b>${n}</b><span>${esc(label)}</span></div>`; }
   function fnKpis(s) { const tasks = snapshot(s); const total = tasks.length; const providers = s.status?.providers.length || 0;
     const withFb = tasks.filter(fallbackFor).length; const own = tasks.filter(t => taskFields(t).some(nm => t.fields[nm]?.explicit)).length;
@@ -2096,7 +2127,7 @@ window.CompanionModelsPage = (() => {
       <div class="model-sec"><h4>作为备用 · ${asFb.length} 项</h4>${asFb.map(t => `<div class="li">${esc(taskName(t.kind).label)}<span>${esc(taskName(t.kind).description)}</span></div>`).join("") || '<span class="model-mono">无</span>'}</div>
       <div class="model-sec"><button type="button" class="button primary" style="width:100%" data-drawer-goto="${esc(id)}">在精确配置中调整</button></div></aside>`; }
   function render() { if (!root || !state) return; const s = state;
-    root.innerHTML = `<div class="model-workspace">${s.tab === "fn" ? semanticBanner() : ""}${tabBar(s)}${pane(s)}${drawer(s)}</div>`;
+    root.innerHTML = `<div class="model-workspace">${s.tab === "fn" ? semanticBanner() : ""}${tabBar(s)}${(s.bad || s.denied) ? notice(s) : ""}${pane(s)}${drawer(s)}</div>`;
     window.lucide?.createIcons?.({attrs: {"aria-hidden": "true"}}); }
   function input(event) { const s = state; if (!s || !root?.isConnected) return;
     if (s.tab === "voice") { voiceInput(s, event); return; }
@@ -2148,7 +2179,7 @@ window.CompanionModelsPage = (() => {
     /* path 是每一次请求的基址（model_api + /configure、/voice、/tts/providers…），
        也是 localStorage 键的一部分。桥要插件相对路径，所以切掉插件目录名。 */
     path = endpoint.slice(PREFIX.length); key = "companion-model-edit.v2:" + JSON.stringify([identity.installation_id, identity.operator_id, path]);
-    state = states.get(key) || { status: null, drafts: new Map(), selection: [], expanded: null, layer: "role", view: "tasks", custom: null, lane: "all", providerFilter: null, query: "", sub: "cfg", cm: "precise", av: "slot", af: "all", pm: "kw", slotDraft: {}, providerTests: {}, testing: new Set(),
+    state = states.get(key) || { status: null, drafts: new Map(), selection: [], expanded: null, layer: "role", view: "tasks", custom: null, lane: "all", providerFilter: null, query: "", sub: "map", cm: "precise", av: "slot", af: "all", pm: "kw", slotDraft: {}, providerTests: {}, testing: new Set(),
       drawer: null, expOpen: {}, pol: null, rule: { query: "", picked: [], report: null, testing: false }, peak: { on: true, provider: "", start: "09:00", end: "12:00", windows: "09:00-12:00\n14:00-18:00" },
       tab: "fn",
       voice: { data: null, draft: null, loaded: false, loading: false, busy: false, testing: false, bad: false, notice: "", ui: { lang: "ja" },
@@ -2165,6 +2196,7 @@ window.CompanionModelsPage = (() => {
        不再每次回到“全收起”或“全展开”。 */
     state.expOpen = { ...restoreExpanded(key), ...(state.expOpen || {}) }; state.voice.lastTest ||= null; state.voice.editorValues ||= {}; state.voice.ttsTestResults ||= {}; state.voice.ttsTesting ||= false; state.voice.createDraft ||= { type: "", id: "" }; state.image.endpointTests ||= {}; state.image.endpointTesting ||= null; state.configDraft ||= null; state.peak ||= { on: true, provider: "", start: "09:00", end: "12:00" }; state.testing ||= new Set(); state.peak.windows ||= "09:00-12:00\n14:00-18:00"; state.laya ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "", test: null, preview: null, previewText: "" }; state.search ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "" }; state.hoverProvider = "";
     states.set(key, state);
+    state.sub = ["map", "cfg", "pol"].includes(options.sub) ? options.sub : "map";
     root.addEventListener("input", input); root.addEventListener("change", input); root.addEventListener("click", click); root.addEventListener("pointerover", providerHover); root.addEventListener("pointerout", providerHover); render();
     if (state.tab && state.tab !== "fn") { if (state.tab === "voice" && !state.voice.loaded) voiceRefresh(state); else if (state.tab === "image" && !state.image.loaded) imageRefresh(state); else if (state.tab === "search" && !state.search.loaded) searchRefresh(state); else if (state.tab === "laya" && !state.laya.loaded) layaRefresh(state); }
     else { refresh().catch(() => {}); } }

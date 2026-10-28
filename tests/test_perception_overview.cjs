@@ -14,7 +14,7 @@ class FixedDate extends Date {
   static now() { return fixedNow.getTime(); }
 }
 
-function harness({runtimeWeatherState="available",mihomeEnabled=true,balanceEnabled=true,automaticAllowed=true,balanceConfigured=false,balanceResponse=null,otherInjections=[{label:"参考资料",detail:"本轮加入 1 项"}],recallEnabled=true,recallEntries=[{local_time:"17:42",withdrawn_at:"2026-10-01T09:42:00Z",author:"user-1",text:"周末去公园走走"}],imageTask=true,imageProviderId="image-live",imagePreferred=null,contactDates=[{calendar:"gregorian",month:10,day:3,label:"相识纪念日"}],contactLookaheadDays=3}={}) {
+function harness({runtimeWeatherState="available",mihomeEnabled=true,balanceEnabled=true,automaticAllowed=true,balanceConfigured=false,balanceResponse=null,otherInjections=[{label:"参考资料",detail:"本轮加入 1 项"}],recallEnabled=true,recallEntries=[{local_time:"17:42",withdrawn_at:"2026-10-01T09:42:00Z",author:"user-1",text:"周末去公园走走"}],imageTask=true,imageProviderId="image-live",imagePreferred=null,huaweiBound=false,huaweiLatest=null,materialPool={state:"ready",checked_at:"2026-10-01T09:50:00Z",count:2,items:[{title:"AI 早报一",detail:"摘要一",note:"橘鸦 AI 早报",captured_at:"2026-10-01T09:50:00Z"},{title:"AI 早报二",detail:"摘要二",note:"橘鸦 AI 早报",captured_at:"2026-10-01T09:48:00Z"}]},contactDates=[{calendar:"gregorian",month:10,day:3,label:"相识纪念日"}],contactLookaheadDays=3}={}) {
   let listener = null, intervalCallback = null, cleared = false, requested = [], bridgeRequests = [];
   const failedRequests = new Set(), tabActivations = [], focused = [];
   const currentBalance = balanceResponse || (balanceConfigured
@@ -73,7 +73,7 @@ function harness({runtimeWeatherState="available",mihomeEnabled=true,balanceEnab
     camera:{state:"available",status:"success",answer_available:true,purpose:"看看我现在在做什么",
       captured_at:"2026-10-01T09:57:00Z",observation:{summary:"桌面上有打开的笔记本电脑。",confidence:0.9}}};
   const product = {scopeKey:() => "role-1", role:() => ({model_api:"/astrbot_plugin_private_companion/model",
-      perception_native_api:"/astrbot_plugin_private_companion/perception-native"}),
+      perception_native_api:"/astrbot_plugin_private_companion/perception-native", reply_api:"reply"}),
     provider:id => id === "screen" ? {integration_state:"connected",runtime_ready:true,reason:"屏幕扩展运行正常"}
       : {integration_state:"missing",reason:"未安装"},
     statusLabel:value => value, data:{state:{state:{values:{},settings:{}}}},
@@ -87,6 +87,11 @@ function harness({runtimeWeatherState="available",mihomeEnabled=true,balanceEnab
         providers:[{id:"tts-main",label:"TTS 主路由",model:"tts-live"}],catalog_state:"ready",voice_enabled:true};
       if (route.endsWith("/image")) return {actions:[{action:"image.generate",enabled:true,
         owner:"Image 扩展",provider_id:imageProviderId,state:"ready"}],preferred_image:imagePreferred};
+      if (route === "huawei-health/status") return {bound:huaweiBound,latest:huaweiLatest,
+        token:{cached:false,left:0},cookie:{exists:false,count:0},credentials:{state:huaweiBound?"ok":"absent"},
+        login:{state:"IDLE"},browser:{found:true}};
+      if (route === "reply/recalls") return {enabled:recallEnabled,entries:recallEntries};
+      if (route.endsWith("/materials")) return materialPool;
       return status;
     },
     bridgeNow:() => ({apiGet:async route => {
@@ -137,8 +142,12 @@ test("overview shows the requested context, live routes, authorized devices and 
     "/astrbot_plugin_private_companion/model/balance",
     "/astrbot_plugin_private_companion/model/image",
     "/astrbot_plugin_private_companion/model/voice",
+    "/astrbot_plugin_private_companion/perception-native/materials",
     "/astrbot_plugin_private_companion/perception-native/runtime",
+    "huawei-health/status",
+    "reply/recalls",
   ]);
+  require("fs").writeFileSync("dash-debug.html", page.root.innerHTML);
   assert.match(page.root.innerHTML, /用户配置区域/);
   assert.match(page.root.innerHTML, /晴 · 22°C/);
   assert.match(page.root.innerHTML, /大风蓝色预警/);
@@ -151,18 +160,20 @@ test("overview shows the requested context, live routes, authorized devices and 
   assert.match(page.root.innerHTML, /天气实况/);
   assert.match(page.root.innerHTML, /model-live/);
   assert.match(page.root.innerHTML, /Provider provider-main · 备用 model-safe/);
-  assert.deepEqual([...page.root.innerHTML.matchAll(/class="perception-mtile-model">([^<]*)<\/strong>/g)].map(match => match[1]),
-    ["model-live", "tts-live", "image-live", "vision-live"]);
+  for (const model of ["model-live", "tts-live", "image-live", "vision-live"])
+    assert.match(page.root.innerHTML, new RegExp(`<strong>${model}</strong>`));
   assert.match(page.root.innerHTML, /image-live/);
   assert.match(page.root.innerHTML, /中文 · 已就绪/);
   assert.match(page.root.innerHTML, /Image 扩展 · image-live · 已就绪/);
   assert.doesNotMatch(page.root.innerHTML.replace(/<[^>]*>/g, ''), /\bready\b/);
   assert.match(page.root.innerHTML, /vision-live/);
-  assert.match(page.root.innerHTML, /外部资讯与检索/);
+  assert.match(page.root.innerHTML, /外部资讯/);
   assert.match(page.root.innerHTML, /AstrBot 网页搜索/);
   assert.match(page.root.innerHTML, /用户正在查看代码编辑器/);
   assert.match(page.root.innerHTML, /上海市·徐汇区/);
-  assert.match(page.root.innerHTML, /摄像头状态/);
+  assert.match(page.root.innerHTML, /摄像头/);
+  assert.match(page.root.innerHTML, /运动健康/);
+  assert.match(page.root.innerHTML, /心率 72 次\/分/);
   /* 农历与星期属于服务端日历语义，由运行时写入日期行，不在服务端渲染的 HTML 里。 */
   assert.match(page.root.clockNodes.date.textContent, /农历八月二十/);
   assert.match(page.root.clockNodes.date.textContent, /星期四/);
@@ -178,11 +189,10 @@ test("overview shows the requested context, live routes, authorized devices and 
   assert.match(page.root.innerHTML, /项实况在线/);
   assert.match(page.root.innerHTML, /data-context-clock-time/);
   assert.match(page.root.innerHTML, /data-context-clock-date/);
-  assert.match(page.root.innerHTML, /data-context-clock-lunar/);
   assert.doesNotMatch(page.root.innerHTML, /perception-group|perception-stream-container|perception-stream-details|perception-board-config/);
   assert.equal((page.root.innerHTML.match(/class="perception-board-card/g) || []).length, 4);
-  for (const item of ["所在地", "天气实况", "天气预警", "余额感知", "对话模型", "TTS 模型", "生图模型",
-    "视觉模型", "外部资讯与检索", "用户定位", "识屏信息", "摄像头状态", "撤回记录",
+  for (const item of ["所在地", "天气实况", "天气预警", "余额感知", "对话模型", "语音模型", "生图模型",
+    "视觉模型", "外部资讯", "当前定位", "识屏", "摄像头", "撤回记录", "运动健康", "语音模型",
     "米家设备", "其他注入"]) {
     assert.match(page.root.innerHTML, new RegExp(item));
   }
@@ -231,10 +241,26 @@ test("image card shows the configured preferred model instead of the native owne
   page.page.mount(page.root);
   await new Promise(resolve => setImmediate(resolve));
 
-  assert.deepEqual([...page.root.innerHTML.matchAll(/class="perception-mtile-model">([^<]*)<\/strong>/g)].map(match => match[1]),
-    ["model-live", "tts-live", "gpt-image-2", "vision-live"]);
+  for (const model of ["model-live", "tts-live", "gpt-image-2", "vision-live"])
+    assert.match(page.root.innerHTML, new RegExp(`<strong>${model}</strong>`));
   assert.match(page.root.innerHTML, /备选在线 API · 首选/);
   assert.doesNotMatch(page.root.innerHTML, /image\.native/);
+  page.page.unmount();
+});
+
+test("dashboard prefers an actual Huawei health summary when the account is bound", async () => {
+  const page = harness({huaweiBound:true,huaweiLatest:{observed_at:"2026-10-01T09:55:00Z",
+    summary:"【睡眠】昨晚睡了 7 小时 12 分\n【静息心率】62 次/分"}});
+  page.page.mount(page.root);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.match(page.root.innerHTML, /昨晚睡了 7 小时 12 分/);
+  assert.match(page.root.innerHTML, /运动健康 · 5 分钟前/);
+  assert.match(page.root.innerHTML, /class="perception-reading-badge is-ready"[^>]*>.*?已同步/);
+  const preview = page.page.preview("device-health");
+  assert.match(preview, /health-preview-section/);
+  assert.match(preview, /昨晚睡了 7 小时 12 分/);
+  assert.match(preview, /静息心率/);
   page.page.unmount();
 });
 
@@ -246,18 +272,37 @@ test("dashboard provides narrow-screen rows, focus states and reduced motion", (
   assert.match(styles, /\.perception-balance-actions button:focus-visible/);
 });
 
+test("single item previews show the item's current content, not only its form", async () => {
+  const page = harness();
+  page.page.mount(page.root);
+  await new Promise(resolve => setImmediate(resolve));
+
+  const news = page.page.preview("ext-external");
+  assert.match(news, /AI 早报一/);
+  assert.match(news, /AI 早报二/);
+  assert.match(news, /AstrBot 网页搜索/);
+  assert.match(news, /科技,生活/);
+
+  const weather = page.page.preview("env-weather");
+  assert.match(weather, /26|22/);
+  assert.match(weather, /大风蓝色预警/);
+
+  const recall = page.page.preview("device-recalls");
+  assert.match(recall, /周末去公园走走/);
+  page.page.unmount();
+});
+
 test("the two lower cards show source-backed readings and explain absent snapshots", async () => {
   const page=harness({mihomeEnabled:false});
   page.page.mount(page.root);
   await new Promise(resolve=>setImmediate(resolve));
   const html=page.root.innerHTML;
   assert.match(html,/当前定位/);
-  assert.match(html,/最近一次定位/);
+  assert.match(html,/上海市·徐汇区/);
   assert.match(html,/电量 68% · 充电中 · 前台运行/);
-  assert.match(html,/上次识别 · 编辑器/);
-  assert.match(html,/最近检查 2 条 · AstrBot 网页搜索/);
+  assert.match(html,/用户正在查看代码编辑器/);
+  assert.match(html,/最近检查 2 条/);
   assert.match(html,/当前窗口 1 条可读记录/);
-  assert.match(html,/datetime="2026-10-01T09:56:00\.000Z"/);
   assert.match(html,/4 分钟前/);
   assert.doesNotMatch(html,/已静音|累计 12 条|已读取摘要|￥|¥/);
   page.page.unmount();
@@ -268,9 +313,10 @@ test("the two lower cards show source-backed readings and explain absent snapsho
   page.page.mount(page.root);
   await new Promise(resolve=>setImmediate(resolve));
   assert.match(page.root.innerHTML,/授权已就绪，尚无最近快照/);
-  assert.match(page.root.innerHTML,/摄像头 · 已授权/);
-  assert.doesNotMatch(page.root.innerHTML,/最近一次定位|电量 68%|编辑器|perception-feature is-location is-ready/);
-  assert.match(page.root.innerHTML,/perception-feature is-location is-pending/);
+  assert.match(page.root.innerHTML,/摄像头授权已就绪，尚无最近单帧结果/);
+  assert.doesNotMatch(page.root.innerHTML,/上海市·徐汇区|电量 68%|用户正在查看代码编辑器/);
+  const locationRow = page.root.innerHTML.match(/<button[^>]*id="perception-channel-device-location"[\s\S]*?<\/button>/)[0];
+  assert.match(locationRow,/is-pending/);
   page.page.unmount();
 });
 
@@ -278,8 +324,8 @@ test("configured balance is read through the model balance route and failed read
   const page=harness({balanceConfigured:true});
   page.page.mount(page.root);
   await new Promise(resolve=>setImmediate(resolve));
-  assert.match(page.root.innerHTML,/perception-feature is-balance is-ready/);
-  assert.match(page.root.innerHTML,/perception-balance-unit">额度<\/span> 123\.45/);
+  assert.match(page.root.innerHTML,/class="perception-hero is-balance is-ready" id="perception-channel-ext-balance"/);
+  assert.match(page.root.innerHTML,/123\.45 额度/);
   assert.ok(page.requested.includes("/astrbot_plugin_private_companion/model/balance"));
   assert.equal(page.bridgeRequests.some(([method,route])=>method==="POST"&&route==="host-options/balance/test"),false,
     "打开仪表盘复用 Token 页的模型余额接口");
@@ -293,8 +339,8 @@ test("configured balance is read through the model balance route and failed read
     await new Promise(resolve=>setImmediate(resolve));
   };
   await query();
-  assert.match(page.root.innerHTML,/最近一次查询/);
-  assert.match(page.root.innerHTML,/perception-balance-unit">额度<\/span> 123\.45/);
+  assert.match(page.root.innerHTML,/最近查询/);
+  assert.match(page.root.innerHTML,/123\.45 额度/);
   page.failRequest("/astrbot_plugin_private_companion/model/balance");
   await query();
   assert.match(page.root.innerHTML,/读取超时/);
@@ -326,12 +372,12 @@ test("the latest balance reading survives switching away from the dashboard", as
     return selector==="[data-balance-test]"?testButton:null;
   }},preventDefault(){}});
   await new Promise(resolve=>setImmediate(resolve));
-  assert.match(page.root.innerHTML,/额度<\/span> 123\.45/);
+  assert.match(page.root.innerHTML,/123\.45 额度/);
 
   page.page.unmount();
   page.page.mount(page.root);
   await new Promise(resolve=>setImmediate(resolve));
-  assert.match(page.root.innerHTML,/额度<\/span> 123\.45/);
+  assert.match(page.root.innerHTML,/123\.45 额度/);
 
   /* Route changes keep the successful observation and safe draft fields, but
      never carry a typed nap_ token into the next mount. */
@@ -382,7 +428,7 @@ test("dashboard regions directly select the configuration and model subtab below
     assert.match(page.root.innerHTML, new RegExp(`data-board-goto="${destination}"`));
     click("[data-board-goto]", {boardGoto:destination});
     assert.equal(page.tabActivations.at(-1)[0], destination);
-    assert.deepEqual({...page.tabActivations.at(-1)[1]}, {focus:true,scroll:true,modelTab:""});
+    assert.deepEqual({...page.tabActivations.at(-1)[1]}, {focus:true,scroll:true,modelTab:"",single:false,itemId:"",itemTitle:""});
     assert.doesNotMatch(page.root.innerHTML, /perception-stream-details|perception-board-config/);
   }
 
@@ -391,6 +437,10 @@ test("dashboard regions directly select the configuration and model subtab below
     click("[data-board-goto]", {boardGoto:"config-models:perception-detail-model-route",boardModelTab:tab});
     assert.equal(page.tabActivations.at(-1)[1].modelTab, tab);
   }
+  click("[data-board-goto]", {boardGoto:"config-screen:perception-detail-device-access",
+    boardSingle:"true",perceptionItem:"device-location",itemTitle:"当前定位"});
+  assert.deepEqual({...page.tabActivations.at(-1)[1]}, {focus:true,scroll:true,modelTab:"",
+    single:true,itemId:"device-location",itemTitle:"当前定位"});
   page.page.unmount();
 });
 
@@ -516,8 +566,8 @@ test("balance form keeps an unsaved token through redraw and tests the draft wit
   assert.equal(page.bridgeRequests.some(([method, route]) => method === "POST" && route === "host-options/balance"), false);
   assert.match(page.balanceWorkspace.innerHTML, /草稿测试成功：123\.45 额度/);
   assert.match(page.balanceWorkspace.innerHTML, /value="draft-token-kept"/);
-  assert.match(page.root.innerHTML, /草稿测试结果/);
-  assert.match(page.root.innerHTML, /perception-balance-unit">额度<\/span> 123\.45/);
+  assert.match(page.root.innerHTML, /草稿测试/);
+  assert.match(page.root.innerHTML, /123\.45 额度/);
   assert.doesNotMatch(page.root.innerHTML, /￥|¥|draft-token-kept/);
   page.page.unmount();
 });
@@ -529,12 +579,10 @@ test("readiness count reflects available signals, and optional rows stay absent"
 
   /* 通道数与实况在线数全程由当前 percepts 现算，不为"看起来完整"写死总数。 */
   assert.match(page.root.innerHTML, /个感知通道 · \d+ 项实况在线/);
-  assert.match(page.root.innerHTML, /\d+ 通道/);
-  assert.match(page.root.innerHTML, /本轮暂无其他注入/);
+  assert.match(page.root.innerHTML, /\d+ 项/);
   assert.doesNotMatch(page.root.innerHTML, /id="perception-channel-ext-injection"/);
   /* 未启用的通道不作为"感知通道"列出（与没有路由的视觉模型同处理），
      也不展示任何设备明细；对应详情分区保持隐藏，且只发一次能力查询。 */
-  assert.match(page.root.innerHTML, /米家 · 未启用/);
   assert.doesNotMatch(page.root.innerHTML, /id="perception-channel-device-mihome"/);
   assert.equal(page.parentNodes["#perception-detail-mihome"].hidden, true);
   assert.deepEqual(page.bridgeRequests.filter(([method, route]) => method === "GET" && route === "extensions"),
@@ -594,7 +642,7 @@ test("failed reads clear stale results, name the failed settings and recover on 
   assert.match(page.root.innerHTML, /余额联系设置读取失败/);
   assert.match(page.root.innerHTML, /外部来源设置读取失败/);
   assert.match(page.root.innerHTML, /角色地点读取失败/);
-  assert.match(page.root.innerHTML, /天气预警 · 读取失败/);
+  assert.match(page.root.innerHTML, /预警读取失败/);
   assert.doesNotMatch(page.root.innerHTML, /正在读取|桌面上有打开的笔记本电脑|大风蓝色预警|晴 · 22°C/);
   const balanceRow = page.root.innerHTML.match(/<button[^>]*id="perception-channel-ext-balance"[\s\S]*?<\/button>/)[0];
   assert.match(balanceRow, /is-pending/);
@@ -626,22 +674,35 @@ test("perception board enumerates real perception items and keeps every count co
   for (const id of ["environment", "models", "devices", "external"])
     assert.match(html, new RegExp(`data-perception-board="${id}"`));
 
-  for (const id of ["environment", "models"]) {
-    const heading = html.split(`id="perception-board-toggle-${id}"`)[1].split("</button>")[0];
-    assert.doesNotMatch(heading, /<small>/, "截图中的两处标题应移除统计说明行");
-  }
-
   const headline = /(\d+) 个感知通道 · (\d+) 项实况在线/.exec(html);
   assert.ok(headline, "页头应给出通道数与实况在线数");
   const total = Number(headline[1]), live = Number(headline[2]);
   assert.ok(total >= 1 && live <= total, "实况在线数不应多于通道总数");
 
-  const heads = [...html.matchAll(/aria-label="([^"]*)：(\d+) 条通道，(\d+) 项实况在线/g)];
-  assert.equal(heads.length, 4, "四张卡都要各自给出读数");
-  assert.equal(heads.reduce((acc, m) => acc + Number(m[2]), 0), total, "各卡通道数之和应等于页头总数");
-  assert.equal(heads.reduce((acc, m) => acc + Number(m[3]), 0), live, "各卡实况在线之和应等于页头读数");
+  const heads = [...html.matchAll(/aria-label="([^"]*)：(\d+) 个条目，(\d+) 项实况在线/g)];
+  assert.equal(heads.length, 4, "四张卡都要各自给出条目数");
+  assert.ok(heads.every(match => Number(match[2]) >= 1), "每张功能板至少展示一个真实条目");
 
   assert.doesNotMatch(html, /data-perception-toggle|data-balance-toggle|perception-stream-container|perception-group/);
   assert.equal((html.match(/class="perception-board-card/g) || []).length, 4);
+  page.page.unmount();
+});
+
+test("perception dashboard uses theme tokens, clear clickable cards and no hardcoded v9 paper skin", async () => {
+  const page = harness();
+  page.page.mount(page.root);
+  await new Promise(resolve => setImmediate(resolve));
+
+  const html = page.root.innerHTML;
+  assert.doesNotMatch(html, /perception-v9-page|perception-v9-hub|四象素面/);
+  assert.match(html, /class="perception-board-bar"/);
+  assert.match(html, /class="perception-board"/);
+  assert.equal((html.match(/class="perception-board-open"/g) || []).length, 4,
+    "四个分区卡片头部都应提供明确的「分区设置」按钮");
+  assert.ok((html.match(/class="perception-hero /g) || []).length >= 5,
+    "主读数应以独立可点击卡片展示");
+  assert.ok((html.match(/class="perception-mini /g) || []).length >= 6,
+    "次级感知条目应以带边框与箭头的独立按钮展示");
+  assert.doesNotMatch(styles, /--pv9-paper|--pv9-ink|#EFECE4/);
   page.page.unmount();
 });

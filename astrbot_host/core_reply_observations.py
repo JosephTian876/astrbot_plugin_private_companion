@@ -42,7 +42,8 @@ class CoreReplyObservations:
                         await asyncio.shield(prior)
                 return await asyncio.to_thread(work)
             except Exception as error:
-                logger.warning("[CompanionV2] 核心聊天后台观察失败 error_type=%s", type(error).__name__)
+                logger.warning("[CompanionV2] 核心聊天后台观察失败 error_type=%s code=%s",
+                               type(error).__name__, getattr(error, "code", "unavailable"))
                 return None
 
         task = asyncio.create_task(record(), name="companion-v2-native-observation")

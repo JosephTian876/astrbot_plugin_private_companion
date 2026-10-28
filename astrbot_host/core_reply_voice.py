@@ -2,6 +2,7 @@
 
 import re
 import asyncio
+from collections.abc import Mapping
 
 from astrbot.api import logger
 from astrbot.core.message.components import Plain, Record
@@ -36,7 +37,8 @@ def observe_core_voice_response(event, response):
     if core.get("_voice_observed_response") is response:
         return
     core["_voice_observed_response"] = response
-    policy = core["prepared"].get("voice_reply_policy")
+    prepared = core.get("prepared")
+    policy = prepared.get("voice_reply_policy") if isinstance(prepared, Mapping) else None
     text = getattr(response, "completion_text", "") or ""
     visible, spans = separate_spoken(text, policy)
     repaired = core.pop("_voice_repaired_response", None)
@@ -52,7 +54,7 @@ def observe_core_voice_response(event, response):
             "reason": "authored" if spans else "plain_generation" if policy.generation_mode == "plain"
             and policy.trigger_mode != "adaptive" else "no_authored_speech"}
         logger.info("[CompanionV2][media] stage=response event_ref=%s media=voice mode=%s spans=%s reason=%s",
-                    core["prepared"].get("event_ref", "unknown"), policy.trigger_mode, len(spans),
+                    prepared.get("event_ref", "unknown"), policy.trigger_mode, len(spans),
                     core["_voice_response_diagnostics"]["reason"])
     if visible != text:
         response.completion_text = visible
@@ -64,7 +66,8 @@ def observe_core_voice_response(event, response):
 def capture_core_voice_message(event, message):
     """Consume native tool speech before text cleanup or segmentation."""
     core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
-    policy = core.get("prepared", {}).get("voice_reply_policy") if isinstance(core, dict) else None
+    prepared = core.get("prepared") if isinstance(core, dict) else None
+    policy = prepared.get("voice_reply_policy") if isinstance(prepared, Mapping) else None
     if not isinstance(policy, VoiceReplyPolicy):
         return message
     visible, spans, cleaned = _clean_plain_runs(message, policy)

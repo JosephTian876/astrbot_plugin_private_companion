@@ -96,3 +96,42 @@
   .reality-config-rail{position:static;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);overflow-x:auto}
   .reality-config-rail button{justify-content:center;text-align:center}
 }
+
+/* Huawei Health account binding, embedded under Perception. */
+.hw-health-card{border:1px solid var(--t-line);border-radius:var(--r-md);background:var(--t-surface);padding:var(--sp-4);display:grid;gap:var(--sp-3);color:var(--t-text)}
+.hw-health-card>header{display:flex;justify-content:space-between;gap:var(--sp-3);align-items:flex-start}
+.hw-health-card h4{margin:2px 0 4px;font-size:var(--fs-head);color:var(--t-text-strong)}
+.hw-health-card h5{margin:0 0 6px;font-size:var(--fs-body);color:var(--t-text-strong)}
+.hw-health-card p{margin:0;color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.65}
+.hw-health-badge{border-radius:999px;padding:4px 10px;font-size:var(--fs-micro);font-weight:600;border:1px solid var(--t-line);white-space:nowrap}
+.hw-health-badge.is-ok{color:var(--t-ok-ink);background:var(--t-ok-quiet);border-color:color-mix(in srgb,var(--t-ok) 40%,var(--t-line))}
+.hw-health-badge.is-warn{color:var(--t-warn-ink);background:var(--t-warn-quiet);border-color:color-mix(in srgb,var(--t-warn) 40%,var(--t-line))}
+.hw-health-status{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:var(--sp-2);padding:var(--sp-3);border-radius:var(--r-sm);background:var(--t-surface-soft);border:1px solid var(--t-line)}
+.hw-health-status div{display:flex;flex-direction:column;gap:2px;min-width:0}
+.hw-health-status span{font-size:var(--fs-micro);color:var(--t-text-faint)}
+.hw-health-status strong{font-size:var(--fs-tiny);color:var(--t-text-strong);word-break:break-word}
+.hw-health-status strong.is-ok{color:var(--t-ok-ink)}.hw-health-status strong.is-warn{color:var(--t-warn-ink)}
+.hw-health-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:var(--sp-3)}
+.hw-health-grid>section{border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface-soft);padding:var(--sp-3);display:grid;gap:10px;align-content:start}
+.hw-health-fields,.hw-health-cookie-grid{display:grid;gap:8px}
+.hw-health-fields{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.hw-health-cookie-grid{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
+.hw-health-fields label,.hw-health-cookie-grid label{display:grid;gap:3px;font-size:var(--fs-micro);color:var(--t-text-soft)}
+.hw-health-fields input,.hw-health-cookie-grid input,.hw-health-inline input,.hw-health-card textarea{width:100%;border:1px solid var(--t-line-firm,var(--t-line));border-radius:var(--r-xs);background:var(--t-surface);color:var(--t-text-strong);padding:7px 9px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}
+.hw-health-card textarea{min-height:74px;resize:vertical}
+.hw-health-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.hw-health-check{display:inline-flex;gap:6px;align-items:center;color:var(--t-text-soft);font-size:var(--fs-tiny);margin-right:10px}
+.hw-health-login{display:grid;gap:9px;padding-top:4px}
+.hw-health-login-state{display:flex;gap:10px;align-items:baseline;font-size:var(--fs-tiny);color:var(--t-text-strong)}
+.hw-health-login-state small{color:var(--t-text-faint)}
+.hw-health-inline{display:flex;gap:8px;align-items:center;max-width:310px}
+.hw-health-summary{border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface-soft);padding:var(--sp-3);display:grid;gap:9px}
+.hw-health-summary-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;color:var(--t-text-strong)}
+.hw-health-summary-head span{font-size:var(--fs-micro);color:var(--t-text-faint)}
+.hw-health-summary pre{margin:0;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word;border-radius:var(--r-xs);border:1px solid var(--t-line);background:var(--t-surface);color:var(--t-text);padding:10px;font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace}
+.hw-health-note{font-size:var(--fs-tiny);color:var(--t-text-soft);line-height:1.65}
+.hw-health-switches{display:flex;flex-wrap:wrap;gap:12px 18px;align-items:center;padding:12px 14px;border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface-soft)}
+.hw-health-switches>div{flex:1 1 280px;min-width:0}
+.hw-health-switches h5{margin:0 0 3px;font-size:var(--fs-body);color:var(--t-text-strong)}
+.hw-health-switches p{margin:0;color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.6}
+.hw-health-switches .hw-health-check{margin:0;white-space:nowrap}

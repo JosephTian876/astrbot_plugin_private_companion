@@ -1,4 +1,4 @@
-﻿"""Shared-installation lifecycle and explicit native multi-target admission."""
+"""Shared-installation lifecycle and explicit native multi-target admission."""
 
 import asyncio
 from dataclasses import asdict, replace

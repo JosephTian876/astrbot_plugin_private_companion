@@ -239,7 +239,7 @@ test('the routing matrix lists every registered task with its provider', async (
   assert.match(node.innerHTML, /任务/);
   assert.match(node.innerHTML, /对话回复/);
   assert.match(node.innerHTML, /记忆整理/);
-  assert.match(node.innerHTML, /2<\/strong><span>可用模型提供方/);
+  assert.match(node.innerHTML, /2<\/b><span>可用模型/);
   assert.match(node.innerHTML, /前台/);
   assert.doesNotMatch(node.innerHTML, /保存本任务/);
 });
@@ -250,6 +250,7 @@ test('loaded AstrBot providers are immediately available without a registration 
   page.mount(node);
   requests[0].resolve(status());
   await flush();
+  node.click('[data-model-sub]', {modelSub: 'cfg'});
 
   assert.match(node.innerHTML, /<option value="secondary"/);
   assert.doesNotMatch(node.innerHTML, /模型通道|data-pool-/);
@@ -276,6 +277,7 @@ test('switching a provider inline raises one queued change and posting saves tha
   page.mount(node);
   requests[0].resolve(status());
   await flush();
+  node.click('[data-model-sub]', {modelSub: 'cfg'});
   node.change('[data-model-field]', {modelField: 'provider', modelKind: 'memory.reflect', value: 'secondary'});
   assert.match(node.innerHTML, /1<\/b> 项改动待保存/);
   node.click('[data-model-action]', {modelAction: 'save-one', modelKind: 'memory.reflect'});
@@ -295,6 +297,7 @@ test('multi-select assigns one provider to several tasks and keeps capability mi
   page.mount(node);
   requests[0].resolve(status());
   await flush();
+  node.click('[data-model-sub]', {modelSub: 'cfg'});
   node.click('[data-model-pick]', {modelPick: 'conversation.reply'});
   node.click('[data-model-pick]', {modelPick: 'memory.reflect'});
   assert.match(node.innerHTML, /已选 <strong>2<\/strong> 项任务/);
@@ -311,6 +314,7 @@ test('restoring inheritance resets explicit fields through the reset list', asyn
   explicit.tasks[0].fields.provider = {value: 'secondary', inherited_value: 'primary', source: 'window', inherited_source: 'installation', explicit: true};
   requests[0].resolve(explicit);
   await flush();
+  node.click('[data-model-sub]', {modelSub: 'cfg'});
   node.click('[data-model-pick]', {modelPick: 'conversation.reply'});
   node.click('[data-model-action]', {modelAction: 'inherit'});
   assert.match(node.innerHTML, /已把 1 项任务改为跟随上级配置/);
@@ -328,6 +332,7 @@ test('the precise editor keeps provider filtering compact and localizes capabili
   page.mount(node);
   requests[0].resolve(status());
   await flush();
+  node.click('[data-model-sub]', {modelSub: 'cfg'});
   assert.doesNotMatch(node.innerHTML, /class="model-mlgd"/);
   assert.match(node.innerHTML, /data-model-provider-filter/);
   assert.match(node.innerHTML, /主模型提供方/);
@@ -395,6 +400,7 @@ test('a lower-capacity provider adjusts the draft output limit before saving', a
   constrained.providers[1].max_output_tokens = 2048;
   requests[0].resolve(constrained);
   await flush();
+  node.click('[data-model-sub]', {modelSub: 'cfg'});
   node.change('[data-model-field]', {modelField: 'provider', modelKind: 'memory.reflect', value: 'secondary'});
   assert.match(node.innerHTML, /输出上限已调整为 2048/);
   node.click('[data-model-action]', {modelAction: 'save-one', modelKind: 'memory.reflect'});
@@ -432,6 +438,7 @@ test('an uncertain save keeps its original operation and blocks further edits un
   page.mount(node);
   requests[0].resolve(status());
   await flush();
+  node.click('[data-model-sub]', {modelSub: 'cfg'});
   node.change('[data-model-field]', {modelField: 'provider', modelKind: 'memory.reflect', value: 'secondary'});
   node.click('[data-model-action]', {modelAction: 'save-one', modelKind: 'memory.reflect'});
   const first = requests.find(request => request.method === 'POST');
@@ -472,6 +479,7 @@ test('a bridge timeout automatically re-sends the same idempotent save once', as
   page.mount(node);
   requests[0].resolve(status());
   await flush();
+  node.click('[data-model-sub]', {modelSub: 'cfg'});
   node.change('[data-model-field]', {modelField: 'provider', modelKind: 'memory.reflect', value: 'secondary'});
   node.click('[data-model-action]', {modelAction: 'save-one', modelKind: 'memory.reflect'});
   const first = requests.find(request => request.method === 'POST');
@@ -738,6 +746,9 @@ test('image page separates generation and editing model queues and saves paramet
   assert.match(node.innerHTML, /<details class="model-img-route-details"><summary data-img-route-expand="online:primary"/);
   node.click('[data-img-route-expand]', {imgRouteExpand: 'online:primary'});
   assert.match(node.innerHTML, /文生图与改图/);
+  assert.match(node.innerHTML, /model-img-route-meta/);
+  assert.match(node.innerHTML, /model-img-route-toggle/);
+  assert.match(node.innerHTML, /展开配置|收起配置/);
   assert.match(node.innerHTML, /data-img-endpoint-test="primary"/,
     'saved enabled online models expose a real generation test');
   assert.equal((node.innerHTML.match(/class="model-imgconfig"/g) || []).length, 1,
@@ -932,6 +943,7 @@ test('quick config fans a slot provider out to every task via model/configure', 
   page.mount(node);
   requests[0].resolve(status());
   await flush();
+  node.click('[data-model-sub]', {modelSub: 'cfg'});
   node.click('[data-model-cm]', {modelCm: 'quick'});
   assert.match(node.innerHTML, /覆盖/);
   node.change('[data-model-slot]', {modelSlot: '对话', value: 'secondary'});
@@ -951,6 +963,7 @@ test('quick config saves both image tasks sequentially from the same page snapsh
   h.page.mount(node);
   h.requests[0].resolve(data);
   await flush();
+  node.click('[data-model-sub]', {modelSub: 'cfg'});
   node.change('[data-model-slot]', {modelSlot: '对话', value: 'secondary'});
   node.click('[data-model-slot-apply]', {modelSlotApply: '对话'});
   for (const item of data.tasks) {
