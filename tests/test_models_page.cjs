@@ -506,13 +506,17 @@ test('switching to the voice tab lazily loads, saves, and plays a synthesized sa
   await flush();
   assert.match(node.innerHTML, /语音模型/);
   assert.match(node.innerHTML, /按语种配置语音合成/);
+  assert.match(node.innerHTML, /私聊 \/ 群聊 TTS 总览/);
+  assert.match(node.innerHTML, /data-voice-matrix-lang="zh"/);
   node.change('[data-voice-provider]', {value: 'tts-live'});
   node.change('[data-voice-channel]', {voiceChannel: 'private', value: 'tts-live'});
+  node.change('[data-voice-channel]', {voiceChannel: 'group', voiceMatrixLang: 'en', value: 'tts-live'});
   node.click('[data-voice-save]');
   const post = requests.find(r => r.method === 'POST' && r.route === 'model/voice/save');
   assert.ok(post, 'voice save should POST to model/voice/save');
   assert.equal(post.values.changes.voice_ja_provider_id, 'tts-live');
   assert.equal(post.values.changes.voice_private_ja_provider_id, 'tts-live');
+  assert.equal(post.values.changes.voice_group_en_provider_id, 'tts-live');
   post.resolve({...voice, languages: voice.languages.map(item => item.k === 'ja' ? {...item, bind: 'tts-live'} : item)});
   await flush();
   assert.match(node.innerHTML, /语音配置已保存/);
@@ -1320,6 +1324,36 @@ test('search service binds and saves an AstrBot DeepSeek Provider id', async () 
   assert.match(node.innerHTML, /后续搜索立即生效/);
   assert.equal(page.isDirty(), false);
   page.unmount();
+});
+
+test('Laya local page explains CPU-only torch and disables the broken test', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node);
+  requests[0].resolve(status());
+  await flush();
+  node.click('[data-model-tab]', {modelTab: 'laya'});
+  requests.find(item => item.method === 'GET' && item.route === 'model/laya').resolve({
+    enabled: false, mode: 'local', endpoint: '', default_model: 'multilingual',
+    api_key_set: false, timeout_seconds: 20, followup_confidence_threshold: 0,
+    package_installed: true, package_version: '0.4.0',
+    decision_fields: {turn_state: true, action: true, reply_intent: true, reply_style: true,
+      reply_form: true, segment_mode: true, tool_need: true},
+    model_cache_ready: true, model_cache_path: 'C:/cache/huggingface/hub',
+    local_runtime_state: 'gpu_unavailable', torch_version: '2.14.1+cpu',
+    cuda_version: '', cuda_available: false,
+    python_executable: 'C:/AstrBot/python.exe',
+    install_command: "& 'C:/AstrBot/python.exe' -m pip install 'laya==0.4.0'",
+    remote_install_command: "& 'C:/AstrBot/python.exe' -m pip install 'laya[serve]==0.4.0'",
+    remote_start_command: "$env:LAYA_DEFAULT_MODEL='multilingual'; & 'C:/AstrBot/python.exe' -m laya.serve",
+    revision: 'laya-cpu'});
+  requests.find(item => item.method === 'GET' && item.route === 'model/laya/logs').resolve({events: []});
+  await flush();
+  assert.match(node.innerHTML, /CUDA 不可用/);
+  assert.match(node.innerHTML, /2\.14\.1\+cpu/);
+  assert.match(node.innerHTML, /安装与驱动匹配的 CUDA 版 PyTorch/);
+  assert.match(node.innerHTML, /data-laya-test[^>]*disabled/);
+  assert.doesNotMatch(node.innerHTML, /下载并验证模型[^<]*<\/button>/);
 });
 
 test('Laya page exposes official local install, first-run download, and SystemOne remote setup', async () => {

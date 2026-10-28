@@ -1,6 +1,11 @@
 """Authenticated page directory; the host supplies every target and API path."""
 
+import asyncio
+import json
+import os
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
 from astrbot.api import logger
 from astrbot.api.web import request
@@ -16,18 +21,45 @@ from .settings import HostControlError
 
 
 PREFIX = "/astrbot_plugin_private_companion"
+DISPLAY_PREFERENCES_FILE = "dashboard_display_preferences.json"
+DISPLAY_PREFERENCES_KEYS = frozenset(("appearance", "followLight", "largeText"))
+DISPLAY_APPEARANCE_VALUES = {
+    "theme": frozenset(("courtyard", "dawn", "dusk", "night", "walnut", "contrast")),
+    "density": frozenset(("compact", "standard", "roomy")),
+    "radius": frozenset(("sharp", "standard", "round")),
+    "typeScale": frozenset(("s", "m", "l", "xl")),
+    "motion": frozenset(("full", "low", "off")),
+}
+MAX_DISPLAY_PREFERENCES_BYTES = 8192
+
+
+def _valid_display_preferences(value):
+    if type(value) is not dict or set(value) != DISPLAY_PREFERENCES_KEYS:
+        return False
+    appearance = value["appearance"]
+    if type(appearance) is not dict or set(appearance) != set(DISPLAY_APPEARANCE_VALUES):
+        return False
+    for name, options in DISPLAY_APPEARANCE_VALUES.items():
+        if type(appearance[name]) is not str or appearance[name] not in options:
+            return False
+    return type(value["followLight"]) is bool and type(value["largeText"]) is bool
 
 
 class PageWebAPI:
     def __init__(self, controller):
         self.controller = controller
+        self._display_preferences_lock = asyncio.Lock()
 
     def routes(self):
         return [(PREFIX + "/page/targets", self.targets, ["GET"], "Read authorized Companion page targets"),
                 (PREFIX + "/page/workspace-entry", self.workspace_entry, ["GET"],
                  "Refresh the authenticated Companion workspace asset entry"),
                 (PREFIX + "/page/ownership", self.ownership, ["GET"],
-                 "Read which plugin currently provides model-facing memory")]
+                 "Read which plugin currently provides model-facing memory"),
+                (PREFIX + "/page/display-preferences", self.display_preferences, ["GET"],
+                 "Read this Dashboard account's Companion display preferences"),
+                (PREFIX + "/page/display-preferences", self.save_display_preferences, ["POST"],
+                 "Save this Dashboard account's Companion display preferences")]
 
     async def workspace_entry(self):
         """Refresh the current page's short-lived resource token through AstrBot.
@@ -112,6 +144,117 @@ class PageWebAPI:
             return outcome_response(Outcome.success(session.application.memory.context.ownership()))
         except TaskError as error:
             return outcome_response(Outcome.failed(error.code, str(error)))
+
+    def _display_preferences_identity(self):
+        username = request.username
+        if (type(username) is not str or not username.strip() or username.startswith("api_key:")
+                or len(username.strip()) > 128):
+            raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
+        if request.plugin_name != PREFIX.lstrip("/"):
+            raise TaskError("page_request_invalid", "display preferences are only available to this plugin")
+        if request.query:
+            raise TaskError("page_request_invalid", "display preferences do not accept query overrides")
+        if getattr(self.controller, "_terminated", False):
+            raise TaskError("staging_host_terminated", "plugin is stopped")
+        return username.strip()
+
+    def _display_preferences_path(self):
+        root = getattr(self.controller, "data_root", None)
+        if root is None:
+            raise TaskError("display_preferences_unavailable", "the plugin data directory is unavailable")
+        return Path(root) / DISPLAY_PREFERENCES_FILE
+
+    def _read_display_preferences(self):
+        path = self._display_preferences_path()
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            return {}
+        except OSError as error:
+            raise TaskError("display_preferences_unavailable",
+                            "the display preferences could not be read") from error
+        if raw.startswith(b"\xef\xbb\xbf") or len(raw) > MAX_DISPLAY_PREFERENCES_BYTES * 16:
+            return {}
+        try:
+            document = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, ValueError, RecursionError):
+            return {}
+        if (type(document) is not dict or document.get("version") != 1
+                or type(document.get("users")) is not dict):
+            return {}
+        return {key: value for key, value in document["users"].items()
+                if type(key) is str and _valid_display_preferences(value)}
+
+    def _write_display_preferences(self, rows):
+        path = self._display_preferences_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name("." + path.name + "." + uuid4().hex + ".tmp")
+        payload = json.dumps({"version": 1, "users": rows}, ensure_ascii=False,
+                             allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n"
+        try:
+            with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    async def display_preferences(self):
+        from .web_api import outcome_response
+
+        try:
+            username = self._display_preferences_identity()
+            async with self._display_preferences_lock:
+                preferences = self._read_display_preferences().get(username)
+            return outcome_response(Outcome.success({"preferences": preferences}))
+        except TaskError as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except OSError:
+            return outcome_response(Outcome.failed(
+                "display_preferences_unavailable", "the display preferences could not be read"))
+
+    async def save_display_preferences(self):
+        from .web_api import outcome_response
+
+        try:
+            username = self._display_preferences_identity()
+            raw = await request.body()
+            if len(raw) > MAX_DISPLAY_PREFERENCES_BYTES:
+                raise ValueError("request is too large")
+
+            def unique(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("duplicate field")
+                    result[key] = value
+                return result
+
+            value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique,
+                               parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite value")))
+            if not _valid_display_preferences(value):
+                raise ValueError("invalid display preferences")
+            preferences = {"appearance": {name: value["appearance"][name]
+                                          for name in DISPLAY_APPEARANCE_VALUES},
+                           "followLight": value["followLight"],
+                           "largeText": value["largeText"]}
+            async with self._display_preferences_lock:
+                rows = self._read_display_preferences()
+                rows[username] = preferences
+                self._write_display_preferences(rows)
+            return outcome_response(Outcome.success({"preferences": preferences}))
+        except TaskError as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
+            return outcome_response(Outcome.failed(
+                "display_preferences_invalid", "check the display preferences and retry"))
+        except OSError:
+            return outcome_response(Outcome.failed(
+                "display_preferences_unavailable", "the display preferences could not be saved"))
 
     async def targets(self):
         from .web_api import outcome_response

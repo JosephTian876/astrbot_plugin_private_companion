@@ -108,7 +108,7 @@ test('尺度令牌只在 tokens.css 声明一次', () => {
   const fs = require('node:fs');
   const dir = path.join(ROOT, 'pages', '陪伴小屋');
   for (const name of fs.readdirSync(dir).filter(f => f.endsWith('.css'))) {
-    if (name === 'tokens.css') continue;
+    if (name === 'tokens.css' || name === 'bundle.css') continue;
     const text = fs.readFileSync(path.join(dir, name), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, ' ');
     const defs = text.match(/--(?:r|sp|fs)-[a-z0-9]+\s*:/g) || [];

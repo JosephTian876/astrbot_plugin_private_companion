@@ -95,6 +95,17 @@ class SessionProviderTests(unittest.TestCase):
         self.assertIs(selected, provider)
         self.assertIs(application, session.application)
 
+    def test_profile_workshop_accepts_an_explicit_loaded_provider(self):
+        selected = NS(meta=lambda: NS(id="explicit-provider"), text_chat=lambda **_: None)
+        session = NS(model=object(), application=object(),
+                     settings=NS(common=NS(provider_id="current-provider")))
+        controller = NS(controller=NS(session=session, last_session=None),
+                        context=NS(get_all_providers=lambda: [selected]))
+        provider, application = PersonaWorkshopWebAPI._text_provider(
+            controller, session, provider_id="explicit-provider")
+        self.assertIs(provider, selected)
+        self.assertIs(application, session.application)
+
     def test_profile_workshop_rejects_mismatched_provider(self):
         provider = NS(_current=lambda: None, text_chat=lambda **_: None)
         model = NS(native=provider, provider_id="other-provider")
@@ -346,6 +357,21 @@ class RoleProfileDraftTests(PersonaWorkshopFixture):
         self.assertIn("你是第二个人格", call.await_args.kwargs["prompt"])
         self.assertNotIn(ORIGINAL, call.await_args.kwargs["prompt"])
         self.assertEqual(self.native.persona["name"], "original", "reading another persona must not switch the chat")
+
+    async def test_profile_draft_can_use_an_explicit_provider(self):
+        await self.initialize()
+        response_text = json.dumps({"fields": {"name": "指定模型草稿"}, "inferred_fields": [], "notes": []},
+                                   ensure_ascii=False)
+        selected = NS(meta=lambda: NS(id="explicit-draft-model"),
+                      text_chat=AsyncMock(return_value=NS(completion_text=response_text)))
+        self.controller.native_types = NS(provider=None)
+        self.controller.context.get_all_providers = lambda: [selected]
+        response = await self.post_profile_draft(
+            {"provider_id": "explicit-draft-model", "supplement": ""})
+        self.assertEqual(response["status"], "ok", response)
+        self.assertEqual(response["data"]["provider_id"], "explicit-draft-model")
+        selected.text_chat.assert_awaited_once()
+        self.assertIn("explicit-draft-model", response["data"]["provider_id"])
 
     async def test_profile_draft_uses_selected_official_documents(self):
         await self.initialize()

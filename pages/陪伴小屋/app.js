@@ -170,7 +170,8 @@ function updateAppearance(){
 }
 window.CompanionDisplayPreferences={
   largeText:()=>Boolean(state.largeText),
-  setLargeText(value){state.largeText=Boolean(value);updateAppearance();persist();return state.largeText;},
+  setLargeText(value){state.largeText=Boolean(value);updateAppearance();persist();
+    window.CompanionProduct?.displayPreferencesChanged?.();return state.largeText;},
 };
 function navHref(next,tab='',subtab=''){
   const path='#'+next+(tab&&tab!=='home'&&tab!=='host'?'/'+tab:'');
@@ -4970,7 +4971,7 @@ document.addEventListener('click',event=>{
   if(el.dataset.voxelReset!==undefined){voxelController?.reset();return;}
   if(el.dataset.voxelRetry!==undefined){render();return;}
   if(el.dataset.voxelTour!==undefined){if(state.reduceMotion||window.matchMedia('(prefers-reduced-motion: reduce)').matches){toast('已开启减少动态效果，可手动旋转和点选家具');return;}voxelController?.toggleTour();return;}
-  if(el.dataset.display){const key=el.dataset.display;if(!['largeText','reduceMotion'].includes(key))return;state[key]=!state[key];el.setAttribute('aria-checked',String(state[key]));updateAppearance();if(key==='reduceMotion')voxelController?.setReducedMotion(state.reduceMotion);persist();return;}
+  if(el.dataset.display){const key=el.dataset.display;if(!['largeText','reduceMotion'].includes(key))return;state[key]=!state[key];el.setAttribute('aria-checked',String(state[key]));updateAppearance();if(key==='reduceMotion')voxelController?.setReducedMotion(state.reduceMotion);persist();if(key==='largeText')window.CompanionProduct?.displayPreferencesChanged?.();return;}
   /* 跟随光照是外观维度，存在 product 侧（与主题同组键），不进 state。 */
   if(el.dataset.followLight!==undefined){const on=product.setFollowLight(!product.followLight());el.setAttribute('aria-checked',String(on));toast(on?'已开启：小屋进入夜晚时会自动切到深色主题':'已关闭：主题不再自动跟随');return;}
   if(el.dataset.libraryFilter){libraryFilter=el.dataset.libraryFilter;render();return;}
@@ -5200,3 +5201,9 @@ document.addEventListener('visibilitychange',()=>{
 probeHost();
 syncFromHash();
 armHomeAgendaClock();
+/* The full-asset bundle intentionally puts app.js before large page modules so
+   the shell can paint early. Re-render once the last module lands; until then
+   optional page modules stay absent and their mount points remain as skeletons. */
+window.addEventListener("companion:modules-ready", () => {
+  try { render(); } catch (error) { console.warn("[CompanionV2] 页面模块补载后重绘失败", error); }
+}, {once: true});

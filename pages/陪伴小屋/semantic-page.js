@@ -100,6 +100,15 @@ window.CompanionSemanticPage = (() => {
     if(kind==="reaction")html+='<button class="icon-button danger" type="button" data-semantic="delete" aria-label="删除表情素材" title="删除表情素材" '+(busy?"disabled":"")+'><i data-lucide="trash-2"></i></button>';
     return html+'<button class="button" type="button" data-semantic="close">取消</button></div></form></div>';
   }
+  function pendingAnalysis(item) {
+    const payload=item?.payload||{},itemKind=item?.kind||kind;
+    return itemKind==="reaction"&&payload.analysis==="pending";
+  }
+  function pendingAnalysisCount(){return (state?.items||[]).filter(pendingAnalysis).length;}
+  function batchAnalyzeButton(){
+    const count=pendingAnalysisCount();
+    return '<button class="button" type="button" data-semantic="analyze-pending" '+(busy||!count?'disabled':'')+'>批量识别待补全'+(count?' ('+count+')':'')+'</button>';
+  }
   function renderLearning(cfg,group) {
     const current=shown=>draft?{...cfg,...draft}[shown]:cfg[shown];
     const catalog=state.catalog||{},slangCount=Number(catalog.slang?.total||0),reactionCount=Number(catalog.reaction?.total||0);
@@ -114,7 +123,8 @@ window.CompanionSemanticPage = (() => {
       html+='<div class="semantic-learning-toolbar"><form id="semanticSearch">';
       if(group)html+='<select name="kind" aria-label="素材类型"><option value="slang" '+(kind==="slang"?'selected':'')+'>群黑话</option><option value="reaction" '+(kind==="reaction"?'selected':'')+'>反应素材</option></select>';
       html+='<input name="query" type="search" maxlength="2000" placeholder="检索语义条目" aria-label="检索语义条目"><button class="button" '+(busy?'disabled':'')+'>检索</button></form>'+
-        '<label class="semantic-import button"><span>导入素材</span><input id="semanticFile" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" '+(busy?'disabled':'')+'></label></div>';
+        '<label class="semantic-import button"><span>导入素材</span><input id="semanticFile" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" '+(busy?'disabled':'')+'></label>'+
+        (kind==="reaction"?batchAnalyzeButton():"")+'</div>';
       if(result)html+='<div class="semantic-results"><strong>检索结果</strong><span>'+(result.embedded||0)+'/'+(result.eligible||0)+' 已建索引</span>'+(result.items||[]).map((item,index)=>'<button data-semantic-open="'+escape(item.id)+'" data-semantic-kind="'+escape(item.kind||kind)+'">'+escape(item.payload.name||item.payload.term||'未命名条目 '+(index+1))+'</button>').join('')+'</div>';
       const rows=(state.items||[]).map(item=>{
         const payload=item.payload||{},itemKind=item.kind||kind,slang=itemKind==="slang";
@@ -219,7 +229,7 @@ window.CompanionSemanticPage = (() => {
       else html+='<div class="semantic-toolbar"><span class="semantic-kind-label">'+(kind==="reaction"?"表情素材":"当前群词义")+'</span>';
       html+='<form id="semanticSearch"><input name="query" type="search" maxlength="2000" placeholder="检索'+(kind==="reaction"?"表情":"群词义")+'" aria-label="检索素材"><button class="button" '+(busy?"disabled":"")+'>检索</button></form></div>';
       html+=`<div id="semantic-panel" role="tabpanel"${kinds.length>1?` aria-labelledby="semantic-tab-${kind}"`:""}>`;
-      if(kind==="reaction")html+='<label class="semantic-import button"><span>导入素材</span><input id="semanticFile" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" '+(busy?"disabled":"")+'></label>';
+      if(kind==="reaction")html+='<label class="semantic-import button"><span>导入素材</span><input id="semanticFile" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" '+(busy?"disabled":"")+'></label>'+batchAnalyzeButton();
       if(result)html+='<div class="semantic-results"><strong>检索结果 · '+(result.mode==="hybrid"?"语义与关键词":"关键词")+'</strong><span>'+(result.embedded||0)+'/'+(result.eligible||0)+' 已建索引'+(result.fallback_reason?" · 模型暂不可用":"")+'</span>'+(result.items||[]).map((item,index)=>'<button data-semantic-open="'+escape(item.id)+'">'+escape(item.payload.name||item.payload.term||'未命名素材 '+(index+1))+' · '+Number(item.score).toFixed(2)+'</button>').join("")+'</div>';
       html+='<div class="semantic-list">'+(state.items||[]).map(item=>{const payload=item.payload||{};const migrated=payload.collection_source==="legacy_migration"||Boolean(payload.legacy_source_id||payload.legacy_filename);const source={private_capture:"私聊自动收录",group_capture:"群聊自动收录",legacy_migration:"V1 表情迁移"}[payload.collection_source]||(migrated?"V1 表情迁移":"手动收录");
         const analysisCode=migrated&&(!payload.analysis||payload.analysis==="pending")
@@ -343,6 +353,7 @@ window.CompanionSemanticPage = (() => {
       if(command==="reindex")run("reindex");
       if(command==="discard"){draft=null;conflict=false;message="已放弃草稿，显示当前已保存配置。";render();}
       if(command==="analyze"&&editing)run("analyze",{id:editing.id});
+      if(command==="analyze-pending")analyzePending();
       if(command==="delete"&&editing&&kind==="reaction"){
         const item=editing, selectedKind=kind;
         const ticket=generation;
@@ -383,6 +394,35 @@ window.CompanionSemanticPage = (() => {
     },{signal:abort.signal});
     load();
   }
+  async function analyzePending() {
+    if(busy||!current())return;
+    const candidates=(state?.items||[]).filter(pendingAnalysis);
+    if(!candidates.length){message="当前列表没有待识别的表情素材。";render();return;}
+    const ticket=++generation,total=candidates.length;
+    let done=0,failed=0,lastError="";
+    busy=true;conflict=false;message="正在批量识别 0/"+total+"…";render();
+    for(const item of candidates){
+      if(!active(ticket))return;
+      try{
+        const data=await api("POST",{...selection(),action:"analyze",id:item.id});
+        if(!active(ticket))return;
+        if(data?.item)Object.assign(item,data.item);
+        done++;
+      }catch(error){
+        if(!active(ticket))return;
+        failed++;lastError=error?.code||error?.message||"";
+      }
+      message="正在批量识别 "+(done+failed)+"/"+total+"…";render();
+    }
+    if(!active(ticket))return;
+    busy=false;
+    const parts=[];
+    if(done)parts.push("已识别 "+done+" 张");
+    if(failed)parts.push("失败 "+failed+" 张");
+    message=parts.join("，")||"没有可识别的表情素材";
+    if(failed&&!done)message=localized({code:lastError},"批量识别失败，请核对视觉模型配置后重试。");
+    await load();
+  }
   async function importFiles(files) {
     if(busy||!current())return;
     const selected=files.slice(0,20),omitted=Math.max(0,files.length-selected.length);
@@ -403,6 +443,7 @@ window.CompanionSemanticPage = (() => {
     if(created)parts.push("新增 "+created+" 张");
     if(duplicates)parts.push("重复跳过 "+duplicates+" 张");
     if(failed)parts.push("失败 "+failed+" 张"+(omitted?"（超出每批 20 张）":""));
+    if(created)parts.push("可点「批量识别待补全」补全空白字段");
     busy=false;message=parts.join("，")||"没有可导入的图片";
     if(failed&&lastError&&!created&&!duplicates)message=localized({code:lastError},"批量导入失败，请检查图片格式和大小。");
     await load();

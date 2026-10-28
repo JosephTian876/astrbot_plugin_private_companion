@@ -22,12 +22,15 @@ test("完整小屋资源位于惰性 template，首屏不直接下载", () => {
   const end = INDEX.indexOf("</template>", start);
   assert.ok(start > 0 && end > start, "缺少完整资源 template");
   const inert = INDEX.slice(start, end);
-  for (const asset of ["tokens.css", "assets/voxel-room.js", "app.js", "models-page.js"]) {
+  for (const asset of ["bundle.css", "assets/voxel-room.js", "app.js", "models-page.js"]) {
     assert.match(inert, new RegExp(asset.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
   const before = INDEX.slice(0, start);
   assert.doesNotMatch(before, /<script[^>]+src="app\.js/);
-  assert.doesNotMatch(before, /<link[^>]+href="tokens\.css/);
+  assert.doesNotMatch(before, /<link[^>]+href="bundle\.css/);
+  const cssSources = JSON.parse(fs.readFileSync(path.join(PAGE, "css-sources.json"), "utf8"));
+  assert.ok(cssSources.includes("tokens.css"));
+  assert.ok(cssSources.includes("models-page.css"));
   assert.match(INDEX, /<script defer src="performance-gate\.js\?v=/);
   assert.match(INDEX, /data-companion-booting/);
 });

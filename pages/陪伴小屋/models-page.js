@@ -887,6 +887,23 @@ window.CompanionModelsPage = (() => {
     const sub = item => { const b = voiceBinding(v, item); const provider = v.data.providers.find(p => p.id === b);
       return b ? esc(provider ? providerLabel(provider) : b) + (provider ? " · 已加载" : " · 未加载") : "跟随当前会话的语音服务"; };
     const test = v.lastTest;
+    const channels = v.data.channels || [];
+    const voiceOptions = selected => ['<option value="">跟随语种绑定</option>',
+      ...v.data.providers.map(p => `<option value="${esc(p.id)}" ${p.id === selected ? "selected" : ""}>${esc(providerLabel(p))}</option>`),
+      ...(selected && !v.data.providers.some(p => p.id === selected)
+        ? [`<option value="${esc(selected)}" selected>${esc(selected)} · 未加载</option>`] : [])].join("");
+    const channelMatrix = channels.length ? `<div class="model-card model-vmatrix-card">
+      <div class="model-phead"><div class="model-grow"><span class="model-eb">按渠道指定语音合成</span><h3>私聊 / 群聊 TTS 总览</h3></div>
+        <span class="model-tag n">留空沿用语种绑定</span></div>
+      <p class="model-note">不必切换上方语种标签，可在这里一次看清并设置每个语种在私聊、群聊分别使用哪个 TTS。列头的「全部跟随」只清空该渠道的覆盖。</p>
+      <div class="model-vmatrix" style="--voice-channels:${channels.length}">
+        <div class="model-vmatrix-head"><span>语种</span>${channels.map(channel => `<span>${esc(channel.n)}
+          <button type="button" class="model-vmatrix-clear" data-voice-clear-channel="${esc(channel.k)}" ${v.busy || v.loading || v.pending ? "disabled" : ""}>全部跟随</button></span>`).join("")}</div>
+        ${v.data.languages.map(item => `<div class="model-vmatrix-row"><b>${esc(item.n)}</b>${channels.map(channel => `<label class="model-vmatrix-cell">
+          <em class="model-vmatrix-channel">${esc(channel.n)} · ${esc(item.n)}</em>
+          <select data-voice-channel="${esc(channel.k)}" data-voice-matrix-lang="${esc(item.k)}" ${v.busy || v.loading || v.pending ? "disabled" : ""}>${voiceOptions(voiceChannelBinding(v, channel.k, item))}</select>
+          <small>${voiceChannelBinding(v, channel.k, item) ? "渠道覆盖" : `跟随${esc(item.n)}语种`}</small></label>`).join("")}</div>`).join("")}
+      </div></div>` : "";
     return `<div class="model-voice">
       <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">合成后端</span><h3>语音模型</h3></div>
           <button type="button" class="button small" data-go="manage" data-manage="expression" data-manage-subtab="voice">语音增强设置 ↗</button>
@@ -915,6 +932,7 @@ window.CompanionModelsPage = (() => {
           <span class="model-note">${binding ? "测试音频只在此处试听，不会发送到聊天。" : "未指定时由 AstrBot 当前会话选择语音合成服务。"}</span>
           <button type="button" class="button small primary" data-ve-test ${!loaded || v.testing ? "disabled" : ""}>${v.testing ? "测试中…" : "测试合成"}</button></div>
       </div>
+      ${channelMatrix}
       ${v.editorOpen ? ttsEditor(s) : ""}
       <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">语音请求</span><h3>合成超时与保存</h3></div></div>
         <div class="model-fd"><span class="model-cap">合成超时（秒）</span>
@@ -928,7 +946,8 @@ window.CompanionModelsPage = (() => {
     if (t.matches("[data-voice-provider]")) { if (!v.draft || v.pending) return; v.draft.bindings[voiceCurrent(v).k] = t.value; clearVoiceTest(v); render(); }
     if (t.matches("[data-voice-channel]")) { if (!v.draft || v.pending) return;
       const channel = t.dataset.voiceChannel; if (!v.draft.channels[channel]) v.draft.channels[channel] = {};
-      v.draft.channels[channel][voiceCurrent(v).k] = t.value; clearVoiceTest(v); render(); }
+      const lang = t.dataset.voiceMatrixLang || voiceCurrent(v).k;
+      v.draft.channels[channel][lang] = t.value; clearVoiceTest(v); render(); }
     if (t.matches("[data-voice-timeout]")) { if (!v.draft || v.pending) return; v.draft.timeout_seconds = t.valueAsNumber; if (event.type === "change") render(); }
     if (t.matches("[data-tts-field]")) { const item = ttsSelected(v); if (!item || v.ttsBusy) return;
       const values = ttsValues(v, item), key = t.dataset.ttsField;
@@ -940,6 +959,14 @@ window.CompanionModelsPage = (() => {
     if (t.matches("[data-tts-id]")) { v.createDraft.id = t.value; return; }
     if (t.matches("[data-tts-pick]")) { v.editorId = t.value; if (event.type === "change") render(); return; } }
   function voiceClick(s, event) { const v = s.voice, t = event.target;
+    const clearChannel = t.closest("[data-voice-clear-channel]");
+    if (clearChannel) {
+      if (v.busy || v.loading || v.pending || !v.draft) return;
+      const channel = clearChannel.dataset.voiceClearChannel;
+      if (!v.draft.channels[channel]) v.draft.channels[channel] = {};
+      for (const item of v.data.languages) v.draft.channels[channel][item.k] = "";
+      clearVoiceTest(v); render(); return;
+    }
     const lang = t.closest("[data-voice-lang]"); if (lang) { if (v.ui.lang !== lang.dataset.voiceLang) clearVoiceTest(v); v.ui.lang = lang.dataset.voiceLang; render(); return; }
     if (t.closest("[data-voice-editor]")) { v.editorOpen = !v.editorOpen; if (v.editorOpen && !v.catalog) ttsCatalogLoad(s); render(); return; }
     if (t.closest("[data-tts-create-toggle]")) { v.creating = !v.creating; render(); return; }
@@ -995,6 +1022,11 @@ window.CompanionModelsPage = (() => {
     finally { l.busy = false; if (current(ticket, s)) render(); } }
   async function layaTest(s) { const l = s.laya; if (l.busy || l.loading || !l.data) return;
     if (layaDirty(l)) { l.bad = true; l.notice = "请先保存当前 Laya 配置，再执行连接或模型下载测试。"; render(); return; }
+    if ((l.draft?.mode || l.data.mode) === "local" && l.data.local_runtime_state === "gpu_unavailable") {
+      l.bad = true;
+      l.notice = "本地 Laya 无法测试：当前 AstrBot Python 的 PyTorch 不支持 CUDA。请安装 CUDA 版 PyTorch 并重启，或切换到远程 HTTP 服务。";
+      render(); return;
+    }
     const ticket = version; l.busy = true; l.test = {status: "testing"}; l.notice = l.data.mode === "local" ? "正在调用官方 Router；首次测试会自动下载检查点…" : "正在调用官方 SystemOne HTTP 接口…"; render();
     try { const result = await api("POST", path + "/laya/test", {}, 600000); if (!current(ticket, s)) return;
       l.test = result; l.notice = "Laya 调用完成；当前模式和检查点已验证。"; l.bad = false; await layaRefreshQuiet(s, ticket); }
@@ -1043,6 +1075,11 @@ window.CompanionModelsPage = (() => {
     if (target.closest("[data-search-save]")) searchSave(s); }
   async function layaDecide(s) { const l = s.laya; if (l.busy || l.loading || !l.data) return;
     if (layaDirty(l)) { l.bad = true; l.notice = "请先保存当前 Laya 配置，再执行决策预览。"; render(); return; }
+    if ((l.draft?.mode || l.data.mode) === "local" && l.data.local_runtime_state === "gpu_unavailable") {
+      l.bad = true;
+      l.notice = "本地 Laya 无法调用：当前 AstrBot Python 的 PyTorch 不支持 CUDA。请安装 CUDA 版 PyTorch 并重启，或切换到远程 HTTP 服务。";
+      render(); return;
+    }
     const text = String(l.previewText || "").trim(); if (!text) { l.bad = true; l.notice = "先输入一段测试消息。"; render(); return; }
     const ticket = version; l.busy = true; l.preview = {status: "testing"}; l.notice = "正在请求 Laya 进行语义分类…"; render();
     try { const result = await api("POST", path + "/laya/decide", {facts: {message_kind: "text", user_text: text}}, 125000); if (!current(ticket, s)) return;
@@ -1061,7 +1098,7 @@ window.CompanionModelsPage = (() => {
   function layaSelect(l, key, label, hint, options) { const value = l.draft?.[key] || "", disabled = l.loading || l.busy;
     return `<label class="model-fd"><span class="model-cap">${label}<em>${hint}</em></span><select data-laya-field="${key}" ${disabled ? "disabled" : ""}>${options.map(([id, name]) => `<option value="${id}" ${value === id ? "selected" : ""}>${name}</option>`).join("")}</select></label>`; }
   async function layaCopyInstall(s, field) { const command = s.laya.data?.[field || "install_command"] || ""; if (!command) return;
-    try { await navigator.clipboard.writeText(command); s.laya.notice = field === "remote_start_command" ? "已复制 Laya 服务启动命令。" : field === "remote_install_command" ? "已复制远程 Laya 服务依赖安装命令。" : "已复制当前 AstrBot Python 环境的安装命令。安装后重启 AstrBot，再刷新状态。"; s.laya.bad = false; }
+    try { await navigator.clipboard.writeText(command); s.laya.notice = field === "torch_install_command" ? "已复制 CUDA 版 PyTorch 安装命令；请按驱动确认 cu128 是否兼容，安装后重启 AstrBot。" : field === "remote_start_command" ? "已复制 Laya 服务启动命令。" : field === "remote_install_command" ? "已复制远程 Laya 服务依赖安装命令。" : "已复制当前 AstrBot Python 环境的安装命令。安装后重启 AstrBot，再刷新状态。"; s.laya.bad = false; }
     catch { s.laya.notice = "无法访问剪贴板，请选中并复制下方命令。"; s.laya.bad = false; } render(); }
   function layaResult(result) { if (!result) return ""; if (result.status === "testing") return '<div class="model-notice">正在等待 Laya…</div>'; if (result.status === "skipped") return `<div class="model-notice">本次未调用 Laya：${esc(result.reason || "程序规则已处理")}</div>`;
     if (result.status !== "ok") return `<div class="model-notice error">${esc(fail(result, "Laya 结果未知。"))}</div>`;
@@ -1092,13 +1129,20 @@ window.CompanionModelsPage = (() => {
     }).join("")}</ol>`; }
   function layaPane(s) { const l = s.laya; if (!l.data) return `<div class="model-card"><p class="model-empty">${esc(l.notice || "正在读取 Laya 配置…")}</p></div>`;
     const dirty = layaDirty(l), installed = l.data.package_installed, mode = l.draft?.mode || l.data.mode;
+    const gpuUnavailable = mode === "local" && l.data.local_runtime_state === "gpu_unavailable";
+    const runtimeLabel = gpuUnavailable ? "CUDA 不可用" : mode === "local" ? "本地 Python" : "远程 HTTP";
+    const torchText = [l.data.torch_version, l.data.cuda_version ? `CUDA ${l.data.cuda_version}` : "无 CUDA"]
+      .filter(Boolean).join(" · ");
     return `<div class="model-subpane model-laya-pane">
       <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">可选能力 · 语义决策</span><h3>Laya 决策模型</h3><p class="model-note">在回复前判断是否接话、等待、沉默及表达形式。配置全局生效；仅群聊候选进入 Laya 判断，私聊始终走 AstrBot 核心回复，另由回复页的私聊收尾判断在纯道别时安静。模型不输出时间、段数等数值；行动概率只用于下方可选的连续接话阈值，执行仍遵循宿主配置和权限。</p></div><button type="button" class="button small" data-laya-refresh ${l.loading || l.busy ? "disabled" : ""}>刷新</button></div>
-        <div class="model-kpis">${kpi(!l.data.enabled ? "未启用" : mode === "local" && l.data.local_runtime_state === "warming" ? "正在预热" : "已启用", "运行状态", l.data.enabled ? "g" : "a")}${kpi(mode === "remote" ? "远程模式" : installed ? `已安装 ${l.data.package_version || ""}` : "待安装", "Python 包")}${kpi(mode === "remote" ? "远程管理" : l.data.model_cache_ready ? "已缓存" : "首次调用下载", "模型权重")}${kpi(mode === "local" ? "本地 Python" : "远程 HTTP", "接入方式")}</div>
+        <div class="model-kpis">${kpi(!l.data.enabled ? "未启用" : mode === "local" && l.data.local_runtime_state === "warming" ? "正在预热" : "已启用", "运行状态", l.data.enabled ? "g" : "a")}${kpi(mode === "remote" ? "远程模式" : installed ? `已安装 ${l.data.package_version || ""}` : "待安装", "Python 包")}${kpi(mode === "remote" ? "远程管理" : l.data.model_cache_ready ? "已缓存" : "首次调用下载", "模型权重")}${kpi(runtimeLabel, "接入方式", gpuUnavailable ? "r" : "")}</div>
+        ${gpuUnavailable ? `<div class="model-alert"><b>本地 Laya 当前不可用：</b>当前 AstrBot Python 使用的是 CPU 版 PyTorch${torchText ? `（${esc(torchText)}）` : ""}。Laya 本地模式需要 CUDA；请安装与驱动匹配的 CUDA 版 PyTorch 后重启 AstrBot，或在上方把接入方式切到「远程 HTTP 服务」。
+          <div class="model-editor-actions"><button type="button" class="button small" data-laya-copy="torch_install_command">复制 CUDA PyTorch 安装命令</button></div>
+          ${l.data.torch_install_command ? `<code class="model-laya-cmd">${esc(l.data.torch_install_command)}</code><small>命令默认使用 cu128；请按显卡驱动把 cu128 换成 cu126 等兼容版本。安装会替换当前 CPU 版 torch，但不会改动已安装的 laya。</small>` : ""}</div>` : ""}
         <div class="model-laya-fields">${layaField(l, "enabled", "启用 Laya", "关闭时调用会跳过", "bool")}${layaSelect(l, "mode", "接入方式", "选择 AstrBot 本地 Python 或官方服务接口", [["local", "本地 Python 包"], ["remote", "远程 HTTP 服务"]])}${mode === "remote" ? layaField(l, "endpoint", "SystemOne 服务地址", "可填服务根地址、/v1 或完整 /v1/systemone") : ""}${mode === "remote" ? layaField(l, "api_key", "API Key", l.data.api_key_set ? "已配置；留空保留现有密钥" : "可选，按远程服务配置", "password") : ""}${layaField(l, "timeout_seconds", "调用超时（秒）", "用于本地推理或远程连接，不参与语义判断", "number")}${layaPercentField(l, "followup_confidence_threshold", "连续接话置信阈值", "0 关闭；仅约束非点名续接。Laya 行动概率低于此值时改为旁听，建议从 40–55% 起按日志校准")}</div>
         ${mode === "local" ? `<div class="model-laya-fields">${layaField(l, "local_model_path", "本地检查点目录", "可选择微调模型；留空使用官方多语言模型。所有会话共用此选择。")}</div>` : ""}
         <section class="model-laya-decisions" aria-label="决策分类配置"><div><strong>决策分类</strong><span>仅启用的分类会发送给 Laya；关闭的分类沿用宿主配置。</span></div><div class="model-laya-decision-grid">${LAYA_DECISION_FIELDS.map(([key, label, hint]) => `<label class="model-laya-option"><span><strong>${label}</strong><small>${hint}</small></span><span class="model-switch"><input type="checkbox" data-laya-decision="${key}" ${l.draft.decision_fields[key] ? "checked" : ""} ${l.loading || l.busy ? "disabled" : ""}><i></i></span></label>`).join("")}</div></section>
-        <div class="model-editor-actions"><button type="button" class="button primary" data-laya-save ${!dirty || l.busy || l.loading || l.stale ? "disabled" : ""}>保存 Laya 配置</button><button type="button" class="button" data-laya-test ${l.busy || l.loading ? "disabled" : ""}>${mode === "local" && installed && !l.data.model_cache_ready ? "下载并验证模型" : "测试 Laya 调用"}</button></div>
+        <div class="model-editor-actions"><button type="button" class="button primary" data-laya-save ${!dirty || l.busy || l.loading || l.stale ? "disabled" : ""}>保存 Laya 配置</button><button type="button" class="button" data-laya-test ${l.busy || l.loading || gpuUnavailable ? "disabled" : ""}>${mode === "local" && installed && !l.data.model_cache_ready ? "下载并验证模型" : "测试 Laya 调用"}</button></div>
         ${l.stale ? '<div class="model-alert">配置已在别处变化，请刷新后核对。</div>' : ""}${l.notice ? `<div class="model-notice${l.bad ? " error" : ""}">${esc(l.notice)}</div>` : ""}${l.test ? layaResult(l.test) : ""}
       </div>
       <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">官方依赖与权重缓存</span><h3>安装 Laya Python 包</h3></div></div><p class="model-note">插件发行包不包含 Laya 包或检查点权重。将下方命令复制到 AstrBot 所在环境执行；本地首次推理会由官方 Router 自动从 Hugging Face 下载所选检查点。</p>

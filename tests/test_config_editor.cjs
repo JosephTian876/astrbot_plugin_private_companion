@@ -345,6 +345,11 @@ function harness(kinds = ['quota', 'image_review'], views = {}, endpointOverride
       acquaintanceDirectory: options.people ? async () => ({persons: options.people}) : undefined,
       identity: () => ({installation_id: 'inst', operator_id: 'admin'}),
       scopeKey: () => options.scopeKey || 'scope-a',
+      ...(options.batchRead ? {request: async (method, path, body) => {
+        const response = await new Promise((resolve, reject) =>
+          requests.push({method, route: 'config', body, resolve, reject}));
+        return response?.status === 'ok' ? response.data : response;
+      }} : {}),
     },
     AstrBotPluginPage: {
       apiGet: (route, body) => new Promise((resolve, reject) =>
@@ -395,6 +400,25 @@ async function loaded(harnessed, kinds = ['quota', 'image_review'], requestOverr
   await drains();
   return harnessed.editors.state.instances;
 }
+
+test('a multi-section page reads all configuration groups in one batch', async () => {
+  const h = harness(['quota', 'image_review'], {}, '', {batchRead: true});
+  h.editors.restore();
+  h.editors.paint();
+  const read = h.editors.read();
+  await drains();
+  assert.equal(h.requests.length, 1, 'multiple sections should share one read request');
+  assert.equal(h.requests[0].method, 'GET');
+  assert.deepEqual(plain(h.requests[0].body), {sections: 'quota,image_review'});
+  h.requests[0].resolve({status: 'ok', data: {sections: {
+    quota: payload('quota').sections.quota,
+    image_review: payload('image_review').sections.image_review,
+  }}});
+  await read;
+  await drains();
+  assert.ok(h.editors.state.instances.every(instance => instance.state.status));
+  assert.equal(h.requests.length, 1, 'prefetched sections must not be fetched again on mount');
+});
 
 test('dirty editor exposes changed field names and discard clears the source before unmount', async () => {
   const h = harness(['quota']);

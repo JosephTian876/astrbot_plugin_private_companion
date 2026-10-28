@@ -124,6 +124,22 @@ class AccountTargetSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row["group_id"] != "*" for row in current["group_targets"]))
         self.assertEqual(result["data"]["configuration"]["sessions"], current["targets"])
 
+    async def test_explicit_all_groups_target_is_saved_and_keeps_its_stable_id(self):
+        wildcard = {"platform_id": "qq-main", "account_id": "100", "bot_id": "bot-a", "group_id": "*"}
+
+        result = await self.save(accounts=self.accounts, personas=self.personas, groups=[wildcard])
+
+        self.assertEqual(result["status"], "ok", result)
+        saved = self.config["multi_host"]["group_targets"]
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["group_id"], "*")
+        self.assertTrue(saved[0]["target_id"].startswith("group-"))
+        target_id = saved[0]["target_id"]
+
+        result = await self.save(accounts=self.accounts, personas=self.personas, groups=[wildcard])
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(self.config["multi_host"]["group_targets"][0]["target_id"], target_id)
+
     async def test_removed_account_drops_old_private_group_and_persona_references(self):
         previous = deepcopy(self.config["multi_host"])
 

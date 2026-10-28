@@ -363,18 +363,19 @@ class AccountSessionWebAPI:
                                        for row in current["accounts"]}:
                     raise TaskError("account_group_target_account_required",
                                     "bind this Bot account and persona in account management first")
-                discovered = await self._discovered()
-                if not any(row.get("scope_kind") == "group"
-                           and row.get("platform_id") == platform_id
-                           and row.get("account_id") in ("", account_id)
-                           and row.get("group_id") == group_id
-                           for row in discovered.get("targets", [])):
-                    issue = next((item for item in discovered.get("directory", {}).get("issues", [])
-                                  if item.get("platform_id") in ("", platform_id)), None)
-                    if issue:
-                        raise TaskError(issue["code"], issue["reason"])
-                    raise TaskError("account_group_target_unavailable",
-                                    "select a group currently present in the native session directory")
+                if group_id != "*":
+                    discovered = await self._discovered()
+                    if not any(row.get("scope_kind") == "group"
+                               and row.get("platform_id") == platform_id
+                               and row.get("account_id") in ("", account_id)
+                               and row.get("group_id") == group_id
+                               for row in discovered.get("targets", [])):
+                        issue = next((item for item in discovered.get("directory", {}).get("issues", [])
+                                      if item.get("platform_id") in ("", platform_id)), None)
+                        if issue:
+                            raise TaskError(issue["code"], issue["reason"])
+                        raise TaskError("account_group_target_unavailable",
+                                        "select a group currently present in the native session directory")
                 target_id = "group-" + digest((platform_id, account_id, group_id))[:20]
                 group_rows.append({"target_id": target_id, "platform_id": platform_id,
                                    "account_id": account_id, "bot_id": bot_id, "group_id": group_id})
@@ -534,11 +535,19 @@ class AccountSessionWebAPI:
                     peer = row.get(peer_field)
                     peer = "*" if peer == "*" else route_id(peer)
                     if kind == "group" and peer == "*":
+                        if key not in selected:
+                            previous = existing.get((key[0], key[1], peer))
+                            if previous is not None and account_key(previous) == key:
+                                continue
+                            raise TaskError("account_config_invalid",
+                                            "each window must select a configured Bot account")
                         previous = existing.get((key[0], key[1], peer))
-                        if "groups" not in body and previous is not None and key in selected:
-                            output.append({"target_id": previous["target_id"],
-                                           "platform_id": key[0], "account_id": key[1],
-                                           "bot_id": key[2], peer_field: peer})
+                        output.append({
+                            "target_id": (previous["target_id"] if previous else
+                                          "group-" + digest((key[0], key[1], peer))[:20]),
+                            "platform_id": key[0], "account_id": key[1],
+                            "bot_id": key[2], peer_field: peer,
+                        })
                         continue
                     route = (key[0], key[1], peer)
                     previous = existing.get(route)

@@ -545,7 +545,7 @@ window.CompanionStatePage = (() => {
       fresh.pendingMaintenance=cached.pendingMaintenance;fresh.ready=!!cached.catalog;}
     data=fresh; data.loading=true; render();
     try {
-      const catalog=await api("GET","page/targets");
+      const catalog=window.CompanionProduct?.directory?.() || await api("GET","page/targets");
       if(!live(ticket))return;
       if(!Array.isArray(catalog.targets)||!catalog.installation_id||catalog.targets.some(item=>!Array.isArray(item.roles))) throw Object.assign(new Error("invalid_response"),{code:"invalid_response"});
       data.catalog=catalog;data.ready=true;data.loading=false;

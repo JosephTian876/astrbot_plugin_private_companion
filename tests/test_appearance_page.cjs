@@ -153,7 +153,7 @@ test('the page renders the live preview plus every theme and dimension', () => {
   assert.match(root.innerHTML, /窗格纹理与轻圆角/, '主题卡应说明结构风格，不只展示名称');
   assert.match(root.innerHTML, /改变卡片内边距与区块之间的距离/, '显示维度应呈现对应说明');
   assert.match(root.innerHTML, /预览与主题/);
-  assert.match(root.innerHTML, /这些偏好只作用于当前浏览器/);
+  assert.match(root.innerHTML, /按当前 Dashboard 账号保存到插件数据/);
   assert.match(root.innerHTML, /ap-top-grid/);
   assert.match(root.innerHTML, /显示维度与可读性/);
   assert.match(root.innerHTML, /ap-dimension-grid/);

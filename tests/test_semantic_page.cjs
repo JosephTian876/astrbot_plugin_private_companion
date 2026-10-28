@@ -386,6 +386,37 @@ test('batch import reports new, duplicate, failed, and out-of-limit files withou
   assert.match(node.innerHTML, /新增 1 张，重复跳过 1 张，失败 1 张/);
 });
 
+test('one button recognizes every pending reaction card and exposes progress', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node, {view: 'expression'});
+  const pending = ['one', 'two'].map((name, index) => ({
+    id: 'reaction-' + (index + 1), kind: 'reaction', revision: 1, enabled: true,
+    payload: {name, analysis: 'pending'},
+  }));
+  requests[0].resolve({...settingsCatalog(), items: pending});
+  await flush();
+  assert.match(node.innerHTML, /批量识别待补全 \(2\)/);
+
+  node.click('[data-semantic]', {semantic: 'analyze-pending'});
+  assert.equal(requests[1].values.action, 'analyze');
+  assert.equal(requests[1].values.id, 'reaction-1');
+  requests[1].resolve({item: {...pending[0], payload: {name: 'one', analysis: 'manual'}}});
+  await flush();
+  assert.equal(requests[2].values.action, 'analyze');
+  assert.equal(requests[2].values.id, 'reaction-2');
+  requests[2].resolve({item: {...pending[1], payload: {name: 'two', analysis: 'manual'}}});
+  await flush();
+
+  assert.equal(requests[3].method, 'GET');
+  requests[3].resolve({...settingsCatalog(), items: pending.map(item => ({
+    ...item, payload: {...item.payload, analysis: 'manual'},
+  }))});
+  await flush();
+  assert.match(node.innerHTML, /已识别 2 张/);
+  assert.match(node.innerHTML, /批量识别待补全<\/button>/);
+});
+
 test('automatic collection status is visible without exposing event or asset identifiers', async () => {
   const {page, requests, root} = harness();
   const node = root();

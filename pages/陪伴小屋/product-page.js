@@ -280,6 +280,54 @@ window.CompanionProduct = (() => {
   let followLight = false;
   try { followLight = localStorage.getItem(themeLightKey) === "on"; } catch (_) {}
   let lastSceneLight = "";
+  /* AstrBot 把插件页放在 sandbox="allow-scripts" 的 iframe 里，没有
+     allow-same-origin。这个 iframe 是 opaque origin，localStorage 会直接抛
+     SecurityError。以前只写 localStorage，于是每次刷新网页外观都回到默认；
+     桥接 API 走宿主同源请求，所以把同一组偏好按 Dashboard 账号存到插件数据。
+     localStorage 仍然保留：页面直接打开、或未来宿主放开 same-origin 时它仍是
+     零延迟的首屏缓存。 */
+  let preferencesTouched = 0, preferencesApplying = false, preferenceSaveTimer = null;
+  const displayPreferencesSnapshot = () => ({
+    appearance:{...appearance},
+    followLight:Boolean(followLight),
+    largeText:Boolean(window.CompanionDisplayPreferences?.largeText?.()),
+  });
+  const preferencesAreDefault = () => Object.entries(dimensions).every(([name, spec]) => appearance[name] === spec.fallback)
+    && !followLight && !window.CompanionDisplayPreferences?.largeText?.();
+  function scheduleDisplayPreferencesSave() {
+    if (preferencesApplying || !bridgeReady) return;
+    if (preferenceSaveTimer) clearTimeout(preferenceSaveTimer);
+    preferenceSaveTimer = setTimeout(() => {
+      preferenceSaveTimer = null;
+      if (preferencesApplying || !bridgeReady) return;
+      api("POST", "page/display-preferences", displayPreferencesSnapshot()).catch(error => {
+        console.warn("[CompanionV2] Display preferences were not saved", {
+          code:error?.code || "display_preferences_unavailable",
+        });
+      });
+    }, 120);
+  }
+  function applyDisplayPreferences(saved) {
+    if (!saved || typeof saved !== "object" || !saved.appearance || typeof saved.appearance !== "object") return false;
+    preferencesApplying = true;
+    try {
+      for (const [name, spec] of Object.entries(dimensions)) {
+        if (spec.values.includes(saved.appearance[name])) appearance[name] = saved.appearance[name];
+      }
+      followLight = saved.followLight === true;
+      applyAppearance();
+      sendWorkspace({kind:"appearance",appearance:{...appearance}});
+      if (typeof saved.largeText === "boolean") {
+        window.CompanionDisplayPreferences?.setLargeText?.(saved.largeText);
+      }
+    } finally { preferencesApplying = false; }
+    return true;
+  }
+  function displayPreferencesChanged() {
+    if (preferencesApplying) return;
+    preferencesTouched += 1;
+    scheduleDisplayPreferencesSave();
+  }
   function applyAppearance() {
     const root = document.documentElement;
     for (const [name, spec] of Object.entries(dimensions)) root.dataset[spec.dataset] = appearance[name];
@@ -324,13 +372,16 @@ window.CompanionProduct = (() => {
     appearance[name] = value;
     if (name !== "theme") applyAppearance();
     try { localStorage.setItem(spec.key, value); } catch (_) {}
+    displayPreferencesChanged();
     if (name === "theme") sendWorkspace({kind:"theme",theme:value});
     else sendWorkspace({kind:"appearance",name,value});
     return appearance[name];
   }
   function setFollowLight(on) {
-    followLight = !!on;
+    const next = !!on, changed = followLight !== next;
+    followLight = next;
     try { localStorage.setItem(themeLightKey, followLight ? "on" : "off"); } catch (_) {}
+    if (changed) displayPreferencesChanged();
     return followLight;
   }
   /* 小屋光照变化时调用。跟随时段开着才会切主题，
@@ -519,7 +570,51 @@ window.CompanionProduct = (() => {
     selected = {target_id:context?.target_id ?? null, role_id:choice?.role.role_id ?? null};
   }
   let summaryRequest = 0;
-  async function loadSummary(ticket) {
+  const SUMMARY_CACHE_MS = 45000;
+  const SUMMARY_CACHE_KEY = "companion-product-summary.v2";
+  const summaryCache = new Map();
+  function summaryCacheKey() {
+    return [catalog?.installation_id || "", selected.target_id || "", selected.role_id || ""].join(":");
+  }
+  function readSummaryCache(key) {
+    const memory = summaryCache.get(key);
+    if (memory && Date.now() - memory.at <= SUMMARY_CACHE_MS) return memory;
+    try {
+      const all = JSON.parse(window.sessionStorage?.getItem(SUMMARY_CACHE_KEY) || "{}");
+      const value = all?.[key];
+      if (value && Date.now() - Number(value.at || 0) <= SUMMARY_CACHE_MS) {
+        summaryCache.set(key, value);
+        return value;
+      }
+    } catch {}
+    return null;
+  }
+  function writeSummaryCache(key, value) {
+    summaryCache.set(key, value);
+    try {
+      const all = JSON.parse(window.sessionStorage?.getItem(SUMMARY_CACHE_KEY) || "{}");
+      all[key] = value;
+      const entries = Object.entries(all).filter(([, item]) => item && Date.now() - Number(item.at || 0) <= SUMMARY_CACHE_MS).slice(-8);
+      window.sessionStorage?.setItem(SUMMARY_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
+    } catch {}
+  }
+  function paintCachedSummary(cached) {
+    data = {...(cached.data || {})};
+    failures = {...(cached.failures || {})};
+    failureCodes = {...(cached.failureCodes || {})};
+    changed({kind:"state-refresh"});
+  }
+  async function loadSummary(ticket, {force=false} = {}) {
+    const key = summaryCacheKey();
+    const cached = force ? null : readSummaryCache(key);
+    if (cached) {
+      paintCachedSummary(cached);
+      setTimeout(() => {
+        if (ticket !== generation) return;
+        loadSummary(ticket, {force:true}).then(ok => { if (ok && ticket === generation) changed({kind:"state-refresh"}); }).catch(() => {});
+      }, 0);
+      return true;
+    }
     const request = ++summaryRequest;
     const current = role();
     const names = ["life","state","growth"].filter(name => current?.[name+"_api"]);
@@ -538,12 +633,15 @@ window.CompanionProduct = (() => {
       }
     });
     data = fresh; failures = rejected; failureCodes = rejectedCodes;
+    if (Object.keys(fresh).length) {
+      writeSummaryCache(key, {at: Date.now(), data: fresh, failures: rejected, failureCodes: rejectedCodes});
+    }
     return true;
   }
   async function refreshSummary() {
     if(!bridgeReady||!catalog||!role())return false;
     const ticket=generation;
-    const refreshed=await loadSummary(ticket);
+    const refreshed=await loadSummary(ticket,{force:true});
     if(!refreshed||ticket!==generation)return false;
     changed({kind:"state-refresh"});
     return true;
@@ -572,15 +670,33 @@ window.CompanionProduct = (() => {
       };
       releaseAppearanceContext = bridge.onContext?.(restoreAppearance) || null;
       restoreAppearance();
-      const results = await Promise.allSettled([api("GET","integration/manifest"),api("GET","page/targets")]);
+      const settle = promise => promise.then(value => ({status:"fulfilled",value}), reason => ({status:"rejected",reason}));
+      const preferencesRevision = preferencesTouched, preferencesChangedBeforeLoad = preferencesRevision > 0;
+      const preferencesTask = settle(api("GET","page/display-preferences"));
+      const manifestTask = settle(api("GET","integration/manifest"));
+      const directoryTask = settle(api("GET","page/targets"));
+      preferencesTask.then(result => {
+        if (ticket !== generation || preferencesRevision !== preferencesTouched) return;
+        if (result.status !== "fulfilled") return;
+        if (preferencesChangedBeforeLoad) { scheduleDisplayPreferencesSave(); return; }
+        const saved = result.value?.preferences;
+        if (saved) applyDisplayPreferences(saved);
+        else if (!preferencesAreDefault()) scheduleDisplayPreferencesSave();
+      });
+      const directoryResult = await directoryTask;
       if (ticket !== generation) return;
-      manifest = results[0].status === "fulfilled" ? results[0].value : null;
-      if (results[1].status === "fulfilled") {
-        const directory = results[1].value;
+      let summaryTask = null;
+      if (directoryResult.status === "fulfilled") {
+        const directory = directoryResult.value;
         if (!Array.isArray(directory.targets) || !directory.installation_id || directory.targets.some(t => !Array.isArray(t.roles))) throw fail("invalid_response");
         catalog = directory; chooseDefault(); notice = "";
-        await loadSummary(ticket);
-      } else notice = errors[results[1].reason?.code] || "暂时无法读取授权对象。请在账号与会话中检查连接。";
+        loading = false; changed();
+        summaryTask = loadSummary(ticket);
+      } else notice = errors[directoryResult.reason?.code] || "暂时无法读取授权对象。请在账号与会话中检查连接。";
+      const manifestResult = await manifestTask;
+      if (ticket !== generation) return;
+      manifest = manifestResult.status === "fulfilled" ? manifestResult.value : null;
+      if (summaryTask) await summaryTask;
       if (!manifest && !notice) notice = "核心工作区已连接，插件能力目录暂不可读取。";
     } catch(error) {if(ticket === generation) {notice = errors[error.code] || "连接失败，请刷新核对。";catalog = manifest = null;data = {};failures = {};failureCodes = {};}}
     finally {if(ticket === generation) {loading = false; changed();}}
@@ -603,6 +719,7 @@ window.CompanionProduct = (() => {
     else chooseDefault();
     growthPage = null; growthCursor = null;
     rebindWorkspaceContexts();
+    loading = false; changed();
     await loadSummary(ticket);
     if (ticket !== generation) return;
     loading = false;
@@ -641,8 +758,10 @@ window.CompanionProduct = (() => {
     rebindWorkspaceContexts();
     loading = true;
     if (!quiet) changed();
+    loading = false;
+    if (!quiet) changed();
     await loadSummary(ticket);
-    if(ticket === generation) {loading = false; if(!quiet) changed(); else renderScope();}
+    if(ticket === generation) {if(!quiet) changed(); else renderScope();}
   }
   function chooseRole(roleId, quiet=false) {
     const current = target();
@@ -1237,8 +1356,10 @@ window.CompanionProduct = (() => {
     request:api,acquaintanceDirectory,refreshDirectory:refreshDirectoryAfterMapping,
     errorLabel:code=>errors[code]||"当前设置未能确认，请刷新并核对账号、人格与模型。",
     theme:currentTheme,setTheme,appearance:()=>({...appearance}),setAppearance,resetAppearance,dimensions,
+    displayPreferences:displayPreferencesSnapshot,displayPreferencesChanged,
     themeLight,lightOf:id=>themeLight[id]||"day",followLight:()=>followLight,setFollowLight,syncLight,
     targets:()=>catalog?.targets||[],
+    directory:()=>catalog,
     /* 账号和宿主人格是角色准备目录，不是聊天窗口目录。迁移向导用它们
        展示多 Bot / 多角色拓扑，再用 targets 给可接收迁移的角色补上真实路由。 */
     accounts:()=>catalog?.accounts||[], personas:()=>catalog?.personas||[],

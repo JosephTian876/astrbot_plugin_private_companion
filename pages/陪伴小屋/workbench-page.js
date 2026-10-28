@@ -156,6 +156,22 @@ window.CompanionWorkbench = (() => {
     || fallback;
   const icon = name => `<i data-lucide="${name}" aria-hidden="true"></i>`;
   let instanceSequence = 0;
+  /* Short-lived stale-while-revalidate cache for workbench reads.  Page
+     navigation often remounts the same configuration section; painting the
+     last successful snapshot immediately makes tab switches feel instant while
+     the background refresh still reconciles the edit token. */
+  const READ_CACHE = new Map();
+  const READ_CACHE_MS = 15000;
+  const readCache = key => {
+    const item = READ_CACHE.get(key);
+    if (!item || Date.now() - item.at > READ_CACHE_MS) { READ_CACHE.delete(key); return null; }
+    return JSON.parse(JSON.stringify(item.payload));
+  };
+  const writeCache = (key, payload) => {
+    if (READ_CACHE.size > 256) READ_CACHE.clear();
+    try { READ_CACHE.set(key, {at: Date.now(), payload: JSON.parse(JSON.stringify(payload))}); } catch {}
+  };
+  const clearReadCache = () => READ_CACHE.clear();
 
   /* === 字段契约：把后端 FieldDefinition 收敛成渲染所需的最小形状 === */
   function contract(name, definition, choices = null) {
@@ -953,6 +969,7 @@ window.CompanionWorkbench = (() => {
       visibility = {}, listFields = {}, chipOptions = {}, navigationLimit = 8,
       presentation = "", sectionTabPrefix = "", initialSection = null,
       mount: mountPoint, endpoint, order = null, pollMs = 0, query = null,
+      prefetch = null,
       audit = null, onStatus = null, scopeKey: scopeKeyOverride = null,
       /* 分组用一层继承链，但「值是谁共享的」不一定等于链上有没有角色层：
          主动联系偏好还有关系层，卡片右上角要说清这一点，所以允许分区声明自己的
@@ -1176,6 +1193,7 @@ window.CompanionWorkbench = (() => {
           value = response.data;
         }
         if (!value || typeof value !== "object" || Array.isArray(value)) throw error("invalid_response");
+        if (method !== "GET") clearReadCache();
         return value;
       } finally { clearTimeout(timer); }
     }
@@ -2148,15 +2166,27 @@ window.CompanionWorkbench = (() => {
       const previousDraft = state.draft;
       const previousConflicts = state.conflicts;
       const keepDraft = !options?.discardDraft && dirty();
+      const cacheKey = JSON.stringify([endpoint, group, query || null,
+        window.CompanionProduct?.scopeKey?.() || "",
+        window.CompanionProduct?.selection?.() || null]);
+      const prefetched = options?.prefetched && typeof options.prefetched === "object" ? options.prefetched : null;
+      const cached = prefetched || (options?.allowCache && !options?.force && !keepDraft && !state.pending
+        ? readCache(cacheKey) : null);
+      const usedCache = Boolean(cached);
       const ticket = ++state.ticket;
       state.loading = true;
       state.notice = state.status ? state.notice : "";
       paint();
       try {
         let payload, retried = false;
-        for (let retries = 0; ; retries += 1) {
+        if (cached) {
+          payload = cached;
+          writeCache(cacheKey, cached);
+        }
+        for (let retries = 0; !cached; retries += 1) {
           try {
             payload = await api("GET", endpoint, null, query || undefined);
+            writeCache(cacheKey, payload);
             break;
           } catch (problem) {
             if (ticket !== state.ticket) return;
@@ -2235,6 +2265,13 @@ window.CompanionWorkbench = (() => {
         if (onStatus) onStatus(value);
         if (state.pending) scheduleAutoRecovery(state.pending.operation_key, ticket);
         schedule();
+        if (usedCache && !prefetched) {
+          setTimeout(() => {
+            if (!state.busy && !state.loading && !state.dirty() && !state.pending) {
+              void refresh({...options, force: true});
+            }
+          }, 0);
+        }
       } catch (problem) {
         if (ticket !== state.ticket) return;
         /* 读取失败后不能继续把上一份配置当成当前真实状态展示。保留用户尚未
@@ -2423,7 +2460,7 @@ window.CompanionWorkbench = (() => {
       stop();
       if (!pollMs || !state.status || document.hidden) return;
       state.timer = setTimeout(() => {
-        if (!state.busy && !state.loading && !state.dirty()) void refresh();
+        if (!state.busy && !state.loading && !state.dirty()) void refresh({force:true});
         else schedule();
       }, pollMs);
     }
@@ -2447,7 +2484,14 @@ window.CompanionWorkbench = (() => {
           + `<span>当前对象没有可用的配置工作区。请先选择已初始化的私聊对象和角色。</span></p>`;
         return;
       }
-      void refresh();
+      if (typeof prefetch === "function") {
+        Promise.resolve().then(prefetch).then(payload => {
+          const mounted = mountPoint();
+          if (mounted && mounted.isConnected !== false) void refresh({prefetched: payload});
+        }).catch(() => { void refresh({allowCache:true}); });
+      } else {
+        void refresh({allowCache:true});
+      }
     }
 
     /* 宿主页面每次 render() 会整块重写 innerHTML，把本工作台的 DOM 一起冲掉。

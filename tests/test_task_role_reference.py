@@ -1,5 +1,6 @@
 """The self page is the role reference for background tasks, not conversation."""
 
+import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
 import unittest
@@ -48,6 +49,36 @@ class TaskRoleReferenceTests(unittest.TestCase):
         self.assertIn("role.journal.diary", TASK_ROLE_REFERENCE_KINDS)
         self.assertNotIn("conversation.reply", TASK_ROLE_REFERENCE_KINDS)
         self.assertNotIn("conversation.image_review", TASK_ROLE_REFERENCE_KINDS)
+
+
+
+class GatewayGenerateBoundaryTests(unittest.TestCase):
+    @dataclass(frozen=True)
+    class Request:
+        role_instruction: str
+
+    def test_generate_continues_with_the_request_frozen_into_the_plan(self):
+        captured = []
+
+        class Session:
+            def __init__(self, original):
+                self.plan = SimpleNamespace(envelope=SimpleNamespace(original=original))
+
+            async def generate(self, request):
+                captured.append(request)
+                return "completion"
+
+        original = self.Request("captured persona")
+        planned = self.Request("self page role reference")
+        session = Session(planned)
+        gateway = object.__new__(LocalModelGateway)
+        gateway.open_session = lambda run, request: session
+
+        result = asyncio.run(gateway.generate(object(), original))
+
+        self.assertEqual(result, "completion")
+        self.assertEqual(captured, [planned])
+        self.assertIs(captured[0], session.plan.envelope.original)
 
 
 if __name__ == "__main__":

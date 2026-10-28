@@ -303,8 +303,14 @@ class SemanticWebAPI:
                         raise ValueError("revise the bounded meaning of this exact term")
                     payload["source"]="manual"
                 else:
+                    # Saving an editor with untouched empty fields must not mark
+                    # those fields as human-authored. Otherwise a user who saves
+                    # before pressing "complete blank fields" permanently pins
+                    # every empty field and the vision model can never fill it.
+                    changed_fields = {name for name, value in values.items()
+                                      if value != item["payload"].get(name, "")}
                     payload["analysis"]="manual"
-                    payload["manual_fields"] = sorted(set(payload.get("manual_fields", ())) | set(values))
+                    payload["manual_fields"] = sorted(set(payload.get("manual_fields", ())) | changed_fields)
                     if data["enabled"] and payload.get("collection_state") == "awaiting_confirmation":
                         payload["collection_state"] = "confirmed"
                 payload["text"]="；".join(payload.get(k,"") for k in allowed)

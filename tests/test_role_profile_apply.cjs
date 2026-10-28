@@ -6,20 +6,30 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(path.resolve(__dirname, "../pages/陪伴小屋/role-profile-draft.js"), "utf8");
 const testSource = source.replace(/return \{markup, open: openDialog, isDirty,?([^;]*)\};/,
-  "return {markup, open: openDialog, isDirty,$1, recoverPendingApply, restorePendingApply, storePendingApply, get state() { return state; }};");
+  "return {markup, open: openDialog, isDirty,$1, apply, recoverPendingApply, restorePendingApply, storePendingApply, get state() { return state; }};");
 assert.notEqual(testSource, source, "test seam must match the private module return");
 
-function harness(sessionStore, outcomes) {
+function harness(sessionStore, outcomes, options = {}) {
   const calls = [], notices = [], events = [];
-  const dialog = {open: true, querySelector: () => null, querySelectorAll: () => []};
+  const fields = options.fields || {};
+  const fieldControl = selector => {
+    const match = /^\[data-role-profile-draft-value="(.+)"\]$/.exec(selector);
+    return match ? {value: String(fields[match[1]] ?? "")} : null;
+  };
+  const dialog = {open: true, querySelector: selector => fieldControl(selector), querySelectorAll: () => []};
   const noticeNode = {textContent: "", dataset: {}};
   const document = {
     querySelector(selector) {
       if (selector === "#roleProfileDraftDialog") return dialog;
       if (selector === "[data-role-profile-draft-notice]") return noticeNode;
-      return null;
+      return fieldControl(selector);
     },
-    querySelectorAll: () => [],
+    querySelectorAll(selector) {
+      if (selector === "[data-role-profile-draft-select]:checked") {
+        return (options.selected || []).map(value => ({value}));
+      }
+      return [];
+    },
     addEventListener() {},
     dispatchEvent(event) { events.push(event.type); },
   };
@@ -31,20 +41,27 @@ function harness(sessionStore, outcomes) {
       relative: value => value,
       request: async (method, endpoint, body) => {
         calls.push({method, endpoint, body: body && JSON.parse(JSON.stringify(body))});
-        if (method === "GET") throw new Error("status read unavailable");
+        if (method === "GET") {
+          if (options.section) return JSON.parse(JSON.stringify(options.section));
+          throw new Error("status read unavailable");
+        }
         return outcomes.shift()();
       },
     },
   };
-  vm.runInNewContext(testSource, {
-    window, document, sessionStorage: {
-      getItem: key => sessionStore.has(key) ? sessionStore.get(key) : null,
-      setItem: (key, value) => sessionStore.set(key, String(value)),
-      removeItem: key => sessionStore.delete(key),
-    },
+  if (options.history) window.history = options.history;
+  const context = {
+    window, document,
     Event: class { constructor(type) { this.type = type; } },
     setTimeout, clearTimeout, Math, JSON, Object, Array, String, Number, Set, Map, Error, Promise,
-  });
+  };
+  context.sessionStorage = options.sessionStorage || {
+    getItem: key => sessionStore.has(key) ? sessionStore.get(key) : null,
+    setItem: (key, value) => sessionStore.set(key, String(value)),
+    removeItem: key => sessionStore.delete(key),
+  };
+  if (options.localStorage) context.localStorage = options.localStorage;
+  vm.runInNewContext(testSource, context);
   return {module: window.CompanionRoleProfileDraft, calls, notices, events, noticeNode};
 }
 
@@ -101,4 +118,73 @@ test("a confirmed role-profile rejection clears the recoverable request", async 
   assert.equal(app.module.state.pendingApply, null);
   assert.equal(sessionStore.size, 0);
   assert.match(app.noticeNode.textContent, /刚刚更新过/);
+});
+
+test("role-profile draft exposes an explicit text model selector and sends it", async () => {
+  assert.match(source, /data-role-profile-draft-provider/);
+  assert.match(source, /整理模型/);
+  assert.match(source, /默认模型|当前聊天模型|default_provider_id/);
+  assert.match(source, /provider_id: providerId \|\| ""/);
+});
+
+test("a blocked Web Storage save still posts once and remains recoverable", async () => {
+  const blocked = {
+    getItem() { throw new Error("SecurityError"); },
+    setItem() { throw new Error("SecurityError"); },
+    removeItem() { throw new Error("SecurityError"); },
+  };
+  const history = {state: {kept: "dashboard"}, replaceState(next) { this.state = next; }};
+  const section = {sections: {role_profile: {settings: {name: ""}, edit_token: "e".repeat(64)}}};
+  const first = harness(new Map(), [
+    () => Promise.reject(Object.assign(new Error("timeout"), {code: "bridge_timeout"})),
+  ], {
+    sessionStorage: blocked, localStorage: blocked, history, section,
+    fields: {name: "Xiao Ban"}, selected: ["name"],
+  });
+  first.module.state.target = "role_profile";
+  first.module.state.scopeKey = "target-a:role-a";
+  first.module.state.draft = {fields: {name: "Xiao Ban"}};
+  first.module.state.selectedFields = new Set(["name"]);
+  first.module.state.limits = {name: 100};
+  first.module.state.totalLimit = 30000;
+  first.module.state.current = {settings: {name: ""}};
+
+  await first.module.apply("empty");
+  const firstPosts = first.calls.filter(call => call.method === "POST");
+  assert.equal(firstPosts.length, 1);
+  assert.equal(firstPosts[0].body.changes.name, "Xiao Ban");
+  assert.ok(first.module.state.pendingApply, "the in-memory request must survive an unknown result");
+  assert.equal(first.module.state.pendingApply.body.operation_key, firstPosts[0].body.operation_key);
+  assert.doesNotMatch(first.noticeNode.textContent, /当前浏览器无法记录|尚未提交/);
+  assert.match(first.noticeNode.textContent, /保存结果尚未确认/);
+
+  const stored = history.state.__companion_role_profile_apply_pending_v1;
+  assert.equal(typeof stored, "object");
+  const entries = Object.values(stored);
+  assert.equal(entries.length, 1);
+  assert.equal(JSON.parse(entries[0]).body.operation_key, firstPosts[0].body.operation_key);
+
+  const second = harness(new Map(), [
+    () => Promise.resolve({result: {operation_id: "stored-operation", replayed: true}}),
+  ], {sessionStorage: blocked, localStorage: blocked, history, section});
+  const restored = second.module.restorePendingApply("role_profile", "target-a:role-a", "config/configure");
+  assert.ok(restored, "history.state must restore the unknown request after reload");
+  assert.equal(restored.body.operation_key, firstPosts[0].body.operation_key);
+  second.module.state.target = "role_profile";
+  second.module.state.scopeKey = "target-a:role-a";
+  second.module.state.pendingApply = restored;
+  await second.module.recoverPendingApply();
+
+  const secondPosts = second.calls.filter(call => call.method === "POST");
+  assert.equal(secondPosts.length, 1);
+  assert.equal(second.module.state.pendingApply, null);
+  assert.equal(history.state.kept, "dashboard");
+  assert.equal(history.state.__companion_role_profile_apply_pending_v1, undefined);
+  assert.match(second.noticeNode.textContent, /原保存已确认/);
+});
+
+test("role-profile apply never gates submission on pending persistence", () => {
+  assert.doesNotMatch(source, /if \(!storePendingApply\(pending\)\) \{\s*state\.pendingApply = null/);
+  assert.match(source, /pendingApplyMemory/);
+  assert.match(source, /writeHistoryPendingApply/);
 });

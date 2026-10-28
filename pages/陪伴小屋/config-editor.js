@@ -1791,6 +1791,33 @@ window.CompanionConfigEditors = (() => {
     if (!names.length || !endpoint) return null;
     if (!window.CompanionWorkbench?.create) return null;
     let rolePeople = [];
+    /* One page often owns several configuration groups.  The backend accepts a
+       comma-separated `sections` query, so fetch them once and hand each
+       workbench its slice instead of making one request per section.  The
+       shared promise is lazy: the first mounted editor starts it, all later
+       editors reuse the same response. */
+    const canBatchRead = names.length > 1 && typeof product?.request === "function" && names.every(kind =>
+      !spec[kind]?.query && !views?.[kind]?.query);
+    let batchRead = null;
+    let batchPrimed = false;
+    if (canBatchRead) {
+      const sectionNames = names.join(",");
+      batchRead = () => {
+        if (!batchRead.promise) {
+          batchRead.promise = Promise.resolve(product.request("GET", endpoint,
+            {sections: sectionNames})).then(payload => {
+              if (!payload || typeof payload !== "object" || typeof payload.sections !== "object") {
+                throw new Error("batch configuration response is invalid");
+              }
+              return payload;
+            }).catch(error => {
+              batchRead.promise = null;
+              throw error;
+            });
+        }
+        return batchRead.promise;
+      };
+    }
 
     const instances = names.map(kind => {
       const base = spec[kind];
@@ -1861,6 +1888,13 @@ window.CompanionConfigEditors = (() => {
       audit: current.audit || null,
       onStatus: current.onStatus || null,
       endpoint,
+      /* Multi-section pages share one batched response; a single-section page
+         keeps the normal direct read. */
+      prefetch: batchRead ? async () => {
+        const payload = await batchRead();
+        if (!payload.sections[kind]) throw new Error("batch configuration section is missing");
+        return {sections: {[kind]: payload.sections[kind]}};
+      } : null,
       /* 每分区各读一次：后端按 sections 过滤，避免一个分区解析失败牵连另一个。 */
       query: Object.hasOwn(current, "query") ? current.query : {sections: kind},
       savePath: current.savePath || "/configure",
@@ -1902,7 +1936,17 @@ window.CompanionConfigEditors = (() => {
         }
         for (const instance of instances) instance.mount();
       },
-      read(kind) { return Promise.all(instances.filter(instance => !kind || instance.group === kind).map(instance => instance.refresh())); },
+      read(kind) {
+        /* The first read of a freshly painted multi-section page is already
+           served by the shared batch.  Later explicit reads (after save or a
+           conflict) keep the normal per-section refresh path. */
+        if (batchRead && !batchPrimed && !kind) {
+          batchPrimed = true;
+          return batchRead().catch(() => null);
+        }
+        return Promise.all(instances.filter(instance => !kind || instance.group === kind)
+          .map(instance => instance.refresh()));
+      },
       selectSection(id) { for (const instance of instances) instance.selectSection(id); },
       saveField(kind, field, value) {
         const instance = instances.find(item => item.group === kind);

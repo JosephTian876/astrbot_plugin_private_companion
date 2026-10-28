@@ -156,6 +156,21 @@ class PrivateSemanticAPITests(SemanticRequests, unittest.IsolatedAsyncioTestCase
         self.assertIn("intents", edited["data"]["item"]["payload"]["manual_fields"])
         found = await self.semantic_request(self.selection, action="search", kind="reaction", query="抱抱")
         self.assertEqual([row["id"] for row in found["data"]["items"]], [item["id"]])
+        second_output = io.BytesIO()
+        Image.new("RGB", (320, 180), "blue").save(second_output, format="PNG")
+        second_import = await self.semantic_request(
+            self.selection, action="import",
+            content=base64.b64encode(second_output.getvalue()).decode("ascii"),
+            metadata={"name": "second.png"})
+        second_item = second_import["data"]["item"]
+        self.assertEqual(second_item["payload"]["manual_fields"], ["name"])
+        untouched_blank_save = await self.semantic_request(
+            self.selection, action="edit", kind="reaction", id=second_item["id"],
+            revision=second_item["revision"],
+            values={"name": "second.png", "description": "", "visible_text": "",
+                    "tags": "可用", "emotions": "", "intents": ""}, enabled=True)
+        self.assertEqual(untouched_blank_save["data"]["item"]["payload"]["manual_fields"],
+                         ["name", "tags"])
         stale_delete = await self.semantic_request(self.selection, action="delete", kind="reaction",
                                                     id=item["id"], revision=item["revision"])
         self.assertEqual(stale_delete["data"]["code"], "semantic_conflict")

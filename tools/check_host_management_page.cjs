@@ -262,8 +262,11 @@ async function run({browser, outputDir, bridgePath}) {
     await loc("#topology-pin-session").click();
     assert.equal(await loc("#topology-sessions .topology-node-badge.pinned").count(), 1);
     assert.equal(await loc("#group-target-list [data-group-target-choice]").count(), 1);
+    assert.equal(await loc("#group-target-list [data-group-wildcard-choice]").count(), 1);
+    assert.equal(await loc("#group-target-list [data-group-wildcard-choice]").first().isChecked(), true);
     assert.equal(await loc("#group-target-list [data-group-target-choice]").first().isChecked(), false);
     await loc("#group-target-list [data-group-target-choice]").first().check();
+    assert.equal(await loc("#group-target-list [data-group-wildcard-choice]").first().isChecked(), false);
     assert.match(await loc("#group-target-state").innerText(), /尚未保存/);
     await loc("#close-session-manager").click();
     const refreshReads = qa.calls.filter(call => call.endpoint === "accounts" && call.action === "api:get").length;

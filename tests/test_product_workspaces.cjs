@@ -56,6 +56,7 @@ async function harness(savedTheme = null, extensions = [], options = {}) {
     catalog.targets[0].roles.push(extra);
   }
   const navigations = [];
+  let largeText = false;
   const window = {
     location: {href: "http://localhost/api/plugin/page/content/astrbot_plugin_private_companion/cottage/"},
     addEventListener(type, handler) { events[type] = handler; },
@@ -63,6 +64,10 @@ async function harness(savedTheme = null, extensions = [], options = {}) {
     matchMedia: () => ({matches: false}),
     CompanionWorkspaceBundle: options.lazyBundles ? undefined
       : {host: "<p>host</p>", identity: "<p>directory</p>", relationships: "<p>relationship</p>", persona: "<p>persona</p>"},
+    CompanionDisplayPreferences: {
+      largeText: () => largeText,
+      setLargeText(value) { largeText = Boolean(value); window.CompanionProduct?.displayPreferencesChanged?.(); },
+    },
     AstrBotPluginPage: {
       ready: async () => ({pluginName: options.pluginName || HOST}),
       onContext(handler) { contextHandlers.add(handler); return () => contextHandlers.delete(handler); },
@@ -75,6 +80,7 @@ async function harness(savedTheme = null, extensions = [], options = {}) {
         if (options.summaryErrors?.[endpoint]) {
           return {status: "error", data: {code: options.summaryErrors[endpoint]}};
         }
+        if (endpoint === "page/display-preferences") return options.displayPreferences || {preferences: null};
         if (endpoint === "page/workspace-entry") return options.workspaceEntry || {content_path:
           "/api/plugin/page/content/astrbot_plugin_private_companion/%E9%99%AA%E4%BC%B4%E5%B0%8F%E5%B1%8B/?asset_token=fresh"};
         if (endpoint === "page/targets") return options.directoryUnavailable
@@ -85,7 +91,7 @@ async function harness(savedTheme = null, extensions = [], options = {}) {
       apiPost: async (endpoint, body) => {
         calls.push({method: "POST", endpoint, body});
         if (options.postFailure) throw options.postFailure;
-        return {};
+        return {status: "ok", data: {preferences: body}};
       },
     },
   };
@@ -105,7 +111,7 @@ async function harness(savedTheme = null, extensions = [], options = {}) {
         window.CompanionWorkspaceBundle[name] = `<p>${name} lazy</p>`;
         script.onload?.();
       }
-    }}, body: {classList: {add() {}, remove() {}}},
+    }}, body: {classList: {add() {}, remove() {}, contains() { return false; }}},
     querySelector: selector => {
       const name = selector.match(/workspace-bundle="([a-z]+)"/)?.[1];
       return options.lazyBundles && name ? {content: {querySelector: () =>
@@ -154,6 +160,7 @@ async function harness(savedTheme = null, extensions = [], options = {}) {
       kind: "request", requestId, method, path: endpoint, body: {}, timeoutMs}});
   }
   return {product, calls, timers, warnings, loadedScripts, fetchCalls, frames, addFrame, identity, relationships, host, persona, events, request, document, stageRole, navigations, updates, catalog,
+    largeText: () => largeText,
     setDirectory(directory) {nextDirectory = directory;},
     hostTheme(isDark) {
       document.documentElement.dataset.theme = isDark ? "dark" : "light";
@@ -508,6 +515,16 @@ test("directory failures keep the cottage title and a recovered single role has 
   assert(h.calls.every(call => call.method === "GET"));
 });
 
+test("reconnect paints the cached section summary before refreshing it", async () => {
+  const h = await harness(null, [], {captureTimers: true});
+  h.calls.length = 0;
+  const beforeTimers = h.timers.length;
+  await h.product.connect();
+  const summaryCalls = h.calls.filter(call => /\/(state|life|growth|memory|relationships)$/.test(call.endpoint));
+  assert.equal(summaryCalls.length, 0, "cached summary should paint without waiting for the section endpoints");
+  assert.ok(h.timers.length > beforeTimers, "a background refresh should still be scheduled");
+});
+
 test("runtime loading errors stay distinct from first-run completion in the home overview", async () => {
   const h = await harness(null, [], {summaryErrors: {
     "targets/first/roles/synthetic-role/state": "staging_not_initialized",
@@ -542,6 +559,32 @@ test("host context updates preserve the browser theme and synchronize every work
   assert.equal(h.document.documentElement.dataset.theme, "walnut");
   await h.product.connect();
   assert.equal(h.contextHandlers.size, 1, "reconnecting replaces the context subscription");
+});
+
+test("account display preferences restore after a sandboxed iframe reload and later changes save", async () => {
+  const saved = {
+    appearance: {theme: "walnut", density: "roomy", radius: "round", typeScale: "l", motion: "low"},
+    followLight: true,
+    largeText: true,
+  };
+  const h = await harness(null, [], {displayPreferences: {preferences: saved}});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.document.documentElement.dataset.theme, "walnut");
+  for (const [name, value] of Object.entries(saved.appearance)) {
+    assert.equal(h.product.appearance()[name], value, `${name} did not restore`);
+  }
+  assert.equal(h.product.followLight(), true);
+  assert.equal(h.largeText(), true, "large text restores with the same account preference document");
+
+  h.product.setAppearance("theme", "night");
+  h.product.setFollowLight(false);
+  await new Promise(resolve => setTimeout(resolve, 160));
+  const saves = h.calls.filter(call => call.method === "POST"
+    && call.endpoint === "page/display-preferences");
+  assert.equal(saves.length, 1, "one debounced save carries the complete preference document");
+  assert.equal(saves[0].body.appearance.theme, "night");
+  assert.equal(saves[0].body.followLight, false);
+  assert.equal(saves[0].body.largeText, true);
 });
 
 test("each workspace sends requests only to its own API and response channel", async () => {

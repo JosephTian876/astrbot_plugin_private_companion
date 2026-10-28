@@ -5,7 +5,7 @@ window.CompanionRoleProfileDraft = (() => {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[char]));
   const icon = name => '<i data-lucide="' + name + '" aria-hidden="true"></i>';
-  const state = {target: "role_profile", draft: null, source: null, knowledge: [], fieldValues: {}, selectedFields: null, limits: null, totalLimit: 30000, current: null, scopeKey: "", pendingApply: null, personaId: "", personas: [], supplements: {role_profile: "", relationship_profile: ""}, busy: false, busyKind: "", ticket: 0};
+  const state = {target: "role_profile", draft: null, source: null, knowledge: [], fieldValues: {}, selectedFields: null, limits: null, totalLimit: 30000, current: null, scopeKey: "", pendingApply: null, personaId: "", personas: [], providerId: "", providers: [], defaultProviderId: "", lastProviderId: "", supplements: {role_profile: "", relationship_profile: ""}, busy: false, busyKind: "", ticket: 0};
   const errorText = {
     dashboard_identity_required: "请从已登录的 AstrBot 管理界面打开陪伴小屋。",
     core_access_required: "当前账号没有管理权限。",
@@ -31,7 +31,8 @@ window.CompanionRoleProfileDraft = (() => {
       '<div><span data-role-profile-draft-target>PERSONA → ROLE CANON</span><h2 id="roleProfileDraftTitle">整理角色资料</h2></div>' +
       '<button class="icon-button" type="button" data-role-profile-draft-close aria-label="关闭" title="关闭">' + icon("x") + '</button></header>' +
       '<section class="role-profile-draft-compose" aria-label="补充角色设定">' +
-      '<label class="role-profile-draft-persona">AstrBot 人格<select data-role-profile-draft-persona aria-label="选择整理来源人格"></select></label>' +
+      '<div class="role-profile-draft-source-picks"><label class="role-profile-draft-persona">AstrBot 人格<select data-role-profile-draft-persona aria-label="选择整理来源人格"></select></label>' +
+      '<label class="role-profile-draft-persona">整理模型<select data-role-profile-draft-provider aria-label="选择整理使用的文本模型"><option value="">跟随当前聊天模型</option></select></label></div>' +
       '<label for="roleProfileDraftSupplement" data-role-profile-draft-supplement-label>补充已确认的角色设定</label>' +
       '<textarea id="roleProfileDraftSupplement" rows="3" maxlength="4000" placeholder="例如：她其实是人造人，生日是第一次醒来的那天；不擅长直接表达担心。"></textarea>' +
       '<div class="role-profile-draft-compose-foot"><p>人格原文提供角色底稿，角色档案与世界知识补足稳定设定；缺少依据的字段会留空。</p>' +
@@ -68,23 +69,65 @@ window.CompanionRoleProfileDraft = (() => {
   function operationKey() {
     return window.crypto?.randomUUID?.() || "role-profile-draft-" + Date.now() + "-" + Math.random().toString(36).slice(2);
   }
+  /* Sandboxed Dashboard plugin pages have an opaque origin, so Web Storage can
+     throw SecurityError. Keep the pending request in page memory first, then
+     try session/local storage, and use history.state as the reload fallback.
+     Persistence failures must not block the actual POST. */
+  const pendingApplyMemory = new Map();
+  const PENDING_APPLY_HISTORY_KEY = "__companion_role_profile_apply_pending_v1";
+  const PENDING_APPLY_HISTORY_PREVIOUS = "__companion_role_profile_apply_previous_state_v1";
   function pendingApplyKey(target, scope, endpoint) {
     const identity = window.CompanionProduct?.identity?.() || {};
     return "companion-role-profile-apply.v1:" + JSON.stringify([
       identity.installation_id || "", identity.operator_id || "", scope, target, endpoint,
     ]);
   }
-  function storePendingApply(value = state.pendingApply) {
-    if (!value) return false;
+  function writeHistoryPendingApply(key, value) {
     try {
-      sessionStorage.setItem(pendingApplyKey(value.target, value.scopeKey, value.endpoint), JSON.stringify(value));
+      const current = window.history.state;
+      const base = current && typeof current === "object" && !Array.isArray(current)
+        ? {...current} : current == null ? {} : {[PENDING_APPLY_HISTORY_PREVIOUS]: current};
+      const pending = base[PENDING_APPLY_HISTORY_KEY] && typeof base[PENDING_APPLY_HISTORY_KEY] === "object"
+        ? {...base[PENDING_APPLY_HISTORY_KEY]} : {};
+      if (value) pending[key] = JSON.stringify(value);
+      else delete pending[key];
+      if (Object.keys(pending).length) base[PENDING_APPLY_HISTORY_KEY] = pending;
+      else delete base[PENDING_APPLY_HISTORY_KEY];
+      const next = !Object.keys(base).length ? null
+        : Object.keys(base).length === 1 && PENDING_APPLY_HISTORY_PREVIOUS in base
+          ? base[PENDING_APPLY_HISTORY_PREVIOUS] : base;
+      window.history.replaceState(next, "");
       return true;
     } catch { return false; }
   }
+  function readHistoryPendingApply(key) {
+    try {
+      const stored = window.history.state?.[PENDING_APPLY_HISTORY_KEY]?.[key];
+      return typeof stored === "string" ? JSON.parse(stored) : null;
+    } catch { return null; }
+  }
+  function storePendingApply(value = state.pendingApply) {
+    if (!value) return false;
+    const key = pendingApplyKey(value.target, value.scopeKey, value.endpoint);
+    let text;
+    try { text = JSON.stringify(value); } catch { return false; }
+    pendingApplyMemory.set(key, text);
+    for (const storage of [() => sessionStorage, () => localStorage]) {
+      try { storage().setItem(key, text); return true; } catch {}
+    }
+    return writeHistoryPendingApply(key, value) || pendingApplyMemory.has(key);
+  }
   function restorePendingApply(target, scope, endpoint) {
     if (!endpoint) return null;
-    try {
-      const value = JSON.parse(sessionStorage.getItem(pendingApplyKey(target, scope, endpoint)));
+    const key = pendingApplyKey(target, scope, endpoint);
+    for (const read of [
+      () => pendingApplyMemory.get(key),
+      () => sessionStorage.getItem(key),
+      () => localStorage.getItem(key),
+      () => readHistoryPendingApply(key),
+    ]) try {
+      const stored = read();
+      const value = typeof stored === "string" ? JSON.parse(stored) : stored;
       const body = value?.body;
       if (value?.target === target && value?.scopeKey === scope && value.endpoint === endpoint
           && body?.section === target && typeof body.operation_key === "string"
@@ -97,7 +140,12 @@ window.CompanionRoleProfileDraft = (() => {
   }
   function clearPendingApply(value = state.pendingApply) {
     if (value) {
-      try { sessionStorage.removeItem(pendingApplyKey(value.target, value.scopeKey, value.endpoint)); } catch {}
+      const key = pendingApplyKey(value.target, value.scopeKey, value.endpoint);
+      pendingApplyMemory.delete(key);
+      for (const storage of [() => sessionStorage, () => localStorage]) {
+        try { storage().removeItem(key); } catch {}
+      }
+      writeHistoryPendingApply(key, null);
     }
     state.pendingApply = null;
     renderPendingApply();
@@ -111,12 +159,12 @@ window.CompanionRoleProfileDraft = (() => {
     if (panel) panel.hidden = !pending;
     if (button) button.disabled = state.busy || !pending;
     for (const control of dialog.querySelectorAll(
-      "[data-role-profile-draft-select], [data-role-profile-draft-value], #roleProfileDraftSupplement, [data-role-profile-draft-persona]")) {
+      "[data-role-profile-draft-select], [data-role-profile-draft-value], #roleProfileDraftSupplement, [data-role-profile-draft-persona], [data-role-profile-draft-provider]")) {
       control.disabled = !!pending || state.busy;
     }
     updateMeter();
   }
-  async function personaRequest(role, target, supplement, personaId) {
+  async function personaRequest(role, target, supplement, personaId, providerId) {
     const product = window.CompanionProduct;
     const bridge = product?.bridgeNow?.() || (product?.bridgeFor ? await product.bridgeFor() : window.AstrBotPluginPage);
     if (!bridge?.apiPost || !role?.persona_api) throw new Error("当前角色没有人格工作区。");
@@ -124,9 +172,9 @@ window.CompanionRoleProfileDraft = (() => {
     let timer;
     try {
       const response = await Promise.race([
-        bridge.apiPost(route, {target, supplement, persona_id: personaId}),
+        bridge.apiPost(route, {target, supplement, persona_id: personaId, provider_id: providerId || ""}),
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(Object.assign(new Error("请求等待过久"), {code: "role_profile_draft_timeout"})), 120000);
+          timer = setTimeout(() => reject(Object.assign(new Error("请求等待过久"), {code: "role_profile_draft_timeout"})), 240000);
         }),
       ]);
       return product.unwrap(response);
@@ -141,6 +189,27 @@ window.CompanionRoleProfileDraft = (() => {
       const bridge = product?.bridgeNow?.() || (product?.bridgeFor ? await product.bridgeFor() : window.AstrBotPluginPage);
       const value = product.unwrap(await bridge.apiGet(product.relative(role.persona_api), {limit: 1}));
       state.personas = Array.isArray(value.personas) ? value.personas : [];
+      state.providers = Array.isArray(value.providers) ? value.providers : [];
+      state.defaultProviderId = String(value.default_provider_id || "");
+      const providerSelect = $("[data-role-profile-draft-provider]");
+      if (providerSelect) {
+        providerSelect.replaceChildren();
+        const follow = document.createElement("option");
+        follow.value = "";
+        follow.textContent = state.defaultProviderId ? `跟随当前聊天模型 · ${state.defaultProviderId}` : "跟随当前聊天模型";
+        providerSelect.append(follow);
+        for (const provider of state.providers) {
+          const option = document.createElement("option");
+          option.value = provider.id;
+          option.textContent = provider.name && provider.name !== provider.id
+            ? `${provider.name} · ${provider.id}` : provider.id;
+          option.selected = provider.id === state.providerId;
+          providerSelect.append(option);
+        }
+        if (state.providerId && !state.providers.some(item => item.id === state.providerId)) state.providerId = "";
+        providerSelect.value = state.providerId;
+        providerSelect.disabled = !!state.pendingApply || state.busy;
+      }
       const currentId = value.persona?.persona_id || "";
       if (!state.personaId || !state.personas.some(item => item.value === state.personaId)) state.personaId = currentId;
       select.replaceChildren();
@@ -246,7 +315,8 @@ window.CompanionRoleProfileDraft = (() => {
     $("[data-role-profile-draft-source]", root).innerHTML =
       '<div class="role-profile-draft-source-mark">' + icon("file-text") + '</div><div>' +
       '<strong>' + escapeHTML(source.name || source.persona_id || "当前 AstrBot 人格") + '</strong>' +
-      '<small>' + Number(source.source_chars || 0).toLocaleString("zh-CN") + " 字 · " + escapeHTML(source.persona_id || "未命名人格") + '</small>' +
+      '<small>' + Number(source.source_chars || 0).toLocaleString("zh-CN") + " 字 · " + escapeHTML(source.persona_id || "未命名人格") +
+      (state.lastProviderId ? " · 模型 " + escapeHTML(state.lastProviderId) : "") + '</small>' +
       '<p>' + escapeHTML(source.source_preview || "") + "</p></div>";
     const knowledge = Array.isArray(state.knowledge) ? state.knowledge : [];
     const knowledgeHost = $("[data-role-profile-draft-knowledge]", root);
@@ -386,6 +456,8 @@ window.CompanionRoleProfileDraft = (() => {
     const role = product?.role?.();
     const target = state.target;
     const personaId = $("[data-role-profile-draft-persona]", dialog)?.value || state.personaId;
+    const providerId = $("[data-role-profile-draft-provider]", dialog)?.value || "";
+    state.providerId = providerId;
     const scope = currentScope();
     const ticket = ++state.ticket;
     state.supplements[target] = $("#roleProfileDraftSupplement", dialog)?.value || "";
@@ -398,7 +470,7 @@ window.CompanionRoleProfileDraft = (() => {
       ? "正在读取当前人格并整理这段关系资料…"
       : "正在读取当前人格并整理角色资料…");
     try {
-      const payload = await personaRequest(role, target, state.supplements[target], personaId);
+      const payload = await personaRequest(role, target, state.supplements[target], personaId, providerId);
       if (ticket !== state.ticket || !dialog.open) return;
       if (payload.target !== target) throw Object.assign(new Error("草稿目标已经变化，请重新整理。"), {code: "role_profile_source_changed"});
       if (scope !== currentScope()) throw Object.assign(new Error("角色或对象已切换，请重新整理。"), {code: "role_profile_source_changed"});
@@ -416,6 +488,7 @@ window.CompanionRoleProfileDraft = (() => {
       state.totalLimit = Number(payload.total_limit || (target === "relationship_profile" ? 3000 : 30000));
       state.scopeKey = scope;
       state.current = current;
+      state.lastProviderId = String(payload.provider_id || providerId || "");
       if (currentError) notice("草稿已生成，但当前资料没有读到；暂时不能写入。" + apiError(currentError), true);
       else notice(target === "relationship_profile"
         ? "草稿只用于当前私聊关系；请核对用户资料与关系描述，再选择要保存的字段。"
@@ -534,9 +607,8 @@ window.CompanionRoleProfileDraft = (() => {
         body:{section:state.target, operation_key:operationKey(), edit_token:fresh.edit_token, changes}};
       state.pendingApply = pending;
       if (!storePendingApply(pending)) {
-        state.pendingApply = null;
-        notice("当前浏览器无法记录这次保存请求，尚未提交。请检查页面存储后重试。", true);
-        return;
+        /* 落盘失败只损失刷新后的核对能力，本次提交与结果核对仍照常进行。 */
+        notice("本次保存无法在刷新页面后继续核对；如未确认结果，请在离开前点「核对原保存结果」。");
       }
       renderPendingApply();
       await submitPendingApply(pending);

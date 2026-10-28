@@ -362,6 +362,32 @@ IMAGE_PROVIDER_GROUP = {
 
 
 
+def text_provider_catalog(controller):
+    """Return the live AstrBot text providers shared by model pages and drafts."""
+    context = controller.context
+    expected_type = getattr(getattr(controller, "native_types", None), "provider", None)
+    if expected_type is None:
+        raise TaskError("model_catalog_unavailable", "AstrBot text provider type is unavailable")
+    providers = []
+    for provider in list(context.get_all_providers() or []):
+        if not isinstance(provider, expected_type):
+            continue
+        meta = provider.meta() if callable(getattr(provider, "meta", None)) else None
+        identifier = str(getattr(meta, "id", "") or getattr(provider, "id", "") or "").strip()
+        if not identifier:
+            continue
+        name = str(getattr(meta, "name", "") or getattr(meta, "label", "") or identifier)
+        providers.append({"id": identifier, "name": name[:120],
+                          "capabilities": sorted({"text", "conversation.reply"}),
+                          "loaded": True, "source": "astrbot"})
+    configured = getattr(getattr(context, "provider_manager", None), "providers_config", None) or []
+    configured_ids = {str(item.get("id")) for item in configured if isinstance(item, dict)}
+    for item in providers:
+        item["configured"] = item["id"] in configured_ids
+    providers.sort(key=lambda item: (not item["configured"], item["name"].lower(), item["id"]))
+    return providers
+
+
 class ModelWebAPI:
     def __init__(self, controller):
         self.controller = controller
@@ -415,27 +441,7 @@ class ModelWebAPI:
                 raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
             if request.query:
                 raise TaskError("model_request_invalid", "model catalog does not accept query overrides")
-            context = self.controller.context
-            expected_type = getattr(getattr(self.controller, "native_types", None), "provider", None)
-            if expected_type is None:
-                raise TaskError("model_catalog_unavailable", "AstrBot text provider type is unavailable")
-            providers = []
-            for provider in list(context.get_all_providers() or []):
-                if not isinstance(provider, expected_type):
-                    continue
-                meta = provider.meta() if callable(getattr(provider, "meta", None)) else None
-                identifier = str(getattr(meta, "id", "") or getattr(provider, "id", "") or "").strip()
-                if not identifier:
-                    continue
-                name = str(getattr(meta, "name", "") or getattr(meta, "label", "") or identifier)
-                capabilities = sorted({"text", "conversation.reply"})
-                providers.append({"id": identifier, "name": name[:120], "capabilities": capabilities,
-                                  "loaded": True, "source": "astrbot"})
-            configured = getattr(getattr(context, "provider_manager", None), "providers_config", None) or []
-            configured_ids = {str(item.get("id")) for item in configured if isinstance(item, dict)}
-            for item in providers:
-                item["configured"] = item["id"] in configured_ids
-            providers.sort(key=lambda item: (not item["configured"], item["name"].lower(), item["id"]))
+            providers = text_provider_catalog(self.controller)
             return {"status": "ok", "data": {"providers": providers, "source": "astrbot.provider_manager"}}
         except TaskError as error:
             return outcome_response(Outcome.failed(error.code, str(error)))

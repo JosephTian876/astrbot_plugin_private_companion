@@ -1,11 +1,12 @@
 /* 外观与设置。
  *
- * 这一页的数据全在客户端：主题、密度、圆角、字号、动效都是 :root 上的 data-* 属性，
- * 真实来源是 tokens.css 的六套色板与 product-page.js 的 setAppearance()。
- * 没有后端端点，所以这一页**不能**用「读取 → 草稿 → 保存」那套规格——
- * 它的正确形状是「改一下，立刻看到」：没有保存按钮，没有未保存草稿，
- * 也没有读失败态。这一点是刻意的，把即时生效的东西做成两步会让人以为
- * 还需要再点一次。
+ * 主题、密度、圆角、字号、动效先写到 :root 的 data-* 属性并立即生效，
+ * 真实色源是 tokens.css 的六套色板与 product-page.js 的 setAppearance()。
+ * 页面运行在 AstrBot 的 opaque-origin iframe 里，localStorage 不可用，
+ * 所以 product-page.js 会通过桥接 API 把偏好按 Dashboard 账号保存。
+ * 这一页仍然**不能**用「读取 → 草稿 → 保存」那套规格——它的正确形状是
+ * 「改一下，立刻看到」：没有保存按钮，没有未保存草稿。这一点是刻意的，
+ * 把即时生效的东西做成两步会让人以为还需要再点一次。
  *
  * 与 app.js 里那份旧内联面板的关系：旧面板按「一组一行的选项列表」排版，
  * 六个主题平铺成两列，选了之后除了色卡上的小方块变色，屏幕上没有任何
@@ -236,7 +237,7 @@ window.CompanionAppearancePage = (() => {
     const ticket = version;
     if (!state) state = blank();
     root.innerHTML = `<div class="ap-page">
-      <p class="ap-intro">这些偏好只作用于当前浏览器，点击后立即生效，不会写入插件数据。主题、密度、圆角、字号与动效都会同步反映在下方预览中。</p>
+      <p class="ap-intro">这些偏好会按当前 Dashboard 账号保存到插件数据，点击后立即生效。主题、密度、圆角、字号与动效都会同步反映在下方预览中。</p>
       <section class="ap-section" aria-labelledby="ap-section-preview-title">
         <header class="ap-section-head">
           <span class="ap-section-number">01</span>
@@ -245,7 +246,7 @@ window.CompanionAppearancePage = (() => {
           <span class="ap-section-badge">选一套 · 左窗即刻变</span>
         </header>
         <div class="ap-reset-row">
-          <span><b>显示偏好</b><small>保存到当前浏览器 · 换设备或清理缓存后回到默认</small></span>
+          <span><b>显示偏好</b><small>保存到当前账号 · 同一账号换设备也会同步</small></span>
           <button type="button" class="button small" data-ap-reset>恢复默认外观</button>
         </div>
         <div class="ap-top-grid">${previewSection()}${themeSection()}</div>
@@ -260,7 +261,7 @@ window.CompanionAppearancePage = (() => {
         ${dimensionSection()}
         ${assistSection()}
       </section>
-      <p class="ap-footer-note">主题、密度、圆角、字号与动效保存在当前浏览器，不会写入插件数据，也不会同步到其他设备。</p>
+      <p class="ap-footer-note">主题、密度、圆角、字号、动效与辅助文字保存在当前 AstrBot 账号下；使用同一 Dashboard 账号登录其他设备时会同步。</p>
     </div>${state.notice ? `<div class="ap-notice" role="status">${esc(state.notice)}</div>` : ""}`;
     if (!ticket || ticket !== version) return;
   }

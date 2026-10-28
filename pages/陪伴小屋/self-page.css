@@ -273,6 +273,7 @@
 .role-profile-draft-compose textarea{min-height:76px;padding:var(--sp-2) var(--sp-3)}
 .role-profile-draft-compose select{min-height:40px;padding:0 var(--sp-3);resize:none}
 .role-profile-draft-persona{display:grid;gap:var(--sp-1)}
+.role-profile-draft-source-picks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-2)}
 .role-profile-draft-field textarea{min-height:72px;padding:var(--sp-2)}
 .role-profile-draft-field select{min-height:42px;padding:0 var(--sp-3)}
 .role-profile-draft-compose textarea:focus,.role-profile-draft-compose select:focus,.role-profile-draft-field textarea:focus,.role-profile-draft-field select:focus{outline:none;border-color:var(--t-accent);box-shadow:0 0 0 3px var(--t-accent-quiet)}
@@ -456,3 +457,7 @@ body.reduce-motion .role-profile-draft-dialog[open],body.reduce-motion .role-pro
 :root:is([data-motion="low"],[data-motion="off"]) .role-profile-draft-dialog *::after,
 body.reduce-motion .role-profile-draft-dialog *,body.reduce-motion .role-profile-draft-dialog *::before,
 body.reduce-motion .role-profile-draft-dialog *::after{transition:none}
+
+@media(max-width:720px){
+  .role-profile-draft-source-picks{grid-template-columns:1fr}
+}

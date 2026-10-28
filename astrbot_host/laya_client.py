@@ -8,7 +8,10 @@ from dataclasses import replace
 import json
 import logging
 import math
+import os
 from pathlib import Path
+import shlex
+import sys
 import threading
 from time import perf_counter
 from urllib.error import HTTPError, URLError
@@ -191,15 +194,40 @@ def _load_local_model(local_model_path=""):
         return device
 
 
+def _torch_install_command():
+    executable = str(Path(sys.executable).resolve())
+    if os.name == "nt":
+        quote = lambda value: "'" + value.replace("'", "''") + "'"
+        return (f"& {quote(executable)} -m pip install --force-reinstall "
+                "--index-url https://download.pytorch.org/whl/cu128 torch")
+    return (shlex.quote(executable) + " -m pip install --force-reinstall "
+            "--index-url https://download.pytorch.org/whl/cu128 torch")
+
+
+def _torch_runtime_status():
+    """Expose the installed torch build so the page can explain CUDA failures."""
+    status = {"torch_version": "", "cuda_version": "", "cuda_available": False,
+              "torch_install_command": _torch_install_command()}
+    try:
+        import torch
+        status["torch_version"] = str(getattr(torch, "__version__", "") or "")
+        status["cuda_available"] = bool(torch.cuda.is_available())
+        status["cuda_version"] = str(getattr(torch.version, "cuda", "") or "")
+    except Exception:
+        pass
+    return status
+
+
 def local_runtime_status(*, local_model_path=""):
-    if not _cuda_available():
-        return {"local_runtime_state": "gpu_unavailable"}
+    runtime = _torch_runtime_status()
+    if not runtime["cuda_available"]:
+        return {**runtime, "local_runtime_state": "gpu_unavailable"}
     source = _source_key(local_model_path)
     task = _LOCAL_WARMUP_TASKS.get(source)
     if task is not None and not task.done():
-        return {"local_runtime_state": "warming"}
+        return {**runtime, "local_runtime_state": "warming"}
     ready = source in _LOCAL_READY and source in _LOCAL_ROUTERS
-    return {"local_runtime_state": "ready" if ready else "not_loaded"}
+    return {**runtime, "local_runtime_state": "ready" if ready else "not_loaded"}
 
 
 def start_laya_warmup(store):

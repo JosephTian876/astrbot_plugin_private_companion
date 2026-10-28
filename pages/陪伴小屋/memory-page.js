@@ -908,8 +908,10 @@ window.CompanionMemoryPage = (() => {
          有个兜底口径，所以不能让它跟着后面 `page/targets` 的失败一起丢掉——
          目录失败时页面确实没有目标，但「记忆由谁提供」仍然该说出来。
          它自己 catch，绝不改 data.error / data.notice。 */
-      await loadOwnership();
-      const catalog = await api("GET", "page/targets");
+      const [, catalog] = await Promise.all([
+        loadOwnership(),
+        window.CompanionProduct?.directory?.() || api("GET", "page/targets"),
+      ]);
       if (!live(ticket)) return;
       if (!Array.isArray(catalog.targets) || !catalog.installation_id || !catalog.operator_id
           || catalog.targets.some(t=>!Array.isArray(t.roles))) throw problem("invalid_response");

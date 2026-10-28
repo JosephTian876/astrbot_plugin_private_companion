@@ -19,6 +19,7 @@ from companion_v2.delivery.models import DeliveryEnvelope, LocalSender
 from companion_v2.execution.models import TaskContext, TaskError, digest
 from companion_v2.foundation.refs import AudienceRef
 from tests.group_host_support import GroupFixture, Query, group_config
+from tests.native_adapter_support import FakeEvent
 from tests.staging_bootstrap_support import database_contents, wait_for_batch
 
 
@@ -88,6 +89,58 @@ class GroupDeliveryTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         unresolved = await change(True, account_id="", bot_id="")
         self.assertEqual(unresolved["data"]["code"], "account_group_target_route_unresolved")
         self.assertEqual(self.controller.config["multi_host"]["group_targets"], before)
+
+    async def test_group_target_control_can_enable_all_groups_for_one_account(self):
+        api = AccountSessionWebAPI(self.controller)
+        api._discovered = AsyncMock(return_value={"targets": []})
+        self.controller.save_plugin_config = lambda candidate: setattr(self.controller, "config", deepcopy(candidate))
+        body = {"platform_id": "qq-main", "account_id": "100", "bot_id": "bot-a",
+                "group_id": "*", "enabled": True}
+        request = NS(username="dashboard-admin", query=Query(),
+                     body=AsyncMock(return_value=json.dumps(body).encode("utf-8")))
+
+        with patch("astrbot_host.account_session_api.request", request):
+            result = await api.save_group_target()
+
+        self.assertEqual(result["status"], "ok", result)
+        target_id = result["data"]["target_id"]
+        self.assertEqual(target_id, "group-" + digest(("qq-main", "100", "*"))[:20])
+        saved = self.controller.config["multi_host"]["group_targets"]
+        self.assertTrue(any(row["target_id"] == target_id and row["group_id"] == "*" for row in saved))
+        api._discovered.assert_not_awaited()
+
+    async def test_wildcard_group_target_admits_an_unlisted_group_after_restart(self):
+        config = group_config()
+        config["multi_host"]["group_targets"] = [dict(
+            target_id="group-all", platform_id="qq-main", account_id="100",
+            bot_id="bot-a", group_id="*")]
+        self.controller = self.make_controller(config)
+        await self.start_host()
+        self.window_personas["qq-main:GroupMessage:777"] = "original"
+
+        event = FakeEvent(NS(platform=self.native.platforms["qq-main"]),
+                          event_id="wildcard-group-message", sender="200", login="100", text="新群也能收到吗")
+        kind = NS(value="GroupMessage")
+        event.message_obj.type = event.session.message_type = kind
+        event.message_obj.group_id = event.message_obj.session_id = "777"
+        event.session.session_id = "777"
+        event.unified_msg_origin = "qq-main:GroupMessage:777"
+        event.message_obj.raw_message = dict(post_type="message", message_type="group",
+            self_id=100, user_id=200, sender={"user_id": 200}, group_id=777,
+            message_id="wildcard-group-message")
+        event.created_at = self.clock.now().timestamp()
+
+        route = self.controller.target_for_event(event)
+        self.assertTrue(route.target_id.startswith("group-"))
+        self.assertEqual((route.platform_id, route.account_id, route.bot_id, route.group_id),
+                         ("qq-main", "100", "bot-a", "777"))
+        result = await self.controller.receive_claimed(event)
+        self.assertTrue(result.is_success, result.failure)
+        batch = result.unwrap()
+        await wait_for_batch(self.controller.session, batch)
+        parts = self.controller.session.application.runtime.read_all(
+            "SELECT state FROM conversation_parts WHERE batch_id = ?", (batch,))
+        self.assertTrue(parts)
 
     async def test_unexpected_group_target_write_error_keeps_the_backend_reason(self):
         api = AccountSessionWebAPI(self.controller)

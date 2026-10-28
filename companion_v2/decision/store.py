@@ -91,22 +91,36 @@ def cached_multilingual_model() -> Path | None:
     return None
 
 
-def _install_command() -> str:
+def _pip_command(arguments) -> str:
     executable = str(Path(sys.executable).resolve())
     if os.name == "nt":
         quote = lambda value: "'" + value.replace("'", "''") + "'"
-        return f"& {quote(executable)} -m pip install 'laya==0.4.0'"
-    return f"{shlex.quote(executable)} -m pip install 'laya==0.4.0'"
+        parts = [str(item) if str(item) in {"install", "--no-deps"} else quote(str(item))
+                 for item in arguments]
+        return f"& {quote(executable)} -m pip " + " ".join(parts)
+    return shlex.quote(executable) + " -m pip " + " ".join(shlex.quote(str(item)) for item in arguments)
+
+
+def _install_command() -> str:
+    # Installing the package normally lets pip replace an existing CUDA torch
+    # wheel with the CPU wheel from PyPI. Keep the package install dependency
+    # free and install only its non-torch runtime dependencies afterwards.
+    return (_pip_command(["install", "--no-deps", "laya==0.4.0"]) + "; "
+            + _pip_command(["install", "transformers>=4.48.0", "safetensors>=0.4.0",
+                            "huggingface_hub>=0.20.0", "numpy>=1.20.0"]))
 
 
 def _remote_commands() -> tuple[str, str]:
     executable = str(Path(sys.executable).resolve())
+    install = (_pip_command(["install", "--no-deps", "laya==0.4.0"]) + "; "
+               + _pip_command(["install", "transformers>=4.48.0", "safetensors>=0.4.0",
+                               "huggingface_hub>=0.20.0", "numpy>=1.20.0",
+                               "fastapi>=0.110.0", "uvicorn>=0.27.0",
+                               "python-multipart>=0.0.9"]))
     if os.name == "nt":
         quote = lambda value: "'" + value.replace("'", "''") + "'"
-        install = f"& {quote(executable)} -m pip install 'laya[serve]==0.4.0'"
         start = f"$env:LAYA_DEFAULT_MODEL='multilingual'; & {quote(executable)} -m laya.serve"
     else:
-        install = f"{shlex.quote(executable)} -m pip install 'laya[serve]==0.4.0'"
         start = f"LAYA_DEFAULT_MODEL=multilingual {shlex.quote(executable)} -m laya.serve"
     return install, start
 

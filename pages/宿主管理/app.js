@@ -1,4 +1,4 @@
-﻿"use strict";
+"use strict";
 (() => {
   const $ = (id) => document.getElementById(id);
   const escapeHTML = value => String(value ?? "").replace(/[&<>"']/g,
@@ -1601,9 +1601,13 @@
       || left.group_id.localeCompare(right.group_id, undefined, {numeric: true}));
   }
   function selectedGroupTargets() {
-    return [...$("group-target-list").querySelectorAll("[data-group-target-choice]:checked")]
+    const explicit = [...$("group-target-list").querySelectorAll("[data-group-target-choice]:checked")]
       .map(input => ({platform_id: input.dataset.platformId, account_id: input.dataset.accountId,
         bot_id: input.dataset.botId, group_id: input.dataset.groupId}));
+    const wildcard = [...$("group-target-list").querySelectorAll("[data-group-wildcard-choice]:checked")]
+      .map(input => ({platform_id: input.dataset.platformId, account_id: input.dataset.accountId,
+        bot_id: input.dataset.botId, group_id: "*"}));
+    return [...wildcard, ...explicit];
   }
   const sameGroupTargets = (left, right) => JSON.stringify(left.map(groupRouteKey).sort())
     === JSON.stringify(right.map(groupRouteKey).sort());
@@ -1614,19 +1618,20 @@
     updateGroupTargetControls();
   }
   function updateGroupTargetControls() {
-    const inputs = [...$("group-target-list").querySelectorAll("[data-group-target-choice]")];
+    const inputs = [...$("group-target-list").querySelectorAll(
+      "[data-group-target-choice],[data-group-wildcard-choice]")];
     const selected = selectedGroupTargets();
     const current = (bindingConfig?.groups || []).map(row => ({platform_id: row.platform_id,
       account_id: row.account_id, bot_id: row.bot_id, group_id: row.group_id}));
     const changed = !sameGroupTargets(selected, current);
-    const wildcard = current.some(row => row.group_id === "*");
+    const wildcard = selected.some(row => row.group_id === "*");
     const unresolvedSelection = inputs.some(input => input.checked && input.dataset.routeReady !== "true");
     $("group-target-count").textContent = `${selected.length} / ${inputs.length} 个已选`;
     $("group-target-state").textContent = bindingsDirty
       ? "先保存角色映射，再修改群目标。"
       : groupTargetsDirty ? "群目标选择尚未保存。"
-        : wildcard ? "当前含通配群目标；保存后将只保留明确选择的群。"
-        : `${current.filter(row => row.group_id !== "*").length} 个群目标已启用。`;
+        : wildcard ? "当前包含通配群目标：该账号下所有群都会接入 V2。"
+        : selected.length ? `${selected.length} 个群目标已启用。` : "当前没有启用群目标。";
     $("save-group-targets").disabled = busy || bindingsDirty || !changed || unresolvedSelection;
     $("save-group-targets").textContent = `保存群目标${selected.length ? `（${selected.length}）` : ""}`;
     for (const input of inputs) input.disabled = busy || bindingsDirty || input.dataset.routeReady !== "true";
@@ -1637,27 +1642,62 @@
     if (!panel || !list) return;
     const configured = bindingConfig?.groups || [];
     const rows = groupTargetRows();
+    const wildcardRows = (bindingConfig?.accounts || []).map(account => ({
+      platform_id: account.platform_id, account_id: account.account_id, bot_id: account.bot_id,
+      group_id: "*", display_name: "该账号下所有群", group_name: "该账号下所有群",
+      account, native: false, wildcard: true,
+    })).filter(row => row.platform_id && row.account_id && row.bot_id);
     if (groupTargetsDirty) {
       const keys = new Set(rows.map(groupRouteKey));
       for (const row of groupTargetDraft || []) {
-        if (!keys.has(groupRouteKey(row))) rows.push({...row, native: false});
+        if (row.group_id !== "*" && !keys.has(groupRouteKey(row))) rows.push({...row, native: false});
       }
     }
-    panel.hidden = !rows.length && !configured.length;
+    panel.hidden = !rows.length && !wildcardRows.length && !configured.length;
     if (panel.hidden) return;
-    const selected = new Set((groupTargetsDirty ? groupTargetDraft || []
-      : configured.filter(row => row.group_id !== "*")).map(groupRouteKey));
-    const wildcard = configured.some(row => row.group_id === "*");
-    $("group-target-note").textContent = wildcard
-      ? "当前配置包含通配群目标。勾选要接入的群并保存后，其他群将不再接入。"
+    const selectedRows = groupTargetsDirty ? groupTargetDraft || [] : configured;
+    const selected = new Set(selectedRows.filter(row => row.group_id !== "*").map(groupRouteKey));
+    const wildcardSelected = new Set(selectedRows.filter(row => row.group_id === "*").map(groupRouteKey));
+    $("group-target-note").textContent = wildcardRows.length
+      ? "勾选「该账号下所有群」后，这个账号下新出现的群也会自动接入；勾选明确群目标会取消同一账号的通配。"
       : rows.length ? "未勾选的群不会接入 V2 群聊。" : "没有已发现的群；保存空列表可移除现有群目标。";
-    if (!rows.length) {
+    const children = [];
+    for (const row of wildcardRows) {
+      const label = document.createElement("label");
+      label.className = "group-target-row group-target-wildcard";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.dataset.groupWildcardChoice = "";
+      input.dataset.platformId = row.platform_id;
+      input.dataset.accountId = row.account_id;
+      input.dataset.botId = row.bot_id;
+      input.dataset.groupId = "*";
+      input.dataset.routeReady = "true";
+      input.checked = wildcardSelected.has(groupRouteKey(row));
+      const copy = document.createElement("span");
+      copy.className = "group-target-copy";
+      appendText(copy, "strong", "该账号下所有群（通配）");
+      appendText(copy, "small", `${row.account ? accountChoiceLabel(row.account) : "账号待确认"} · 含后续新建或改名的群`);
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          for (const peer of list.querySelectorAll("[data-group-target-choice]")) {
+            if (peer.dataset.platformId === input.dataset.platformId
+                && peer.dataset.accountId === input.dataset.accountId
+                && peer.dataset.botId === input.dataset.botId) peer.checked = false;
+          }
+        }
+        markGroupTargetsDirty();
+      });
+      label.append(input, copy);
+      children.push(label);
+    }
+    if (!rows.length && !wildcardRows.length) {
       const empty = document.createElement("p");
       empty.className = "group-target-empty";
       empty.textContent = "当前没有可选群会话。";
-      list.replaceChildren(empty);
+      children.push(empty);
     } else {
-      list.replaceChildren(...rows.map(row => {
+      for (const row of rows) {
         const label = document.createElement("label");
         label.className = "group-target-row";
         const input = document.createElement("input");
@@ -1674,11 +1714,21 @@
         const name = groupDisplayName(row);
         appendText(copy, "strong", name ? `群 ${name}` : `群 ${row.group_id}`);
         appendText(copy, "small", `${name ? `群号 ${row.group_id} · ` : ""}${row.account ? accountChoiceLabel(row.account) : "账号待确认"} · ${row.native ? "已发现" : "当前已启用，暂未发现"}`);
+        input.addEventListener("change", () => {
+          if (input.checked) {
+            for (const wildcard of list.querySelectorAll("[data-group-wildcard-choice]")) {
+              if (wildcard.dataset.platformId === input.dataset.platformId
+                  && wildcard.dataset.accountId === input.dataset.accountId
+                  && wildcard.dataset.botId === input.dataset.botId) wildcard.checked = false;
+            }
+          }
+          markGroupTargetsDirty();
+        });
         label.append(input, copy);
-        input.addEventListener("change", markGroupTargetsDirty);
-        return label;
-      }));
+        children.push(label);
+      }
     }
+    list.replaceChildren(...children);
     updateGroupTargetControls();
   }
   async function saveGroupTargets() {
@@ -1711,7 +1761,9 @@
       groupTargetsDirty = false;
       groupTargetDraft = null;
       renderGroupTargets();
-      notice(`群目标已保存并启用 ${groups.length} 个群。`, "success");
+      notice(groups.some(row => row.group_id === "*")
+        ? "群目标已保存：该账号下所有群都会接入 V2。"
+        : `群目标已保存并启用 ${groups.length} 个群。`, "success");
     } catch (error) {
       notice(`群目标保存未完成：${publicError(error)}`, "error");
     } finally {

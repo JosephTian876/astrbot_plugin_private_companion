@@ -76,7 +76,11 @@ class LocalModelGateway:
         self.role_reference = TaskRoleReference(self.runtime)
 
     async def generate(self, run: TaskRun, request: PromptRequest) -> ModelCompletion:
-        return await self.open_session(run, request).generate(request)
+        session = self.open_session(run, request)
+        # open_session may replace the captured persona with the task role
+        # reference. Continue with the exact request frozen into the plan so
+        # ModelSession's first-round context check compares like with like.
+        return await session.generate(session.plan.envelope.original)
 
     def _task_role_request(self, run: TaskRun, request: PromptRequest) -> PromptRequest:
         """Use the self page as the task role, with the captured persona as fallback."""

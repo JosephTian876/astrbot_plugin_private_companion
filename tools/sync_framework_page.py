@@ -81,6 +81,25 @@ def publish(*, check=False, preview=None):
                    + json.dumps(html, ensure_ascii=False) + ";\n").encode("utf-8")
         projected[f"workspace-bundles/{name}.js"] = emit(SOURCE / "workspace-bundles" / f"{name}.js", payload)
 
+    # One deterministic stylesheet avoids 40+ HTTP requests before the boot
+    # gate can reveal the page.  Keep the source order in css-sources.json; the
+    # generated bundle stays in the same directory so relative url() values are
+    # unchanged.
+    css_sources = json.loads((SOURCE / "css-sources.json").read_text(encoding="utf-8-sig"))
+    css_parts = []
+    for name in css_sources:
+        css_path = SOURCE / str(name)
+        css_text = css_path.read_text(encoding="utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+        css_text = re.sub(r"^\s*@charset\s+[^;]+;\s*\n?", "", css_text, flags=re.IGNORECASE | re.MULTILINE)
+        css_parts.append(f"/* {name} */\n{css_text.strip()}\n")
+    bundle_css = "\n".join(css_parts).rstrip("\n") + "\n"
+    bundle_hash = hashlib.sha256(bundle_css.encode("utf-8")).hexdigest()[:16]
+    projected["bundle.css"] = emit(SOURCE / "bundle.css", bundle_css.encode("utf-8"))
+    index_path = SOURCE / "index.html"
+    index_text = index_path.read_text(encoding="utf-8-sig")
+    index_text = re.sub(r"bundle\.css\?v=[^\"]+", f"bundle.css?v={bundle_hash}", index_text)
+    projected["index.html"] = emit(index_path, index_text.encode("utf-8"))
+
     files = {p.relative_to(SOURCE).as_posix(): normalized_payload(p, p.read_bytes())
              for p in sorted(SOURCE.rglob("*"))
              if p.is_file() and p.name not in {"page-build.json", "shell-preview.html", "shell-preview-mock.html"}

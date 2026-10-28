@@ -166,7 +166,8 @@
       }
       if (node.tagName === "SCRIPT") {
         /* Dynamic classic scripts default to async.  Explicitly preserve the
-           author order so app.js still runs after its dependencies. */
+           author order: app.js runs after the shell dependencies and before the
+           larger page modules, which re-render once all of them have landed. */
         node.async = false;
         node.defer = false;
       }
