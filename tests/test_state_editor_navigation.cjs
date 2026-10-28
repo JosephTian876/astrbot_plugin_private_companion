@@ -32,6 +32,41 @@ test("rendering a QQ status detail does not open or reopen its editor", () => {
   editor.destroy();
 });
 
+
+test("QQ presence saves at role scope while typing stays window scoped", async () => {
+  const window={CompanionStateMaintenance:{fields:()=>[],validField:()=>true,titles:{}},CompanionStateContact:{}};
+  vm.runInNewContext(source,{window,structuredClone,JSON,crypto,console,sessionStorage:{getItem:()=>null,setItem(){},removeItem(){}}});
+  const settings={typing_enabled:false,typing_refresh_seconds:4,presence_enabled:false,online_status_enabled:false};
+  const status={edit_token:"window-edit",role_edit_token:"role-edit",settings,state:{values:{}}};
+  const posts=[];
+  const editor=window.CompanionStateEditor.create({changed(){},failed(){},refresh:async()=>status,
+    api:async(_method,_route,body)=>{posts.push(body);return {operation_id:"presence-config"};}});
+  editor.setScope({installation_id:"install",operator_id:"admin",path:"role/state"});
+  editor.setStatus(status);
+  const input=(name,value,type="checkbox")=>editor.input({target:{dataset:{stateField:name},type,
+    checked:value,value:String(value),matches:()=>true,hasAttribute:()=>false,closest:()=>null}});
+  editor.open("settings");
+  input("presence_enabled",true);
+  editor.submit({target:{id:"state-edit-form"},preventDefault(){}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(posts.length,1);
+  assert.equal(posts[0].action,"configure_role");
+  assert.equal(posts[0].role_edit_token,"role-edit");
+  assert.equal(Object.hasOwn(posts[0],"edit_token"),false);
+  assert.deepEqual(JSON.parse(JSON.stringify(posts[0].changes)),{presence_enabled:true});
+
+  editor.open("settings");
+  input("typing_enabled",true);
+  editor.submit({target:{id:"state-edit-form"},preventDefault(){}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(posts.length,2);
+  assert.equal(posts[1].action,"configure");
+  assert.equal(posts[1].edit_token,"window-edit");
+  assert.equal(Object.hasOwn(posts[1],"role_edit_token"),false);
+  assert.deepEqual(JSON.parse(JSON.stringify(posts[1].changes)),{typing_enabled:true});
+  editor.destroy();
+});
+
 test("state drafts only block switching after a field changes", () => {
   const window = {CompanionStateMaintenance:{
     fields:kind=>kind === "intensity" ? ["energy"] : [],

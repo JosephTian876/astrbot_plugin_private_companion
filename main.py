@@ -460,6 +460,14 @@ class PrivateCompanionV2StagingPlugin(Star):
         if competing_command_handler(event, own_module=__name__) is not None:
             return
         result = await self.staging.observe_group_early(event)
+        if result is not None and result.failure is None:
+            try:
+                target = self.staging.target_for_event(event)
+                processor = getattr(self.staging, "process_relay_group_presence", None)
+                if callable(processor):
+                    await processor(event, target, result.unwrap())
+            except Exception:
+                logger.warning("[CompanionV2] 延迟跨群转述触发失败", exc_info=True)
         if result is not None and result.failure is not None:
             # Unconfigured routes and attachment-only messages are normal
             # fall-through cases.  Unexpected failures are useful for the
@@ -647,6 +655,10 @@ class PrivateCompanionV2StagingPlugin(Star):
         origin_key = self._origin_key_for_event(event)
         kind = getattr(getattr(getattr(event, "message_obj", None), "type", None), "value", None)
         channel = "private" if kind == "FriendMessage" else "group" if kind == "GroupMessage" else "unknown"
+        if channel == "private" and getattr(target, "participant_id", None):
+            processor = getattr(self.staging, "process_private_relay_receipts", None)
+            if callable(processor):
+                await processor(event, target)
         if channel == "group":
             # 群 LLM 开关必须先于候选准入处理：封锁期间普通消息不再请求模型，
             # 但「开启 LLM」这条命令本身仍要能执行并回执。

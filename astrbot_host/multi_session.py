@@ -529,6 +529,8 @@ class MultiHostSession:
         scope = self.scope(target, cid)
         self.bridge.client(scope)
         context = self.authority.select(target, scope, role)
+        if self.application.presence is not None:
+            self.application.presence.bind(context)
         return context, instruction
 
     def _prepared_wildcard_private_targets(self):
@@ -652,6 +654,8 @@ class MultiHostSession:
                     self.application.life_runtime.bind(context, captured.instruction, guard=self.bridge.verify_role)
                     self.application.state_maintenance.bind(context, captured.instruction, guard=self.bridge.verify_role)
                     self.application.contact_schedule.bind_context(context)
+                    if self.application.presence is not None:
+                        self.application.presence.bind(context)
                 return Outcome.success(result)
             except TaskError as error:
                 if isinstance(target, GroupTarget):

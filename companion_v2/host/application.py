@@ -20,7 +20,9 @@ from companion_v2.agenda.background import AgendaBackground, AgendaDispatchPolic
 from companion_v2.agenda.service import AgendaService
 from companion_v2.agenda.calendar import CalendarService
 from companion_v2.agenda.planning import CalendarPlanning
-from companion_v2.role_work.state.configuration import StateConfigurationOwner, configuration_fields as state_configuration_fields
+from companion_v2.role_work.state.configuration import (
+    StateConfigurationOwner, configuration_fields as state_configuration_fields, migrate_presence_to_role,
+)
 from companion_v2.role_work.state.service import RoleStateService
 from companion_v2.role_work.state.maintenance import StateMaintenance
 from companion_v2.capabilities.ownership import DEFAULT_MEMORY_OWNER
@@ -201,7 +203,8 @@ class CompanionApplication:
                  weather_port=None, weather_alert_port=None, balance_port=None, news_port=None,
                  solar_term_port=None, budget_soft=None, capability_owners=(),
                  qzone_transport=None, default_provider_resolver=None,
-                 knowledge=None, memory_owner=DEFAULT_MEMORY_OWNER, memory_push=DEFAULT_MEMORY_PUSH, wake_port=None):
+                 knowledge=None, memory_owner=DEFAULT_MEMORY_OWNER, memory_push=DEFAULT_MEMORY_PUSH, wake_port=None,
+                 search_port_factory=None):
         if type(owns_runtime) is not bool or not any(p.kind == REPLY_KIND and p.lane is Lane.FOREGROUND for p in profiles):
             raise ValueError("assembly requires a foreground reply profile and explicit runtime ownership")
         if external is not None and (external.runtime is not runtime or external.messages is not None):
@@ -273,6 +276,10 @@ class CompanionApplication:
                     WardrobeConfigurationOwner(runtime),
                     QzoneConfigurationOwner(runtime),
                     *capability_owners))
+        try:
+            migrate_presence_to_role(runtime)
+        except Exception as error:
+            logger.warning("[CompanionV2] QQ presence scope migration failed error_type=%s", type(error).__name__)
         self.reply_settings = ReplySettings(self.configuration)
         self.perception_settings = PerceptionSettings(self.configuration)
         self.screen_settings = ScreenSettings(self.configuration)
@@ -495,7 +502,8 @@ class CompanionApplication:
         self.tools = LocalRoleTools(self.messages, diagnostics=self.diagnostics, external=external, memory=self.memory,
                                    growth=self.role_growth_context.reader, timeline=self.role_timeline, calendar=self.calendar,
                                    relationships=self.relationship_memories, weather_port=weather_port,
-                                   role_state=self.role_state, authoring=self.authoring)
+                                   role_state=self.role_state, authoring=self.authoring,
+                                   web_search_factory=search_port_factory)
         self.messages.reply_settings = self.reply_settings
         self.messages.perception_settings = self.perception_settings
         self.acquaintance_settings = AcquaintanceSettings(self.configuration)
@@ -936,7 +944,7 @@ class CompanionApplication:
                     deadline = min(deadline, journal_deadline) if deadline else journal_deadline
                 more_background = self.background.advance() or more_background
                 await asyncio.sleep(0)
-                self.contact_schedule.advance()
+                await self.contact_schedule.advance_async()
                 await asyncio.sleep(0)
                 if loop.time() >= next_wal_checkpoint:
                     checkpoint = getattr(self.runtime, "checkpoint_passive", None)

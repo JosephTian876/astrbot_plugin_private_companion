@@ -41,6 +41,13 @@ class StateManagement:
 
     @outcome
     def status(self, operator, *, after_id="", limit=30):
+        now = self.app.now()
+        self.life.authorize(operator)
+        try:
+            from .configuration import ensure_window_presentation_grants
+            ensure_window_presentation_grants(self.app.runtime, self.context, now)
+        except Exception:
+            pass
         with self.app.runtime.read_snapshot():
             now = self.app.now()
             access = self.life.authorize(operator)
@@ -159,12 +166,15 @@ class StateManagement:
                     VersionRef(layer_id, 1), layer_id), expected_edit_token=window_current.edit_token,
                 changes={GROUP + "." + key: value for key, value in window_changes.items()},
                 observed_at=observed_at))
+        grant_changes = frozenset(set(role_changes).intersection(PERMISSIONS))
         if "enabled" in role_changes:
+            grant_changes |= frozenset({"enabled"})
+        if grant_changes:
             effective = require(self.app.configuration.read(operator, target=window_target,
                 group_id=GROUP, observed_at=observed_at))
             current_settings = {name: effective.values[GROUP + "." + name] for name in DEFAULTS}
             sync_window_grants(self.app.runtime, window_target, self.context.actor.subject,
-                current_settings, frozenset({"enabled"}), observed_at)
+                current_settings, grant_changes, observed_at)
         from .ownership import role_owner
         for bound in tuple(self.app.state_maintenance.bindings.values()):
             if role_owner(bound[0]) == role_owner(self.context):
@@ -174,7 +184,11 @@ class StateManagement:
                     continue  # A retired window cannot invalidate the current configuration.
         self.app.calendar_planning.invalidate(self.context)
         if self.app.presence is not None:
-            self.app.presence.bind(self.context)
+            # A dashboard write may target a role that is not currently selected
+            # in this native window. Keep it available for conflict diagnostics,
+            # but do not replace the verified active route until native intake
+            # confirms the persona switch.
+            self.app.presence.bind(self.context, active=False)
         require(OperationRepository(self.app.runtime).transition(op_id,
             expected_state=OperationState.ACCEPTED, next_state=OperationState.COMPLETED, observed_at=observed_at))
         return {"operation_id": op_id, "replayed": False}

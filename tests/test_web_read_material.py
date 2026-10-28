@@ -8,6 +8,7 @@ import unittest
 from astrbot_host.web_read_material import (
     MAX_CHARS,
     _bounded,
+    _read_with_fetch,
     address_allowed,
     extract_html,
     find_urls,
@@ -67,7 +68,7 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(result["text"], "")
 
 
-class ReadPageGuardTests(unittest.TestCase):
+class ReadPageGuardTests(unittest.IsolatedAsyncioTestCase):
     def test_private_address_is_blocked_before_any_request(self):
         result = asyncio.run(read_page(None, "http://127.0.0.1/admin"))
         self.assertEqual(result["status"], "blocked")
@@ -75,6 +76,30 @@ class ReadPageGuardTests(unittest.TestCase):
     def test_non_http_scheme_is_refused(self):
         result = asyncio.run(read_page(None, "file:///etc/passwd"))
         self.assertEqual(result["status"], "unsupported")
+
+    async def test_deepseek_fetch_is_a_public_url_fallback(self):
+        calls = []
+
+        async def fetch(url):
+            calls.append(url)
+            return {"title": "抓取标题", "content": "抓取正文"}
+
+        result = await _read_with_fetch(fetch, "https://8.8.8.8/article", 100)
+        self.assertEqual(result["status"], "full")
+        self.assertEqual(result["basis"], "deepseek_fetch")
+        self.assertEqual(result["text"], "抓取正文")
+        self.assertEqual(calls, ["https://8.8.8.8/article"])
+
+    async def test_deepseek_fetch_never_receives_private_or_credentialed_urls(self):
+        calls = []
+
+        async def fetch(url):
+            calls.append(url)
+            return {"title": "不该抓取", "content": "正文"}
+
+        for url in ("http://127.0.0.1/private", "https://user:pass@8.8.8.8/article"):
+            self.assertIsNone(await _read_with_fetch(fetch, url, 100))
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

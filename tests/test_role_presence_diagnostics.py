@@ -72,7 +72,7 @@ class PresenceDiagnosticTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: bool(port.modes))
         diagnostics = manager.status(self.core).unwrap()["presentation_diagnostics"]
         self.assertEqual(diagnostics["online_status"]["state"], "recorded")
-        self.assertEqual(diagnostics["online_status"]["desired"]["mode"], "busy")
+        self.assertEqual(diagnostics["online_status"]["desired"]["mode"], "online")
         self.assertEqual(diagnostics["custom_status"]["state"], "idle")
         self.assertIsNone(diagnostics["custom_status"]["desired"])
         self.assertIsNone(diagnostics["custom_status"]["reason"])

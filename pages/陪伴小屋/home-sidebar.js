@@ -88,20 +88,13 @@ window.CompanionHomeSidebar = (() => {
     return rows;
   }
   function renderOverview(items, now, zone, complete) {
-    const segments = overviewSegments(items, now, zone, complete);
-    const marker = Math.min(100, Math.max(0, minuteOfDay(now, zone) / dayMinutes * 100));
-    const blocks = segments.map(item => `<span class="home-agenda-overview-segment" data-kind="${item.kind}"${item.tone ? ` data-tone="${item.tone}"` : ""} style="width:${(item.end-item.start)/dayMinutes*100}%" aria-hidden="true"></span>`).join("");
-    const points = items.filter(item => item.start != null && item.end == null).map(item => {
-      const at = dayMinute(item.start, now, zone);
-      return at == null ? "" : `<span class="home-agenda-overview-point" style="left:${at/dayMinutes*100}%" aria-hidden="true"></span>`;
-    }).join("");
-    return `<div class="home-agenda-overview">
-      <div class="home-agenda-overview-track" role="img" aria-label="${complete ? "全天日程概览，空白表示未安排" : "全天日程概览，空白可能尚未读取"}">
-        ${blocks}${points}<span class="home-agenda-overview-now" style="left:${marker}%" aria-hidden="true"></span>
-      </div>
-      <div class="home-agenda-overview-labels" aria-hidden="true"><span>00:00</span><span>12:00</span><span>24:00</span></div>
-      <div class="home-agenda-overview-legend"><span data-kind="planned">已安排</span><span data-kind="${complete ? "gap" : "unknown"}">${complete ? "未安排" : "未读范围"}</span><time>此刻 ${e(clock(now, zone))}</time></div>
-      ${complete ? "" : `<p class="home-agenda-overview-note">日程数据不完整，空白暂不能判断为未安排。</p>`}
+    if (complete) return `<div class="home-agenda-overview" hidden></div>`;
+    const elapsed = items.filter(item => item.tone === "elapsed" || item.end != null && item.end <= now
+      && item.order !== 0).length;
+    const current = items.filter(item => item.order === 0 || item.tone === "current").length;
+    return `<div class="home-agenda-overview" role="status">
+      <span class="home-agenda-overview-unknown" data-kind="unknown">未读范围</span>
+      <p class="home-agenda-overview-note">日程数据不完整，空白暂不能判断为未安排。</p>
     </div>`;
   }
   function dayKey(value, zone) {
@@ -326,15 +319,21 @@ window.CompanionHomeSidebar = (() => {
     const clockLabel = loading ? "正在读取当前活动…" : lifeRead
       ? active.length ? "有活动正在进行" : "当前没有进行中的活动"
       : "当前活动尚未读取";
-    const currentLine = `<p class="home-agenda-current">${elapsed.length && !live.length ? "今日安排已结束" : clockLabel}</p>
-      ${currentGap ? `<p class="home-agenda-current-gap"><time>${e(clock(now, zone))}</time><strong>${items.length ? "当前未安排" : "今日暂无安排"}</strong><span>${e(durationLabel(currentGap.end-currentGap.start))}${currentGap.next ? ` · 下一项 ${e(clock(currentGap.next.start, zone))}` : " · 今日暂无后续安排"}</span></p>` : ""}`;
-    const timeline = rows.length ? rows.map(item => item.type === "event"
+    const currentLine = `<p class="home-agenda-current${currentGap || live.length ? " is-visually-hidden" : ""}">${elapsed.length && !live.length ? "今日安排已结束" : clockLabel}</p>`;
+    const visibleRows = rows.filter(item => item.type !== "gap" || item.current || item.end - item.start >= 45);
+    const timeline = visibleRows.length ? visibleRows.map(item => item.type === "event"
       ? row(item.item, item.item.tone === "current" || item.item.order === 0)
-      : `<li class="home-agenda-gap"${item.current ? ` data-current="true" aria-current="time"` : ""}><span class="home-agenda-gap-mark" aria-hidden="true"></span><div class="home-agenda-gap-body"><time>${minuteLabel(item.start)} – ${minuteLabel(item.end)} · ${e(durationLabel(item.end-item.start))}</time><strong>${item.current ? "当前未安排" : "未安排时段"}</strong><small>${item.next ? `这段时间没有已记录安排 · 下一项 ${e(clock(item.next.start, zone))}` : "当天暂无后续安排"}</small></div></li>`).join("")
+      : `<li class="home-agenda-gap"${item.current ? ` data-current="true" aria-current="time"` : ""}><span class="home-agenda-gap-mark" aria-hidden="true"></span><div class="home-agenda-gap-body"><time>${minuteLabel(item.start)} – ${minuteLabel(item.end)} · ${e(durationLabel(item.end-item.start))}</time><strong>${item.current ? (items.length ? "当前未安排" : "今日暂无安排") : "未安排时段"}</strong><small>${item.next ? `这段时间没有已记录安排 · 下一项 ${e(clock(item.next.start, zone))}` : "当天暂无后续安排"}</small></div></li>`).join("")
       : `<li class="home-agenda-item"><span class="home-agenda-dot" aria-hidden="true"></span><div class="home-agenda-body"><strong>${emptyTitle}</strong></div></li>`;
-    return `${currentLine}
+    const programHead = `<div class="home-agenda-program-head"><h3>今日上演</h3><span>${live.length} 项${elapsed.length ? ` · 已落幕 ${elapsed.length}` : ""}</span></div>`;
+    const programMeta = `<div class="home-agenda-program-meta"><span>今日 ${items.length} 项</span><span>${elapsed.length ? `已落幕 ${elapsed.length} 幕` : "今日节目单"}</span></div>`;
+    const pastHead = elapsed.length ? `<div class="home-agenda-program-head home-agenda-program-past"><h3>已经落幕</h3><span>${elapsed.length} 幕</span></div>` : "";
+    return `${programMeta}
+      ${currentLine}
       ${calendarRead && lifeRead ? renderOverview(items, now, zone, coverageComplete) : ""}
-      <div class="home-agenda-scroll" tabindex="0" aria-label="当天日程时间线"><ol class="home-agenda" aria-label="今日安排">${timeline}</ol></div>
+      ${programHead}
+      <div class="home-agenda-scroll" tabindex="0" aria-label="当天日程时间线"><ol class="home-agenda" style="counter-reset:agenda-act ${elapsed.length}" aria-label="今日安排">${timeline}</ol></div>
+      ${pastHead}
       ${elapsed.length ? `<details class="home-agenda-more" data-home-agenda-past ${schedulePastExpanded ? "open" : ""}><summary>${schedulePastExpanded ? "收起" : "查看"}已过时段 ${elapsed.length} 项</summary><ol class="home-agenda">${elapsed.map(row).join("")}</ol></details>` : ""}
       ${messages.length ? `<p class="home-side-warning" role="status">${e(messages.join("；"))}</p>` : ""}
       ${runtimeMissing ? `<button class="text-button home-side-action" data-go="manage" data-manage="host">前往账号与会话</button>` : ""}

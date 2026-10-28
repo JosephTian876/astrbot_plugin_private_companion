@@ -1041,6 +1041,22 @@ class AstrBotMultiController:
             return Outcome.failed("host_target_unavailable", "the native group route is not configured")
         return await self.session.prepare_group(event, target)
 
+    async def process_relay_group_presence(self, event, target, context):
+        """Deliver delayed group relays after the sender is authenticated."""
+        from .relay_pending_events import process_group_presence
+        try:
+            await process_group_presence(self, event, target, context)
+        except Exception:
+            logger.warning("[CompanionV2] 延迟跨群转述处理失败", exc_info=True)
+
+    async def process_private_relay_receipts(self, event, target):
+        """Report a target member's private reply to the original relay source."""
+        from .relay_pending_events import process_private_receipts
+        try:
+            await process_private_receipts(self, event, target)
+        except Exception:
+            logger.warning("[CompanionV2] 私聊递话回执处理失败", exc_info=True)
+
     async def group_reply_candidate(self, event):
         session, target = self.session, self.target_for_event(event)
         if not self.claims(event) or session is None or not isinstance(target, GroupTarget):

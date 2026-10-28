@@ -124,7 +124,7 @@ class CoreReplyTimeContextTests(unittest.TestCase):
 
         prompt = build_core_reply_prompt(app, context, native_input, at=datetime(2026, 10, 12, tzinfo=timezone.utc))
 
-        self.assertIn("稳定角色档案", prompt.stable_instruction)
+        self.assertNotIn("稳定角色档案", prompt.stable_instruction)
         self.assertIn("自然地接话", prompt.stable_instruction)
         self.assertIn("别像在做汇报", prompt.stable_instruction)
         self.assertNotIn("今天一起聊了星星", prompt.stable_instruction)

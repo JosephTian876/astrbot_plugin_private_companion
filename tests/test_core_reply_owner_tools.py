@@ -146,6 +146,7 @@ class CoreReplyGroupOwnerToolTests(NativeOwnerCalls, GroupFixture, unittest.Isol
         require(self.app.messages.recalls.accept(MessageRecall.from_scope(prepared["context"].scope,
             prepared["event_id"], prepared["context"].actor.principal.native_account_id)))
         read = await self.call(event, request, "slang.search", {"query": "咕咕"}, "slang-after-withdrawal")
+        print("DEBUG slang read", read)
         self.assertEqual(read["payload"]["items"], [], read)
         replay = await self.call(event, request, "slang.search", {"query": "咕咕"})
         self.assertEqual(replay["code"], "semantic_result_changed", replay)

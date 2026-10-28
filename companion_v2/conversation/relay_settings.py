@@ -19,9 +19,16 @@ DEFAULTS = {
     "require_confirm": True,
     "max_text_chars": 500,
     "allowed_targets": "",
+    "allowed_groups": "",
+    "member_cache_minutes": 60,
+    "prefer_relationship_names": True,
+    "multi_target_limit": 5,
+    "default_style": "persona",
     "core_target_id": "",
 }
-LIMITS = {"max_text_chars": (20, 2000)}
+LIMITS = {"max_text_chars": (20, 2000), "member_cache_minutes": (1, 1440),
+          "multi_target_limit": (1, 20)}
+STYLES = frozenset(("original", "soft", "persona"))
 
 
 def target_for(context):
@@ -32,16 +39,27 @@ def target_for(context):
 def validate(values):
     if type(values) is not dict or set(values) != set(DEFAULTS):
         raise ConfigurationError("relay_configuration_invalid", "provide the declared relay settings")
-    for name in ("enabled", "require_confirm"):
+    for name in ("enabled", "require_confirm", "prefer_relationship_names"):
         if type(values[name]) is not bool:
             raise ConfigurationError("relay_configuration_invalid", f"{name} must be boolean")
-    for name in ("allowed_targets", "core_target_id"):
+    for name in ("allowed_targets", "allowed_groups", "core_target_id"):
         if type(values[name]) is not str:
             raise ConfigurationError("relay_configuration_invalid", f"{name} must be text")
     low, high = LIMITS["max_text_chars"]
     if type(values["max_text_chars"]) is not int or not low <= values["max_text_chars"] <= high:
         raise ConfigurationError("relay_configuration_invalid",
                                  f"max_text_chars must be an integer from {low} to {high}")
+    low, high = LIMITS["member_cache_minutes"]
+    if type(values["member_cache_minutes"]) is not int or not low <= values["member_cache_minutes"] <= high:
+        raise ConfigurationError("relay_configuration_invalid",
+                                 f"member_cache_minutes must be an integer from {low} to {high}")
+    low, high = LIMITS["multi_target_limit"]
+    if type(values["multi_target_limit"]) is not int or not low <= values["multi_target_limit"] <= high:
+        raise ConfigurationError("relay_configuration_invalid",
+                                 f"multi_target_limit must be an integer from {low} to {high}")
+    if values["default_style"] not in STYLES:
+        raise ConfigurationError("relay_configuration_invalid",
+                                 "default_style must be original, soft or persona")
     return values
 
 

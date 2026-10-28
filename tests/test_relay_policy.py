@@ -68,9 +68,19 @@ class RelayBoundaryTests(unittest.TestCase):
             self.assertFalse(decision.allowed)
             self.assertEqual(decision.code, DENIED_DISABLED)
 
-    def test_group_destination_is_rejected(self):
-        decision = decide(ask("5005", kind="group"), actor_is_core=True,
-                          core_target_id="1001", allowed_targets=("5005",))
+    def test_group_destination_requires_its_own_whitelist(self):
+        allowed = decide(ask("5005", kind="group"), actor_is_core=True,
+                         core_target_id="1001", allowed_groups=("5005",))
+        self.assertTrue(allowed.allowed)
+        self.assertEqual(allowed.audience, "admin_group")
+        denied = decide(ask("5005", kind="group"), actor_is_core=True,
+                        core_target_id="1001", allowed_targets=("5005",))
+        self.assertFalse(denied.allowed)
+        self.assertEqual(denied.code, DENIED_GROUP)
+
+    def test_member_cannot_use_a_group_destination(self):
+        decision = decide(ask("5005", kind="group"), actor_is_core=False,
+                          core_target_id="1001", allowed_groups=("5005",))
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.code, DENIED_GROUP)
 

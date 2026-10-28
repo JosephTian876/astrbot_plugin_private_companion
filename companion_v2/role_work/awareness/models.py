@@ -24,13 +24,13 @@ MAX_EVENTS = 64
 RETENTION_HOURS = 24
 WINDOW_HOURS = 12
 MAX_PROMPT_ITEMS = 4
-MAX_TOPIC_CHARS = 48
+MAX_TOPIC_CHARS = 96
 MAX_EVENT_KEY_CHARS = 256
 MAX_DOCUMENT_CHARS = 65536
 ATTENTION_MINUTES = 30
 
 WINDOWS = frozenset({"private", "group"})
-EVENT_KINDS = frozenset({"spoke", "peer_reply"})
+EVENT_KINDS = frozenset({"spoke", "reply", "peer_reply"})
 _TOPIC_PLACEHOLDER = re.compile(r"\[[^\]]{0,24}\]")
 _TOPIC_SPACE = re.compile(r"\s+")
 
@@ -56,11 +56,21 @@ def empty_document(context, at: datetime) -> dict:
             "updated_at": stamp(at)}
 
 
-def clean_topic(text) -> str:
-    """Keep a short, display-safe slice of the speaker's own public wording."""
+def clean_topic(text, maximum: int = MAX_TOPIC_CHARS) -> str:
+    """Keep a short, display-safe slice of the speaker's own wording.
+
+    Long messages keep both their opening and closing words so a question at
+    the end is not lost when continuity looks back at the recent exchange.
+    """
     value = _TOPIC_PLACEHOLDER.sub(" ", str(text or ""))
     value = " ".join(_TOPIC_SPACE.split(value)).strip()
-    return value[:MAX_TOPIC_CHARS]
+    if maximum <= 1:
+        return value[:max(0, maximum)]
+    if len(value) <= maximum:
+        return value
+    head = max(1, maximum * 2 // 3)
+    tail = maximum - head - 1
+    return value[:head] + "…" + (value[-tail:] if tail else "")
 
 
 def event_record(context, at: datetime, text: str, event_key: str = "", source=None, peer_count: int = 0) -> dict:
@@ -76,6 +86,23 @@ def event_record(context, at: datetime, text: str, event_key: str = "", source=N
             "event_key": str(event_key or "")[:MAX_EVENT_KEY_CHARS],
             "source": json.loads(encode(source)) if source is not None else None,
             "peer_count": peers if window == "group" else 0}
+
+
+def reply_record(context, at: datetime, text: str, event_key: str = "") -> dict:
+    """One bounded reply authored by this same role in a group window."""
+    if window_of(context) != "group":
+        raise ValueError("reply continuity records are group-only")
+    speaker_account = str(context.scope.account_id or context.role_binding.role.subject_id or "")
+    if not speaker_account:
+        raise ValueError("reply continuity requires a stable speaker account")
+    return {"at": stamp(at), "window": "group",
+            "group_id": context.scope.native_scope_id,
+            "platform": context.scope.platform, "account_id": context.scope.account_id or "",
+            "subject": context.role_binding.role.subject_id,
+            "speaker_account": speaker_account,
+            "kind": "reply", "topic": clean_topic(text),
+            "event_key": str(event_key or "")[:MAX_EVENT_KEY_CHARS],
+            "source": None, "peer_count": 0}
 
 
 def peer_reply_record(context, at: datetime, subject: str, event_key: str = "", source=None) -> dict:
@@ -122,11 +149,14 @@ def _valid_event(item) -> bool:
         return False
     if type(item["topic"]) is not str or len(item["topic"]) > MAX_TOPIC_CHARS:
         return False
-    if item["window"] == "private" and item["topic"]:
-        return False
-    if item["kind"] == "peer_reply":
+    if item["kind"] == "reply":
+        if item["window"] != "group" or not item["topic"] or item["peer_count"] != 0:
+            return False
+    elif item["kind"] == "peer_reply":
         if item["window"] != "group" or item["topic"] or item["peer_count"] != 0:
             return False
+    elif item["window"] == "private" and item["topic"]:
+        return False
     if type(item["peer_count"]) is not int or not 0 <= item["peer_count"] <= 64:
         return False
     if item["window"] == "private" and item["peer_count"]:
@@ -181,6 +211,6 @@ def prune(events, at: datetime) -> list:
 __all__ = [
     "VERSION", "PREFIX", "MAX_EVENTS", "RETENTION_HOURS", "WINDOW_HOURS", "MAX_PROMPT_ITEMS",
     "MAX_TOPIC_CHARS", "MAX_DOCUMENT_CHARS", "ATTENTION_MINUTES", "WINDOWS", "window_of",
-    "role_ref", "owner_key", "empty_document", "clean_topic", "event_record", "peer_reply_record",
-    "valid_document", "prune",
+    "role_ref", "owner_key", "empty_document", "clean_topic", "event_record", "reply_record",
+    "peer_reply_record", "valid_document", "prune",
 ]

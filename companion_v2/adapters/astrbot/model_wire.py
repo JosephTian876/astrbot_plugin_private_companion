@@ -229,7 +229,6 @@ def build_wire(envelope, *, model_name=""):
             "type": "function", "function": {"name": tool_alias(exchange.call.action),
                                                "arguments": exchange.call.arguments_json}}]},
             {"role": "tool", "tool_call_id": exchange.call.call_id, "content": exchange.result_json}))
-    messages.append({"role": "system", "content": composition.final_instruction})
     wire = ModelWire(messages, tuple(tools), MappingProxyType(aliases), MappingProxyType(evidence), request.output_format,
                      sum(len(image.rendered_images) for image in request.images)
                          + (0 if request.native_video_input else sum(len(v.frames) for v in request.videos)),

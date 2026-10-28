@@ -30,9 +30,9 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
             request = replace(envelope.original, output_format=kind, response_format="json_object",
                               instruction="维护角色数据，只输出 JSON。")
             wire = build_wire(replace(envelope, original=request))
-            self.assertEqual(wire.messages[0]["content"], envelope.original.role_instruction)
-            self.assertIn("不写聊天回复", wire.messages[-1]["content"])
-            self.assertNotIn("claims", wire.messages[-1]["content"])
+            self.assertTrue(wire.messages[0]["content"].startswith(envelope.original.role_instruction))
+            self.assertIn("不写聊天回复", wire.messages[0]["content"])
+            self.assertNotIn("claims", wire.messages[0]["content"])
             async def respond(*_):
                 return completion('{"items":[]}')
             self.native.provider.client.state.behavior = respond
@@ -62,7 +62,7 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "generated")
         self.assertEqual(len(signatures), 1)
         self.assertEqual(observed_before_io, [1])
-        self.assertEqual(len(signatures[0].system_parts), 3)
+        self.assertEqual(len(signatures[0].system_parts), 1)
         self.assertTrue(signatures[0].context_observed)
 
     async def test_prompt_composition_preserves_cache_prefix_and_ends_after_all_inputs(self):
@@ -78,18 +78,17 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
             return build_wire(replace(envelope, original=request, tool_history=history))
 
         first, second = wire_for("first user request"), wire_for("different user request")
-        self.assertEqual(first.messages[:2], second.messages[:2])
-        self.assertEqual([message["role"] for message in first.messages[:2]], ["system", "system"])
-        payload = first.messages[2]["content"]
+        self.assertEqual(first.messages[:1], second.messages[:1])
+        self.assertEqual([message["role"] for message in first.messages[:1]], ["system"])
+        payload = first.messages[1]["content"]
         self.assertIn('"content_class":"current_user_request"', payload)
         self.assertIn('"instruction_authority":"user_request"', payload)
         self.assertIn('"content_class":"reference_data"', payload)
         self.assertIn('"instruction_authority":"none"', payload)
-        self.assertEqual(first.messages[-2]["role"], "tool")
-        self.assertEqual(first.messages[-1]["role"], "system")
-        self.assertIn("末尾约束", first.messages[-1]["content"])
-        self.assertIn("最终面向用户只输出一个 JSON 对象", first.messages[-1]["content"])
-        self.assertEqual(first.messages[-1], second.messages[-1])
+        self.assertEqual(first.messages[-1]["role"], "tool")
+        self.assertIn("末尾约束", first.messages[0]["content"])
+        self.assertIn("最终面向用户只输出一个 JSON 对象", first.messages[0]["content"])
+        self.assertEqual(first.messages[0], second.messages[0])
         self.assertNotIn("末尾约束", first.messages[1]["content"])
 
         async def respond(*_):
@@ -105,7 +104,7 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_reply_contract_example_is_accepted_by_the_real_decoder(self):
         wire = build_wire(await self.envelope())
-        self.assertIn(REPLY_CONTRACT_EXAMPLE, wire.messages[1]["content"])
+        self.assertIn(REPLY_CONTRACT_EXAMPLE, wire.messages[0]["content"])
         response = NS(raw_completion=NS(choices=[NS(finish_reason="stop", message=NS(tool_calls=None))]),
                       completion_text=REPLY_CONTRACT_EXAMPLE, tools_call_ids=[], tools_call_name=[],
                       tools_call_args=[])
@@ -118,9 +117,33 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIn("内部协议标签、控制块", REPLY_CONTRACT)
         self.assertIn("调试标记", REPLY_CONTRACT)
 
+    async def test_dispatched_payload_has_only_the_merged_system_message(self):
+        envelope = await self.envelope()
+
+        async def respond(*_):
+            return completion()
+
+        self.native.provider.client.state.behavior = respond
+        result = await self.native_model.generate(envelope)
+        self.assertEqual(result.status, "generated")
+        payload, _ = self.native.provider.client.state.calls[-1]
+        self.assertEqual([message["role"] for message in payload["messages"][:2]], ["system", "user"])
+        self.assertEqual(sum(message["role"] == "system" for message in payload["messages"]), 1)
+        self.assertIn("末尾约束", payload["messages"][0]["content"])
+
+    async def test_wire_sends_one_system_message_with_terminal_guard_inside_it(self):
+        envelope = await self.envelope()
+        wire = build_wire(envelope)
+        self.assertEqual([message["role"] for message in wire.messages[:2]], ["system", "user"])
+        self.assertEqual(sum(message["role"] == "system" for message in wire.messages), 1)
+        system = wire.messages[0]["content"]
+        self.assertIn("末尾约束", system)
+        self.assertIn("最终面向用户只输出一个 JSON 对象", system)
+        self.assertGreater(system.index("末尾约束"), system.index(envelope.original.role_instruction))
+
     async def test_terminal_guard_covers_unknown_and_escaped_internal_markup(self):
         wire = build_wire(await self.envelope())
-        guard = wire.messages[-1]["content"]
+        guard = wire.messages[0]["content"]
         self.assertIn("未知 XML/HTML 样式标签", guard)
         self.assertIn("半截还是转义形式", guard)
 
@@ -163,11 +186,11 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.draft.claims, ())
             self.assertEqual(response.usage, REPORTED_USAGE)
             wire = build_wire(selected)
-            self.assertEqual(wire.messages[0]["content"], envelope.original.role_instruction)
-            self.assertNotIn('"claims"', wire.messages[1]["content"])
-            self.assertNotIn("本轮能力与会话背景", wire.messages[1]["content"])
-            self.assertEqual(wire.messages[-1]["role"], "system")
-            self.assertIn("末尾约束", wire.messages[-1]["content"])
+            self.assertTrue(wire.messages[0]["content"].startswith(envelope.original.role_instruction))
+            self.assertNotIn('"claims"', wire.messages[0]["content"])
+            self.assertNotIn("本轮能力与会话背景", wire.messages[0]["content"])
+            self.assertEqual(wire.messages[-1]["role"], "user")
+            self.assertIn("末尾约束", wire.messages[0]["content"])
             self.assertEqual(wire.tools, ())
         with self.assertRaises(ValueError):
             build_wire(replace(selected, tools=(ToolSpec("memo.create", "写入", "{}"),)))
@@ -175,48 +198,48 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
     async def test_model_perception_tracks_offered_tools_without_claiming_screen_access(self):
         envelope = await self.envelope()
         first = build_wire(replace(envelope, provider_capabilities=("text", "tools", "image")))
-        self.assertEqual(first.messages[0]["content"], envelope.original.role_instruction)
-        self.assertIn("当前是私聊", first.messages[1]["content"])
-        self.assertIn("本轮会话的平台标识：", first.messages[1]["content"])
-        self.assertIn("本轮接入配置允许提交：文本、图片输入、结构化工具调用", first.messages[1]["content"])
-        self.assertIn("遵循原人格与世界观自然表达", first.messages[1]["content"])
-        self.assertIn("不等于底层模型已验证理解", first.messages[1]["content"])
-        self.assertIn("本轮没有可调用工具", first.messages[1]["content"])
-        self.assertIn("不能查看当前屏幕", first.messages[1]["content"])
-        self.assertNotIn("native-model", first.messages[1]["content"])
+        self.assertTrue(first.messages[0]["content"].startswith(envelope.original.role_instruction))
+        self.assertIn("当前是私聊", first.messages[0]["content"])
+        self.assertIn("本轮会话的平台标识：", first.messages[0]["content"])
+        self.assertIn("本轮接入配置允许提交：文本、图片输入、结构化工具调用", first.messages[0]["content"])
+        self.assertIn("遵循原人格与世界观自然表达", first.messages[0]["content"])
+        self.assertIn("不等于底层模型已验证理解", first.messages[0]["content"])
+        self.assertIn("本轮没有可调用工具", first.messages[0]["content"])
+        self.assertIn("不能查看当前屏幕", first.messages[0]["content"])
+        self.assertNotIn("native-model", first.messages[0]["content"])
         offered = replace(envelope, provider_capabilities=("text", "tools"), tools=(
             ToolSpec("screen.capture", "截屏", '{"type":"object"}'),
             ToolSpec("image.generate", "生图", '{"type":"object"}')))
         second = build_wire(offered)
         self.assertIn("只有用户明确要求看屏，或当前问题确实依赖桌面画面时，才调用 screen.capture",
-                      second.messages[1]["content"])
-        self.assertIn("生成图片需调用 image.generate", second.messages[1]["content"])
-        self.assertNotIn("编辑图片需调用 image.edit", second.messages[1]["content"])
-        self.assertNotIn("本轮未提供识屏工具", second.messages[1]["content"])
+                      second.messages[0]["content"])
+        self.assertIn("生成图片需调用 image.generate", second.messages[0]["content"])
+        self.assertNotIn("编辑图片需调用 image.edit", second.messages[0]["content"])
+        self.assertNotIn("本轮未提供识屏工具", second.messages[0]["content"])
         edited = build_wire(replace(envelope, tools=(ToolSpec("image.edit", "修图", '{}'),)))
-        self.assertIn("需要修改图片时调用 image.edit", edited.messages[1]["content"])
-        self.assertNotIn("生成图片需调用 image.generate", edited.messages[1]["content"])
+        self.assertIn("需要修改图片时调用 image.edit", edited.messages[0]["content"])
+        self.assertNotIn("生成图片需调用 image.generate", edited.messages[0]["content"])
 
     async def test_model_perception_follows_the_dispatched_override(self):
         envelope = await self.envelope(model_override="fallback-model")
         wire = build_wire(envelope, model_name="fallback-model")
-        self.assertIn("目标对话模型标识：fallback-model", wire.messages[1]["content"])
-        self.assertIn("不代表底层实际型号或能力已验证", wire.messages[1]["content"])
-        self.assertNotIn("fixture", wire.messages[1]["content"])
+        self.assertIn("目标对话模型标识：fallback-model", wire.messages[0]["content"])
+        self.assertIn("不代表底层实际型号或能力已验证", wire.messages[0]["content"])
+        self.assertNotIn("fixture", wire.messages[0]["content"])
         async def respond(*_):
             return completion()
         self.native.provider.client.state.behavior = respond
         self.assertEqual((await self.native_model.generate(envelope)).status, "generated")
         payload, _ = self.native.provider.client.state.calls[0]
         self.assertEqual(payload["model"], "fallback-model")
-        self.assertIn("目标对话模型标识：fallback-model", payload["messages"][1]["content"])
-        self.assertNotIn("目标对话模型标识：fixture", payload["messages"][1]["content"])
+        self.assertIn("目标对话模型标识：fallback-model", payload["messages"][0]["content"])
+        self.assertNotIn("目标对话模型标识：fixture", payload["messages"][0]["content"])
 
     async def test_model_label_is_bounded_to_one_line(self):
         envelope = await self.envelope()
         wire = build_wire(envelope, model_name="model-a\n" + "x" * 100)
-        self.assertIn("目标对话模型标识：model-a " + "x" * 72 + "；", wire.messages[1]["content"])
-        self.assertNotIn("model-a\nx", wire.messages[1]["content"])
+        self.assertIn("目标对话模型标识：model-a " + "x" * 72 + "；", wire.messages[0]["content"])
+        self.assertNotIn("model-a\nx", wire.messages[0]["content"])
 
     async def test_native_provider_capabilities_follow_explicit_host_modalities(self):
         full = ("text", "tools", "image", "audio")
@@ -252,7 +275,7 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.receipt_ref.endswith(":response-1"))
         payload, _ = self.native.provider.client.state.calls[0]
         self.assertEqual(payload["max_tokens"], 100)
-        self.assertEqual(payload["messages"][0]["content"], envelope.original.role_instruction)
+        self.assertTrue(payload["messages"][0]["content"].startswith(envelope.original.role_instruction))
         self.assertNotIn("materials", payload["messages"][0]["content"])
         self.assertGreater(self.native_model.reserve(envelope).tokens, 100)
         self.assertEqual(self.native.provider.client.max_retries, 2)
@@ -283,9 +306,8 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.tool_calls, (ToolCall("tool-1", "memo.list", '{"limit":2}'),))
         exchange = ToolExchange(response.tool_calls[0], '{"state":"succeeded","items":[]}')
         history = build_wire(replace(envelope, tools=(), tool_history=(exchange,))).messages
-        self.assertEqual(history[-3]["tool_calls"][0]["function"]["name"], tool_alias("memo.list"))
-        self.assertEqual(history[-2]["tool_call_id"], "tool-1")
-        self.assertEqual(history[-1]["role"], "system")
+        self.assertEqual(history[-2]["tool_calls"][0]["function"]["name"], tool_alias("memo.list"))
+        self.assertEqual(history[-1]["tool_call_id"], "tool-1")
 
     async def test_missing_usage_never_becomes_zero_and_no_retry_on_timeout(self):
         envelope = await self.envelope()
@@ -536,7 +558,7 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((silent.action, silent.text, calls), ("silent", "", ()))
         poke, calls = decode_text_response(json.dumps({"action": "poke", "text": "", "claims": []}), wire)
         self.assertEqual((poke.action, poke.text, calls), ("poke", "", ()))
-        self.assertIn("poke", wire.messages[-1]["content"])
+        self.assertIn("poke", wire.messages[0]["content"])
 
         restricted = build_wire(envelope)
         with self.assertRaises(ValueError):

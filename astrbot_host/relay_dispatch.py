@@ -16,7 +16,7 @@
 from companion_v2.conversation.relay import plan_relay
 from companion_v2.conversation.relay_policy import RelayRequest
 
-from .private_notice import send_private_notice
+from .private_notice import send_group_notice, send_private_notice
 
 
 class RelayNotDelivered(Exception):
@@ -29,15 +29,17 @@ class RelayNotDelivered(Exception):
         self.needs_confirm = needs_confirm
 
 
-def with_destination(route, destination_id):
-    """把一条已认证路由的对方 id 换掉，其余（账号、平台、客户端）保持不变。"""
+def with_destination(route, destination_id, *, kind=None):
+    """Keep the authenticated account/client while replacing the peer route."""
     from dataclasses import replace
     try:
-        return replace(route, peer=str(destination_id))
+        return replace(route, peer=str(destination_id), kind=kind) if kind is not None else replace(route, peer=str(destination_id))
     except (TypeError, ValueError):
         from types import SimpleNamespace
         values = dict(vars(route)) if hasattr(route, "__dict__") else {}
         values["peer"] = str(destination_id)
+        if kind is not None:
+            values["kind"] = kind
         return SimpleNamespace(**values)
 
 
@@ -70,4 +72,27 @@ async def relay_private(controller, event, *, request: RelayRequest, settings,
     return {"state": "sent", "text": plan.text, "audit": plan.audit, "receipt": receipt}
 
 
-__all__ = ["RelayNotDelivered", "relay_private", "with_destination"]
+async def relay_group(controller, event, *, request: RelayRequest, settings,
+                      actor_is_core: bool, actor_id: str = "", confirmed: bool = False,
+                      route=None, base_route=None, transport=None):
+    """Send one group relay after the same policy/confirmation boundary."""
+    plan = plan_relay(request, settings, actor_is_core=actor_is_core, actor_id=actor_id)
+    if not plan.allowed:
+        raise RelayNotDelivered(plan.decision.code, plan.decision.reason, audit=plan.audit)
+    if plan.needs_confirm and not confirmed:
+        raise RelayNotDelivered("relay_confirmation_required",
+                                "这段递话需要先确认，确认后才会发送。",
+                                audit=plan.audit, needs_confirm=True)
+    if route is None and base_route is not None:
+        route = with_destination(base_route, plan.destination_id, kind=plan.destination_kind)
+    if route is None:
+        raise RelayNotDelivered("relay_target_unavailable", "目标群聊不可用，未发送。",
+                                audit=plan.audit)
+    receipt = await send_group_notice(controller, route, text=plan.text,
+                                      mention_id=plan.mention_id, transport=transport)
+    if receipt.get("state") != "delivered" or receipt.get("message_id") is None:
+        return {"state": "unknown", "text": plan.text, "audit": plan.audit, "receipt": receipt}
+    return {"state": "sent", "text": plan.text, "audit": plan.audit, "receipt": receipt}
+
+
+__all__ = ["RelayNotDelivered", "relay_group", "relay_private", "with_destination"]

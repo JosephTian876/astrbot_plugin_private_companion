@@ -26,6 +26,7 @@ DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 DEEPSEEK_SEARCH_URL = DEEPSEEK_API_BASE + "/tools/search"
 DEEPSEEK_FETCH_URL = DEEPSEEK_API_BASE + "/tools/fetch"
 DEEPSEEK_KEY_ENV = ("COMPANION_V2_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY")
+MAX_DEEPSEEK_FETCH_URL = 8192
 ASTRBOT_SEARCH_PROVIDERS = {"tavily", "bocha", "brave", "firecrawl", "baidu_ai_search", "exa", "anysearch"}
 
 
@@ -344,7 +345,7 @@ def _deepseek_rows(payload):
 
 
 def _safe_deepseek_fetch_url(value):
-    if (type(value) is not str or not 1 <= len(value) <= 2048 or "\\" in value
+    if (type(value) is not str or not 1 <= len(value) <= MAX_DEEPSEEK_FETCH_URL or "\\" in value
             or any(ord(char) < 33 for char in value)):
         return ""
     try:
@@ -384,7 +385,7 @@ def _deepseek_search_endpoint(value):
             or port not in (None, 443) or parts.query or parts.fragment
             or path not in {"/v1/tools/search", "/tools/search"}):
         return ""
-    return "https://api.deepseek.com" + path
+    return "https://api.deepseek.com/v1/tools/search"
 
 
 class DeepSeekSearchNewsPort:
@@ -406,7 +407,8 @@ class DeepSeekSearchNewsPort:
         if not self.search_url:
             raise ValueError("DeepSeek Search endpoint is invalid")
         self.fetch_url = self.search_url.rsplit("/", 1)[0] + "/fetch"
-        self.headers = {"Authorization": "Bearer " + self.api_key, "Accept": "application/json"}
+        self.headers = {"Authorization": "Bearer " + self.api_key, "Accept": "application/json",
+                        "Content-Type": "application/json"}
         self.fingerprint = digest([self.kind, self.search_url, self.query, self.result_count, self.api_key])
 
     async def _post(self, url, payload):

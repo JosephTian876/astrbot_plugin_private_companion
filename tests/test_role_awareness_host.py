@@ -1,5 +1,6 @@
 """Host prompt integration: one role sees its own private/group windows."""
 
+from datetime import timedelta
 import json
 import unittest
 
@@ -41,6 +42,67 @@ class RoleAwarenessHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         private = await self.prepare(self.event(target="first", identifier="aware-private", text="我刚在群里问了"))
         self.assertIn("【跨窗口在场】", private["prompt_instruction"])
         self.assertIn("明天谁有空", private["prompt_instruction"])
+
+    async def test_private_repeat_gets_prior_group_reply_continuity(self):
+        group_context, _ = await self.accepted_group(
+            "continuity-group", "周末去杭州还是苏州？")
+        with self.app.runtime.transaction() as connection:
+            self.app.cross_window.record_reply(
+                connection, group_context, self.clock.now(),
+                text="我倾向杭州，先看周六天气。", event_key="continuity-reply",
+                enabled=True)
+        private_context, private_batch = await self.accepted(
+            "first", "continuity-private", "周末去杭州还是苏州？")
+        material = next(item for item in self.materials(private_context, private_batch)
+                        if item.purpose == "cross_window_awareness")
+        payload = json.loads(material.payload)
+        self.assertEqual(payload["continuity"]["state"], "repeat")
+        self.assertEqual(payload["continuity"]["prior_question"], "周末去杭州还是苏州？")
+        self.assertIn("杭州", payload["continuity"]["prior_reply"])
+
+    async def test_private_unrelated_question_has_no_repeat_continuity(self):
+        group_context, _ = await self.accepted_group(
+            "continuity-unrelated-group", "周末去杭州还是苏州？")
+        with self.app.runtime.transaction() as connection:
+            self.app.cross_window.record_reply(
+                connection, group_context, self.clock.now(),
+                text="我倾向杭州。", event_key="continuity-unrelated-reply",
+                enabled=True)
+        private_context, private_batch = await self.accepted(
+            "first", "continuity-unrelated-private", "今晚吃什么？")
+        material = next(item for item in self.materials(private_context, private_batch)
+                        if item.purpose == "cross_window_awareness")
+        payload = json.loads(material.payload)
+        self.assertNotIn("continuity", payload)
+
+    async def test_continuity_respects_its_short_window(self):
+        group_context, _ = await self.accepted_group(
+            "continuity-expiry-group", "周末去杭州还是苏州？")
+        with self.app.runtime.transaction() as connection:
+            self.app.cross_window.record_reply(
+                connection, group_context, self.clock.now(),
+                text="我倾向杭州。", event_key="continuity-expiry-reply",
+                enabled=True)
+        self.clock.advance(timedelta(minutes=31))
+        private_context, private_batch = await self.accepted(
+            "first", "continuity-expiry-private", "周末去杭州还是苏州？")
+        material = next(item for item in self.materials(private_context, private_batch)
+                        if item.purpose == "cross_window_awareness")
+        payload = json.loads(material.payload)
+        self.assertNotIn("continuity", payload)
+
+    async def test_core_private_prompt_gets_repeat_continuity(self):
+        group_context, _ = await self.accepted_group(
+            "continuity-prompt-group", "周末去杭州还是苏州？")
+        with self.app.runtime.transaction() as connection:
+            self.app.cross_window.record_reply(
+                connection, group_context, self.clock.now(),
+                text="我倾向杭州，先看周六天气。", event_key="continuity-prompt-reply",
+                enabled=True)
+        private = await self.prepare(self.event(
+            target="first", identifier="continuity-prompt-private",
+            text="周末去杭州还是苏州？"))
+        self.assertIn('"prior_reply":"我倾向杭州', private["prompt_instruction"])
 
     async def test_group_prompt_only_gets_the_private_contact_boolean(self):
         await self.prepare(self.event(target="first", identifier="aware-private-seed", text="私聊里的秘密"))

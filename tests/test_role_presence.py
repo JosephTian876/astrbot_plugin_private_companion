@@ -5,11 +5,13 @@ from dataclasses import replace
 from datetime import timedelta
 import json
 import unittest
+from unittest.mock import patch
 
 from companion_v2.adapters.astrbot.presence import OneBotPresencePort
 from companion_v2.conversation.flow import ConversationPolicy
 from companion_v2.delivery.presence import PresenceCoordinator
 from companion_v2.execution.models import TaskError, encode, stamp
+from companion_v2.foundation.refs import AudienceRef
 from companion_v2.agenda.models import Schedule
 from tests.native_adapter_support import NativeFixture, FakeReverseApi
 from tests.test_management_access import NOW
@@ -239,6 +241,23 @@ class PresenceTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(coordinator.results_for(rebound), {})
         row = self.runtime.read_one("SELECT state FROM platform_presence_operations", ())
         self.assertEqual(row["state"], "unknown")
+
+
+    async def test_same_role_windows_share_one_presence_owner(self):
+        port = FakePresence()
+        _, app, context, _ = self.setup_state(presence_port=port)
+        other_scope = replace(context.scope, native_scope_id="other-native",
+                              conversation_id="other-conversation", session_id="other-session")
+        other = replace(context,
+            role_binding=replace(context.role_binding, scope=other_scope),
+            audience=AudienceRef(other_scope, (context.actor.subject,)))
+        coordinator = app.presence
+        coordinator.bind(context)
+        coordinator.bind(other)
+        with patch.object(coordinator, "_status_available", return_value=True):
+            owners = coordinator._candidates()[coordinator.account(context)]
+        self.assertEqual(len(owners), 1)
+        self.assertEqual(owners[0].key, other.key)
 
     async def test_changed_plan_during_native_preflight_does_not_send_old_wording(self):
         port, app, context, _, data = await self.current_plan()

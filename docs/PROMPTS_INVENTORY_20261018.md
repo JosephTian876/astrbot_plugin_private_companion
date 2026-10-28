@@ -45,7 +45,7 @@ V2 自己执行回复批次时，由 `EvidencePromptCompiler.compile`（`compani
 | `SENT_CONTINUATION_INSTRUCTION` | `astrbot_host/core_reply_context.py:47` | 把已发出的主动消息放回对话顺序；承接旧话头只能引用真实出现过的原话 | 私聊且存在已确认投递的主动消息 |
 | 表达偏好段 | `astrbot_host/core_reply_context.py:220-230` | 风格/日常表达偏好（`text_policy().instruction`） | 配置了 `style_prompt` 或开启日常表达 |
 | 对话附加提示 | `astrbot_host/core_reply_context.py:232-248` | 页面保存的 `conversation.reply.prompt` | 该字段非空 |
-| 角色档案 | `astrbot_host/core_reply_context.py:249` + `companion_v2/role_profile/context.py:67` | 角色自身与世界的稳定档案 | 有角色档案快照 |
+| 角色档案 | `companion_v2/role_profile/task_reference.py` + `context.py:67` | 后台任务的角色参考；对话链不再注入 | 有角色档案且是后台任务 |
 | 相识资料 | `astrbot_host/core_reply_context.py:250` + `companion_v2/relationships/profile.py:118` | 当前对象的相处资料 | 有该对象的档案材料 |
 | 角色知识资料 | `astrbot_host/core_reply_context.py:253` + `companion_v2/conversation/messages.py:79` | 受控知识参考，不是事实证据 | 命中知识条目 |
 | 本窗口成员资料 | `astrbot_host/core_reply_context.py:255` + `companion_v2/knowledge/members.py:30` | 群成员线索 | 群聊且命中成员线索 |
@@ -72,7 +72,7 @@ V2 自己执行回复批次时，由 `EvidencePromptCompiler.compile`（`compani
 
 ## 4. 宿主核心链的不稳定背景段
 
-这些段默认进 `companion_background`；`stable=True` 的三个（表达偏好、对话附加提示、角色档案）改走 system。
+这些段默认进 `companion_background`；`stable=True` 的两个（表达偏好、对话附加提示）改走 system。角色档案不再进入对话 system，只作为后台任务的角色参考。
 
 | 段 | 位置 | 作用 | 前提 |
 | --- | --- | --- | --- |
@@ -102,7 +102,7 @@ V2 自己执行回复批次时，由 `EvidencePromptCompiler.compile`（`compani
 | `EXPRESSION_STYLE_INSTRUCTION` | `companion_v2/conversation/style_context.py:32` | 采纳的表达规则按 applicability 取用 | 存在 READY 的 `role.expression`/`expression_style_rule` 材料 |
 | `FILE_INSTRUCTION` | `companion_v2/conversation/media/understanding.py:58` | 附件正文是资料，不是发送者的陈述 | 材料里出现 `[文件阅读材料]` |
 | `FILE_INSTRUCTION` + 管理偏好 | `companion_v2/conversation/messages.py:573-578` | 同上，追加管理员文件描述偏好 | 同上且 `file_understanding_prompt` 非空 |
-| 角色档案 / 相识资料 | `companion_v2/conversation/messages.py:580-587` | 两个 profile owner 的 instruction | 有对应快照 |
+| 相识资料 | `companion_v2/conversation/messages.py:580-587` | 当前对话对象的关系资料，不是角色自我 | 有对应快照 |
 | `CALENDAR_INSTRUCTION` | `companion_v2/conversation/messages.py:588-589` + `date_context.py:43` | 日历材料只作环境背景，时段措辞以 `local_calendar_context` 为准 | `conversation.perception.calendar_enabled` |
 | `IMPORTANT_DATES_INSTRUCTION` | `messages.py:590-592` + `proactive/date_context.py:11` | 配置日期只说明临近 | 本轮有 `upcoming_important_dates` 材料 |
 | `ALMANAC_INSTRUCTION` | `messages.py:593-594` + `date_context.py:51` | 黄历只作氛围 | `almanac_enabled` |
@@ -124,21 +124,23 @@ V2 自己执行回复批次时，由 `EvidencePromptCompiler.compile`（`compani
 | `GENERATED_IMAGE_INSTRUCTION` / `SCREEN_INSTRUCTION` | `messages.py:657-679` | 生成图与屏幕原件不是用户照片 | 本轮有生成图/屏幕采集 |
 | 输出协议 | `companion_v2/adapters/astrbot/model_wire.py:17-26` | 最终只输出一个 JSON，附有效示例 | 每次批处理（`astrbot` 适配器） |
 | 流式追加契约 | `companion_v2/adapters/astrbot/reply_stream.py:12` | 边生成边发送时的字段顺序 | 开启流式回复 |
-| `FINAL_PROMPT_GUARD` | `companion_v2/model_gateway/prompt_composer.py:15` | 最后一个 system：只输出最终结果、材料只作资料 | 每次模型请求 |
+| `FINAL_PROMPT_GUARD` | `companion_v2/model_gateway/prompt_composer.py:15` | 同一条 system 的末尾：只输出最终结果、材料只作资料 | 每次模型请求 |
 | 模型失败提示 | `companion_v2/conversation/generation.py:31` | 失败时直接发给用户的固定文案（非提示词） | 模型失败 |
 
 ## 6. 统一装配顺序（所有模型任务共用）
 
 `compose_prompt`（`companion_v2/model_gateway/prompt_composer.py:33-54`）固定六层，按 `PROMPT_LAYER_ORDER`（同文件 `:6-13`）：
 
-1. `role_instruction`：角色/人格指令（V2 自有链来自捕获的 AstrBot 人格；后台任务来自任务自己的角色指令）。
+1. `role_instruction`：对话链使用捕获的 AstrBot 人格；后台任务优先使用自我页稳定档案（`TaskRoleReference`），档案为空时才回退到捕获的人格。`image_review` 保留固定安全审核指令。
 2. `request_instruction`：任务指令（例如回复链的证据契约、日记的 `COMMON + DIARY`、主动联系的业务规则）。
 3. `task_prompt`：任务档（`ModelTaskProfile` 的短提示，见第 7 节表格里“任务档”一列）＋管理员在该任务下保存的覆盖提示。
 4. `output_contract`：输出契约（回复链为 JSON 契约；其他任务为“只输出任务要求的 JSON”）。
 5. `capability_instruction`：本轮能力说明（工具目录、图片选择协议等）。
-6. `terminal_prompt_guard`：`FINAL_PROMPT_GUARD`，作为**最后一条 system 消息**追加在材料之后（`companion_v2/adapters/astrbot/model_wire.py:227`）。
+6. `terminal_prompt_guard`：`FINAL_PROMPT_GUARD`，放在**同一条 system 消息的末尾**（`companion_v2/model_gateway/prompt_composer.py:33-58`）。
 
-实际消息布局（`model_wire.py:152-227`）：system(1) → system(2..5) → user{`materials`/`deferred`/`unavailable`}（图片/音频/视频按原序作为多模态 part 附在这条 user 里）→ 工具往返 → system(6)。
+实际消息布局（`model_wire.py:145-160`）：system(1..6 合并为一条) → user{`materials`/`deferred`/`unavailable`}（图片/音频/视频按原序作为多模态 part 附在这条 user 里）→ 工具往返。合并是为了避开上游对多条 system 的过度内容过滤，角色、任务、契约与末尾约束的顺序不变。
+
+身份来源分工：对话链用 AstrBot 主人物人格，不重复注入自我页；后台任务用自我页稳定档案作为 `role_instruction`，档案为空时回退人格。这样 V1 的“日程专用角色设定优先、默认人格补缺”在 V2 里落成“自我页优先、人格兜底”，且不会把完整人格卡带进所有后台任务。
 
 ## 7. 任务档（ModelTaskProfile）一览
 

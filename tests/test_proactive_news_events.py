@@ -899,6 +899,16 @@ class DeepSeekNewsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1][0], "https://api.deepseek.com/v1/tools/fetch")
         self.assertEqual(calls[1][1]["json"], {"url": "https://news.example/story"})
 
+    async def test_legacy_tools_search_path_is_canonicalized(self):
+        responses = [{"results": []}]
+        calls = []
+        port = DeepSeekSearchNewsPort(api_key="fixture-secret", query="检索词",
+                                      search_url="https://api.deepseek.com/tools/search")
+        with patch("astrbot_host.news.aiohttp.ClientSession",
+                   side_effect=self.session_factory(responses, calls)):
+            await port.fetch()
+        self.assertEqual(calls[0][0], "https://api.deepseek.com/v1/tools/search")
+
     async def test_fetch_rejects_local_and_credentialed_urls_without_network_access(self):
         calls = []
         port = DeepSeekSearchNewsPort(api_key="fixture-secret", query="检索词")

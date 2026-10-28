@@ -7,7 +7,8 @@ from companion_v2.conversation.relay import plan_relay
 
 
 SETTINGS = {"enabled": True, "require_confirm": True, "max_text_chars": 500,
-            "core_target_id": "1001", "allowed_targets": ["2002", "3003"]}
+            "core_target_id": "1001", "allowed_targets": ["2002", "3003"],
+            "allowed_groups": ["5005"]}
 
 
 def ask(destination="2002", text="帮我带句话：今晚不打了", source="5005"):
@@ -35,6 +36,15 @@ class RelayPlanTests(unittest.TestCase):
         denied = plan_relay(ask("3003"), settings, actor_is_core=True)
         self.assertFalse(denied.allowed)
         self.assertEqual(denied.decision.code, "relay_target_not_allowed")
+
+    def test_group_plan_records_kind_and_mention(self):
+        request = RelayRequest("group", "5005", "群里说一声", "1001", "7777")
+        plan = plan_relay(request, SETTINGS, actor_is_core=True, actor_id="1001")
+        self.assertTrue(plan.allowed)
+        self.assertEqual(plan.destination_kind, "group")
+        self.assertEqual(plan.mention_id, "7777")
+        self.assertEqual(plan.audit["audience"], "admin_group")
+        self.assertEqual(plan.audit["destination_kind"], "group")
 
     def test_disabled_window_yields_no_destination(self):
         plan = plan_relay(ask(), {"enabled": False}, actor_is_core=True)

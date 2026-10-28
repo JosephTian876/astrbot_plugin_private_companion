@@ -7,7 +7,7 @@ import json
 from companion_v2.execution.models import encode, stamp
 
 from .models import (MAX_DOCUMENT_CHARS, PREFIX, empty_document, event_record, owner_key, peer_reply_record,
-                     prune, role_ref, valid_document, window_of)
+                     prune, reply_record, role_ref, valid_document, window_of)
 
 
 class RoleAwarenessStore:
@@ -90,12 +90,19 @@ class RoleAwarenessStore:
         self.write(connection, context, document)
         return document
 
-    def observe_reply(self, connection, context, at):
-        """Record that the role itself sent something in this window."""
+    def observe_reply(self, connection, context, at, text: str = "", event_key: str = ""):
+        """Record that the role itself sent something, with a bounded group reply topic."""
         document = self._load(connection, context) or empty_document(context, at)
+        events = list(document["events"])
+        key = str(event_key or "")[:256]
+        if window_of(context) == "group" and text:
+            duplicate = key and any(
+                item["kind"] == "reply" and item["event_key"] == key for item in events)
+            if not duplicate:
+                events = prune((*events, reply_record(context, at, text, key)), at)
         attention = dict(document["attention"])
         attention.update(last_reply_window=window_of(context), last_reply_at=stamp(at))
-        document = {**document, "attention": attention, "updated_at": stamp(at)}
+        document = {**document, "events": events, "attention": attention, "updated_at": stamp(at)}
         self.write(connection, context, document)
         return document
 

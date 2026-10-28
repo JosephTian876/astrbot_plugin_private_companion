@@ -28,6 +28,7 @@ TEXT_TYPES = ("text/plain",)
 
 INSTRUCTION = (
     "这是用户本轮发的链接的正文摘录，由插件当场抓取，可能不完整，也不代表已经核实过。"
+    "basis=deepseek_fetch 表示本地页面读不到后由 DeepSeek Fetch 返回的 Markdown 正文；"
     "status=full 时可以据此总结和引用，并说明来自这个链接；status=title_only 表示页面需要脚本或登录，"
     "只拿到标题，这时要说清楚只读到标题，不要补写正文内容；status=blocked/unsupported/error 时说明没读到、原因是什么，"
     "不要假装看过那一页。")
@@ -130,8 +131,8 @@ async def _read_limited(response) -> bytes:
     return b"".join(chunks)
 
 
-async def read_page(session, url: str, *, max_chars: int = MAX_CHARS,
-                    timeout: float = TIMEOUT_SECONDS) -> dict:
+async def _read_page_local(session, url: str, *, max_chars: int = MAX_CHARS,
+                           timeout: float = TIMEOUT_SECONDS) -> dict:
     """读一页；返回带状态的结果，任何失败都落到明确的状态而不是抛给回复链路。"""
     current, seen = url, set()
     for _ in range(MAX_REDIRECTS + 1):
@@ -179,8 +180,55 @@ async def read_page(session, url: str, *, max_chars: int = MAX_CHARS,
     return {"url": url, "status": "error", "reason": "too_many_redirects"}
 
 
+def _fetchable(url):
+    """Only send public HTTP(S) links to the optional DeepSeek Fetch service."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    return (parts.scheme in ("http", "https") and bool(parts.hostname)
+            and not parts.username and not parts.password)
+
+
+async def _read_with_fetch(fetch, url, max_chars):
+    if fetch is None or not _fetchable(url):
+        return None
+    parsed = urlsplit(url)
+    if not await asyncio.to_thread(address_allowed, parsed.hostname):
+        return None
+    try:
+        page = await asyncio.wait_for(fetch(url), timeout=TIMEOUT_SECONDS + 4)
+    except Exception:
+        return None
+    if not isinstance(page, dict):
+        return None
+    title = page.get("title")
+    content = page.get("content")
+    if type(title) is not str:
+        title = ""
+    if type(content) is not str or not content.strip():
+        return None
+    return _bounded({"url": url, "basis": "deepseek_fetch"}, title=title[:MAX_TITLE_CHARS],
+                    body=content, limit=max_chars)
+
+
+async def read_page(session, url: str, *, max_chars: int = MAX_CHARS,
+                    timeout: float = TIMEOUT_SECONDS, fetch=None) -> dict:
+    """Read locally first; DeepSeek Fetch is a fallback for JS/login/blocked pages.
+
+    Local HTML remains the default so a user's link is not sent to an external
+    service when the page can be read directly. A blocked/private URL never
+    falls back.
+    """
+    result = await _read_page_local(session, url, max_chars=max_chars, timeout=timeout)
+    if result.get("status") in ("full", "blocked"):
+        return result
+    fetched = await _read_with_fetch(fetch, url, max_chars)
+    return fetched or result
+
+
 async def read_links(urls, *, max_links: int = MAX_LINKS, max_chars: int = MAX_CHARS,
-                     timeout: float = TIMEOUT_SECONDS) -> list[dict]:
+                     timeout: float = TIMEOUT_SECONDS, fetch=None) -> list[dict]:
     """并发读多条链接；单条失败不影响其它。"""
     import aiohttp
     urls = tuple(url for url in urls or () if isinstance(url, str))[:max(1, int(max_links))]
@@ -189,7 +237,8 @@ async def read_links(urls, *, max_links: int = MAX_LINKS, max_chars: int = MAX_C
     client_timeout = aiohttp.ClientTimeout(total=timeout + 2)
     async with aiohttp.ClientSession(timeout=client_timeout) as session:
         return list(await asyncio.gather(
-            *(read_page(session, url, max_chars=max_chars, timeout=timeout) for url in urls),
+            *(read_page(session, url, max_chars=max_chars, timeout=timeout, fetch=fetch)
+              for url in urls),
             return_exceptions=False))
 
 
@@ -202,7 +251,7 @@ def _web_settings(application, context, at):
         return dict(DEFAULTS)
 
 
-def web_read_keyword_material(application):
+def web_read_keyword_material(application, fetch=None):
     """按链接触发：消息里出现网址且当前是主要陪伴对象的私聊时才读。"""
     from companion_v2.conversation.keyword_materials import KeywordMaterialSpec
     from companion_v2.expression.configuration import source_subject_allowed_for_context
@@ -215,7 +264,7 @@ def web_read_keyword_material(application):
             return {"state": "unavailable", "reason": "no_link"}
         pages = await read_links(urls, max_links=settings["max_links"],
                                  max_chars=settings["max_chars"],
-                                 timeout=settings["timeout_seconds"])
+                                 timeout=settings["timeout_seconds"], fetch=fetch)
         return {"state": "ok", "observed_at": (at or datetime.now(timezone.utc)).isoformat(),
                 "links": pages}
 

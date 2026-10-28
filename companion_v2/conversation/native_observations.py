@@ -284,7 +284,8 @@ class NativeConversationObservations:
                 awareness = getattr(self.messages, "cross_window", None)
                 if awareness_enabled and awareness is not None:
                     self._optional_observer(connection, "cross_window_reply", lambda: awareness.record_reply(
-                        connection, context, at, enabled=True))
+                        connection, context, at, text=record.payload,
+                        event_key=reference.source_id, enabled=True))
             return reference
 
     @staticmethod

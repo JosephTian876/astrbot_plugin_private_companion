@@ -10,7 +10,7 @@ from companion_v2.identity_policy.repository import PersistentIdentityDirectory
 from .cycle import DEFAULTS as CYCLE_DEFAULTS, validate_settings
 from .humanized import DEFAULTS as HUMANIZED_DEFAULTS, LIMITS as HUMANIZED_LIMITS
 from .humanized import validate_settings as validate_humanized
-from .settings_scope import PhysicalSettingsOwner, role_preference
+from .settings_scope import PRESENCE_FIELDS, PhysicalSettingsOwner, role_preference
 from companion_v2.agenda.planning_config import DEFAULTS as PLANNING_DEFAULTS, MAXIMUMS as PLANNING_MAXIMUMS
 from companion_v2.agenda.planning_config import WEATHER_MAX_AGE_MINIMUM
 from companion_v2.agenda.planning_config import validate_settings as validate_planning
@@ -93,6 +93,47 @@ def target_for(context):
     return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role, context.scope)
 
 
+def migrate_presence_to_role(runtime):
+    """Promote legacy window-scoped QQ presence switches to role defaults."""
+    from companion_v2.configuration.migrations import promote_values_to_role
+    fields = tuple(field for field in configuration_fields()
+                   if field.field_id.rsplit(".", 1)[-1] in PRESENCE_FIELDS)
+    return promote_values_to_role(runtime, fields)
+
+
+def ensure_window_presentation_grants(runtime, context, observed_at):
+    """Issue missing grants for a private window after role-level presence changes."""
+    if context.scope.kind is not ScopeKind.PRIVATE:
+        return
+    target = target_for(context)
+    fields = configuration_fields()
+    snapshot = StateConfigurationOwner(runtime).read(target, fields)
+    settings = {name: snapshot.fields[GROUP + "." + name].value for name in DEFAULTS}
+    identity = PersistentIdentityDirectory(runtime)
+    subject = context.actor.subject
+    by_action = {}
+    for option in ("typing_enabled", "presence_enabled", "online_status_enabled"):
+        for action in PERMISSIONS[option]:
+            by_action.setdefault(action, set()).add(option)
+    for action, options in by_action.items():
+        prefix = "state-grant:" + digest([target.key, subject, action]) + ":"
+        matching = tuple(grant for grant in identity.grants_for_subject(subject)
+                         if grant.grant_id.startswith(prefix) and grant.scope == target.scope)
+        active = tuple(grant for grant in matching if grant.state is GrantState.ACTIVE
+                       and grant.valid_from <= observed_at
+                       and (grant.expires_at is None or grant.expires_at > observed_at))
+        if not any(settings[name] for name in options):
+            for grant in active:
+                identity.revoke_grant(grant.grant_id, revoked_at=observed_at,
+                                      expected_revision=identity.revision)
+            continue
+        if matching:
+            continue
+        identity.issue_grant(grant_id=prefix + str(identity.revision), subject=subject,
+            scope=target.scope, capability=action, tier=AuthorizationTier.STANDARD,
+            valid_from=observed_at, expected_revision=identity.revision)
+
+
 def role_target_for(context):
     return ConfigTarget(context.scope.installation_id, ConfigLayer.ROLE, context.role_binding.role,
                         bot_id=context.scope.bot_id)
@@ -142,7 +183,7 @@ class StateConfigurationOwner(PhysicalSettingsOwner):
             names = {key.rsplit(".", 1)[-1] for key in (*changes, *reset)}
             if target.layer is ConfigLayer.ROLE and any(not role_preference(name) for name in names):
                 raise ConfigurationError("state_configuration_scope_not_supported",
-                    "platform presentation settings belong to the selected window")
+                    "typing presentation settings belong to the selected window")
             participant = None
             if target.layer is ConfigLayer.WINDOW:
                 route = PersonaDirectory(self.runtime).resolve(target.scope, observed_at=observed_at)

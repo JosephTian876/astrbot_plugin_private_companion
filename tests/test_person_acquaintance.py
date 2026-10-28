@@ -114,6 +114,20 @@ class PersonAcquaintanceTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((payload["display_name"], payload["name_basis"]), ("明哥", "platform"))
         self.assertEqual(payload["msg_count"], 1)
 
+    async def test_known_names_include_cards_from_other_groups_without_group_ids(self):
+        from types import SimpleNamespace as NS
+        from companion_v2.foundation.refs import ScopeKind
+        from companion_v2.memory.person.models import known_names
+        document = empty_document()
+        document["platform_nickname"] = "小明"
+        document["group_cards"] = {
+            "300": {"card": "明哥", "updated_at": "2026-01-01T00:00:00+00:00"},
+            "301": {"card": "另一个群名", "updated_at": "2026-01-02T00:00:00+00:00"},
+        }
+        names = known_names(document, NS(kind=ScopeKind.GROUP, native_scope_id="300"))
+        self.assertEqual(names, ("明哥", "另一个群名", "小明"))
+        self.assertNotIn("301", json.dumps(names, ensure_ascii=False))
+
     async def test_card_is_injected_for_private_owners_too(self):
         await self.start_host()
         context, batch = await self.accepted(identifier="person-private-1", text="晚上好")
@@ -252,6 +266,8 @@ class PersonAcquaintanceTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fields["person.acquaintance_enabled"].default, True)
         self.assertEqual(fields["person.acquaintance_card_chars"].default, 1024)
         self.assertEqual(fields["person.cross_window_awareness_enabled"].default, True)
+        self.assertEqual(fields["person.cross_window_continuity_enabled"].default, True)
+        self.assertEqual(fields["person.cross_window_continuity_minutes"].default, 30)
         self.assertEqual(fields["person.cross_window_attention_wait_seconds"].default, 3)
         self.assertEqual(fields["person.cross_window_peer_minutes"].default, 5)
         self.assertEqual(fields["person.cross_window_peer_reply_minutes"].default, 60)
@@ -259,6 +275,7 @@ class PersonAcquaintanceTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         values = AcquaintanceSettings(self.app.configuration).read(context)
         self.assertEqual(values["person.acquaintance_enabled"], True)
         self.assertEqual(values["person.cross_window_max_items"], 4)
+        self.assertEqual(values["person.cross_window_continuity_minutes"], 30)
         self.assertEqual(values["person.cross_window_peer_reply_minutes"], 60)
 
 

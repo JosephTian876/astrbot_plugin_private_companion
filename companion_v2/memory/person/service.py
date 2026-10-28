@@ -14,7 +14,7 @@ from companion_v2.execution.models import TaskError, encode, require, stamp
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.memory.models import text
 from .access import OWNER, card_id, owner_for_subject, owner_key, resolve_subject
-from .models import KIND, MAX_GROUP_CARDS, aggregate, bind_route, clean_name, count_input, display_name, empty_document
+from .models import KIND, MAX_GROUP_CARDS, aggregate, bind_route, clean_name, count_input, display_name, empty_document, known_names
 
 
 UPSERT = """INSERT INTO memory_views VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
@@ -106,7 +106,9 @@ class PersonAcquaintance:
     def projection(self, context, document, *, budget, with_contexts=False):
         name, basis = display_name(document, context.scope)
         summary = aggregate(document)
-        payload = {"display_name": name, "name_basis": basis, "msg_count": summary["msg_count"],
+        payload = {"display_name": name, "name_basis": basis,
+                   "known_names": list(known_names(document, context.scope)),
+                   "msg_count": summary["msg_count"],
                    "active_days": summary["active_days"], "first_seen": summary["first_seen"],
                    "last_seen": summary["last_seen"]}
         if with_contexts:
@@ -114,7 +116,7 @@ class PersonAcquaintance:
                                          "last_seen": entry["last_seen"]}
                                    for key, entry in sorted(document["contexts"].items())}
         while len(encode(payload).encode("utf-8")) > budget and payload:
-            for key in ("contexts", "first_seen", "last_seen", "display_name", "name_basis"):
+            for key in ("contexts", "known_names", "first_seen", "last_seen", "display_name", "name_basis"):
                 if key in payload:
                     del payload[key]
                     break

@@ -42,30 +42,114 @@ async def send_text_notice(controller, route, *, text, transport=None):
             "receipt": digest(["text-notice.v1", route.platform_id, route.login, route.peer, str(text)])}
 
 
-async def send_private_notice(controller, event, *, text, route, transport=None):
-    """平台直发一句纯文本；返回有界回执，供诊断与"为什么回了这个人"查证。
-
-    ``route`` 需要 ``platform_id`` / ``login``（self_id）/ ``peer``（对方 user_id）
-    与可选的 ``client``；调用方负责把这三样从**已认证的**事件里取出来。
-    """
+async def send_group_notice(controller, route, *, text, mention_id="", transport=None):
+    """Send one bounded group relay through the authenticated account route."""
     if not text or not str(text).strip():
         return {"state": "skipped", "reason": "blank_line"}
-    api = transport if transport is not None else _transport(controller, route)
+    peer = getattr(route, "peer", None)
+    if not isinstance(peer, str) or not peer.strip():
+        return {"state": "failed", "reason": "group_route_invalid"}
+    mention = str(mention_id or "").strip()
+    if mention and not mention.isdigit():
+        return {"state": "failed", "reason": "mention_target_invalid"}
+    platform = getattr(route, "platform", None)
+    platform_name = str(getattr(route, "platform_name", "") or "").lower()
+    raw_onebot = peer.isdigit() and (not platform_name or platform_name in {"aiocqhttp", "qq", "onebot"})
+
+    if raw_onebot:
+        api = transport if transport is not None else _transport(controller, route)
+        message = [{"type": "text", "data": {"text": str(text)}}]
+        if mention:
+            message = [{"type": "at", "data": {"qq": mention}},
+                       {"type": "text", "data": {"text": " "}}, *message]
+        try:
+            result = await api.call_action("send_group_msg", self_id=route.login,
+                                           group_id=int(peer), message=message)
+        except Exception:  # noqa: BLE001 - platform call failure is not replayed
+            return {"state": "failed", "reason": "platform_call_failed"}
+        identifier = result.get("message_id") if isinstance(result, Mapping) else None
+        return {"state": "delivered", "message_id": identifier,
+                "receipt": digest(["group-notice.v1", route.platform_id, route.login, peer,
+                                   mention, str(text)])}
+
+    # QQ Official and other AstrBot-native platforms use their own session
+    # transport.  A normal return means the platform accepted the send; the
+    # synthetic receipt is deterministic and is never used to replay.
+    if platform is None or not callable(getattr(platform, "send_by_session", None)):
+        return {"state": "failed", "reason": "group_transport_unavailable"}
     try:
-        result = await api.call_action("send_private_msg", self_id=route.login, user_id=int(route.peer),
-                                      message=[{"type": "text", "data": {"text": str(text)}}])
-    except Exception:  # noqa: BLE001 - 平台调用失败只记状态，不重放
+        from astrbot.core.message.components import At, Plain
+        from astrbot.core.message.message_event_result import MessageChain
+        from astrbot.core.platform.message_session import MessageSession
+        from astrbot.core.platform.message_type import MessageType
+        chain = []
+        if mention:
+            chain.extend([At(qq=mention), Plain(" ")])
+        chain.append(Plain(str(text)))
+        session = MessageSession(route.platform_id, MessageType.GROUP_MESSAGE, peer)
+        await platform.send_by_session(session, MessageChain(chain))
+    except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
         return {"state": "failed", "reason": "platform_call_failed"}
-    identifier = result.get("message_id") if isinstance(result, Mapping) else None
-    return {"state": "delivered", "message_id": identifier,
-            "receipt": digest(["private-notice.v1", route.platform_id, route.login, route.peer, str(text)])}
+    return {"state": "delivered", "message_id": "session:" + digest(
+        ["group-session-notice.v1", route.platform_id, route.login, peer, mention, str(text)]),
+        "receipt": digest(["group-session-notice.v1", route.platform_id, route.login,
+                           peer, mention, str(text)])}
+
+
+async def send_private_notice(controller, event, *, text, route, transport=None):
+    """Send one bounded private notice through the authenticated account route."""
+    if not text or not str(text).strip():
+        return {"state": "skipped", "reason": "blank_line"}
+    peer = getattr(route, "peer", None)
+    if not isinstance(peer, str) or not peer.strip():
+        return {"state": "failed", "reason": "private_route_invalid"}
+    platform_name = str(getattr(route, "platform_name", "") or "").lower()
+    raw_onebot = peer.isdigit() and (not platform_name or platform_name in {"aiocqhttp", "qq", "onebot"})
+    if raw_onebot:
+        api = transport if transport is not None else _transport(controller, route)
+        try:
+            result = await api.call_action("send_private_msg", self_id=route.login, user_id=int(peer),
+                                          message=[{"type": "text", "data": {"text": str(text)}}])
+        except Exception:  # noqa: BLE001 - platform call failure is not replayed
+            return {"state": "failed", "reason": "platform_call_failed"}
+        identifier = result.get("message_id") if isinstance(result, Mapping) else None
+        return {"state": "delivered", "message_id": identifier,
+                "receipt": digest(["private-notice.v1", route.platform_id, route.login, peer, str(text)])}
+
+    platform = getattr(route, "platform", None)
+    if platform is None or not callable(getattr(platform, "send_by_session", None)):
+        return {"state": "failed", "reason": "private_transport_unavailable"}
+    try:
+        from astrbot.core.message.components import Plain
+        from astrbot.core.message.message_event_result import MessageChain
+        from astrbot.core.platform.message_session import MessageSession
+        from astrbot.core.platform.message_type import MessageType
+        await platform.send_by_session(MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer),
+                                       MessageChain([Plain(str(text))]))
+    except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
+        return {"state": "failed", "reason": "platform_call_failed"}
+    receipt = digest(["private-session-notice.v1", route.platform_id, route.login, peer, str(text)])
+    return {"state": "delivered", "message_id": "session:" + receipt, "receipt": receipt}
+
+
+def prepare_relay_transport(controller, route):
+    """Validate the pinned native route before an effectful dispatch barrier."""
+    peer = getattr(route, "peer", None)
+    if not isinstance(peer, str) or not peer.strip():
+        raise TaskError("host_notice_route_invalid", "relay destination is empty")
+    if getattr(route, "kind", None) is ScopeKind.PRIVATE and not peer.isdigit():
+        raise TaskError("host_notice_route_invalid", "private destination must be a numeric account ID")
+    platform_name = str(getattr(route, "platform_name", "") or "").lower()
+    if platform_name not in {"", "aiocqhttp", "qq", "onebot"}:
+        if getattr(route, "platform", None) is None:
+            raise TaskError("host_notice_route_invalid", "native platform transport is unavailable")
+        return None
+    return _transport(controller, route)
 
 
 def prepare_private_notice_transport(controller, route):
-    """Validate the pinned native route before an effectful dispatch barrier."""
-    if not isinstance(getattr(route, "peer", None), str) or not route.peer.isdigit():
-        raise TaskError("host_notice_route_invalid", "private destination must be a numeric account ID")
-    return _transport(controller, route)
+    """Backward-compatible private route validator."""
+    return prepare_relay_transport(controller, route)
 
 
 def _transport(controller, route):

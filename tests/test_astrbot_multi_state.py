@@ -58,7 +58,7 @@ class MultiStateTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
     async def configure(self, target="first", role="role-a", *, key="configure", **changes):
         before = await self.status(target, role)
         return self.ok(await self.request(target, role, data=dict(action="configure", operation_key=key,
-            edit_token=before["edit_token"], changes=changes)))
+            edit_token=before["edit_token"], role_edit_token=before["role_edit_token"], changes=changes)))
 
     async def state_command(self, target="first", role="role-a", *, action="state.write", key="write", data=None):
         state = (await self.status(target, role))["state"]
@@ -83,7 +83,7 @@ class MultiStateTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any("/targets/group-" in path and (path.endswith("/state") or "/state/" in path) for path in self.routes))
         for target in ("first", "second"):
             for role in ("role-a", "role-b"):
-                self.assertEqual((await self.status(target, role))["presentation"], {"state": "preview"})
+                self.assertEqual((await self.status(target, role))["presentation"], {})
 
     async def test_weather_route_is_scoped_to_selected_private_role(self):
         app = await self.initialize()
@@ -168,7 +168,8 @@ class MultiStateTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
     async def test_authentication_and_body_or_query_target_overrides_are_rejected(self):
         await self.initialize()
         before = await self.status()
-        body = dict(action="configure", operation_key="enable", edit_token=before["edit_token"], changes={"enabled": True})
+        body = dict(action="configure", operation_key="enable", edit_token=before["edit_token"],
+                    role_edit_token=before["role_edit_token"], changes={"enabled": True})
         for username in (None, "", "api_key:123"):
             self.assertEqual((await self.request(data=body, username=username))["data"]["code"], "dashboard_identity_required")
         for extra in ({"target_id": "second"}, {"role_id": "role-b"}, {"context": {}}, {"operator": "admin"}):
@@ -212,12 +213,13 @@ class MultiStateTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         await self.initialize()
         first, second = await self.status(), await self.status("second", "role-b")
         body = dict(action="configure", operation_key="parallel", edit_token=first["edit_token"],
-                    changes={"maintenance_minutes": 17})
+                    role_edit_token=first["role_edit_token"], changes={"maintenance_minutes": 17})
         entered, release = asyncio.Event(), asyncio.Event()
         slow = asyncio.create_task(self.request(data=body, gate=(entered, release)))
         try:
             await asyncio.wait_for(entered.wait(), 2)
             self.ok(await self.request("second", "role-b", data=body | {"edit_token": second["edit_token"],
+                                                                       "role_edit_token": second["role_edit_token"],
                                                                        "changes": {"maintenance_minutes": 43}}))
             self.assertEqual((await self.status("second", "role-b"))["settings"]["maintenance_minutes"], 43)
         finally:
@@ -229,6 +231,7 @@ class MultiStateTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_shared_scheduler_maintains_only_current_personas_and_manual_target(self):
         self.native.selections["qq-second"] = "second"
+        self.window_personas["qq-second:FriendMessage:200"] = "second"
         app = await self.initialize()
         for target, role in self.paths:
             await self.configure(target, role, enabled=True)
@@ -251,7 +254,7 @@ class MultiStateTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.ok(await self.request("second", "role-b", data=body))["replayed"])
         self.assertEqual(app.role_state.records.get(contexts[0], "current")["revision"], 1)
         self.assertEqual(len(self.native.provider.client.state.calls), 3)
-        self.assertIsNone(app.presence)
+        self.assertIsNotNone(app.presence)
         self.assertTrue(all(not p.client._api._wsr_api.calls for p in self.native.platforms.values()))
         await self.until(lambda: not app.state_maintenance.workers)
         await self.controller.terminate()
@@ -279,6 +282,10 @@ class MultiStateTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         stale = await self.state_command(key="old-token", data=state_data())
         for selected, role in (("second", "role-b"), ("original", "role-a")):
             self.native.selections["qq-main"] = selected
+            self.window_personas["qq-main:FriendMessage:200"] = selected
+            self.controller.session_topology.update_persona_selection_snapshot(
+                "qq-main:FriendMessage:200", "100", "bot-a", selected, role,
+                self.native.conversations["qq-main"])
             await self.accepted(identifier=selected)
             if role == "role-b":
                 self.ok(await self.request("first", role, data=await self.state_command("first", role, data=state_data(hunger="第二人格的记录"))))
@@ -313,14 +320,15 @@ class MultiStateTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.controller.start()).is_success)
         contexts = [self.controller.authority.context(target, "role-a") for target in ("first", "second")]
         await self.until(lambda: all(app.presence.results_for(c) for c in contexts))
-        for context, target, expected in zip(contexts, ("first", "second"), ("accepted", "not_started")):
+        for context, target, expected in zip(contexts, ("first", "second"), ("accepted", "accepted")):
             results = (await self.status(target))["presentation"]
             self.assertEqual(set(results), {app.presence.account(context)})
             self.assertEqual(next(iter(results.values()))["state"], expected)
             self.assertEqual((await self.status(target, "role-b"))["presentation"], {})
         first_api = self.native.platforms["qq-main"].client._api._wsr_api
+        second_api = self.native.platforms["qq-second"].client._api._wsr_api
         self.assertEqual([action for action, _ in first_api.calls], ["set_diy_online_status"])
-        self.assertEqual(self.native.platforms["qq-second"].client._api._wsr_api.calls, [])
+        self.assertEqual([action for action, _ in second_api.calls], ["set_diy_online_status"])
         await self.controller.terminate()
         self.controller = self.make_controller(multi_config(delivery_mode="onebot_private"))
         self.register()
@@ -329,6 +337,7 @@ class MultiStateTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         app = self.controller.session.application
         await self.until(lambda: all(app.presence.results_for(c) for c in contexts))
         self.assertEqual(len(first_api.calls), 1)
+        self.assertEqual(len(second_api.calls), 1)
         self.assertEqual(next(iter((await self.status())["presentation"].values()))["state"], "accepted")
 
     async def test_online_mode_configuration_reaches_the_selected_onebot_account(self):
@@ -342,11 +351,11 @@ class MultiStateTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: bool(app.presence.results_for(context)))
         first_api = self.native.platforms["qq-main"].client._api._wsr_api
         self.assertEqual(first_api.calls, [("set_online_status", {
-            "self_id": "100", "status": 50, "ext_status": 0, "battery_status": 0})])
+            "self_id": "100", "status": 10, "ext_status": 0, "battery_status": 0})])
         self.assertEqual(self.native.platforms["qq-second"].client._api._wsr_api.calls, [])
         status = await self.status()
         self.assertEqual(status["presentation_diagnostics"]["online_status"]["state"], "recorded")
-        self.assertEqual(status["presentation_diagnostics"]["online_status"]["desired"]["mode"], "busy")
+        self.assertEqual(status["presentation_diagnostics"]["online_status"]["desired"]["mode"], "online")
         self.assertEqual(next(iter(status["presentation"].values()))["state"], "accepted")
 
     async def test_partial_registration_rolls_back_and_old_instance_keeps_replacement_routes(self):
@@ -414,6 +423,10 @@ class MultiStateTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         await self.configure(role="role-b", key="competing", presence_enabled=True)
         await self.until(lambda: app.presence.results_for(original).get(app.presence.account(original), {}).get("state") == "blocked")
         self.native.selections["qq-main"] = "second"
+        self.window_personas["qq-main:FriendMessage:200"] = "second"
+        self.controller.session_topology.update_persona_selection_snapshot(
+            "qq-main:FriendMessage:200", "100", "bot-a", "second", "role-b",
+            self.native.conversations["qq-main"])
         await self.controller.session.synchronize(self.controller.settings.target("first"))
         await app.presence._sync_status()
         self.assertEqual((await self.status(role="role-b"))["presentation"], {})

@@ -105,6 +105,24 @@ test("滚动时间线标出空档长度，并在数据不完整时停止推断",
   assert.doesNotMatch(partial,/class="home-agenda-gap"/);
 });
 
+test("节目单把安排标题和说明放在时间之前，短空档不占主列表", () => {
+  const state=status([
+    event("早已过去","2026-09-30T01:00:00Z","2026-09-30T01:30:00Z"),
+    event("傍晚安排","2026-09-30T10:00:00Z","2026-09-30T11:00:00Z"),
+    event("稍后安排","2026-09-30T04:15:00Z","2026-09-30T04:45:00Z"),
+  ]);
+  const activities=[{activity_id:"active",state:"active",title:"正在阅读",started_at:"2026-09-30T03:30:00Z",due_at:"2026-09-30T05:00:00Z",checkpoint:"读完这一章"}];
+  const html=renderSchedule({now,state,life:life(activities)});
+  assert.match(html,/home-agenda-program-meta/);
+  assert.match(html,/今日上演/);
+  assert.match(html,/已经落幕/);
+  assert.match(html,/counter-reset:agenda-act 1/);
+  assert.match(html,/正在阅读/);
+  assert.match(html,/读完这一章/);
+  assert.doesNotMatch(html,/30分钟/,"短空档不应占主列表");
+  assert.doesNotMatch(html,/今天已结束/);
+});
+
 test("共享睡眠以确认标记睡眠中，跨日计划有日期，并说明缺少执行窗口", () => {
   const state=status([]);
   state.body_sleep={state:"sleeping",started_at:"2026-09-30T00:00:00Z",planned_wake_at:"2026-09-30T03:00:00Z"};

@@ -23,6 +23,7 @@ class PresenceCoordinator:
         self.typing, self.suppressed, self.contexts, self.results = {}, {}, {}, {}
         self.native_replies, self._typing_wakes = {}, {}
         self._result_contexts = {}
+        self._active_routes = {}
         self.status_worker = None
         self.closed = False
 
@@ -35,8 +36,40 @@ class PresenceCoordinator:
     def route(cls, context):
         return digest([cls.account(context), context.scope.native_scope_id])
 
-    def bind(self, context):
+    @staticmethod
+    def role_key(context):
+        scope, role = context.scope, context.role_binding.role
+        return digest([scope.installation_id, scope.platform, scope.bot_id, scope.account_id,
+                       role.installation_id, role.subject_id])
+
+    @classmethod
+    def result_key(cls, context):
+        return digest([cls.role_key(context), context.role_binding.revision])
+
+    def bind(self, context, *, active=True):
+        route = self.route(context)
+        previous = self._active_routes.get(route)
+        retired = {previous} if active and previous is not None and previous != context.key else set()
+        retired_receipt_keys = ({key for key, known in self.contexts.items()
+                                 if self.route(known) == route}
+                                if retired else set())
+        for key in retired:
+            self.contexts.pop(key, None)
+        if retired:
+            # A receipt belongs to the persona that owned the route when it was
+            # produced.  Remove all old route keys so a switched-in persona
+            # cannot inherit an old conflict or acknowledgement from that route.
+            for result_key, context_keys in tuple(self._result_contexts.items()):
+                remaining = frozenset(context_keys.difference(retired_receipt_keys))
+                if remaining:
+                    self._result_contexts[result_key] = remaining
+                else:
+                    self._result_contexts.pop(result_key, None)
+                    self.results.pop(result_key, None)
+        self.contexts.pop(context.key, None)
         self.contexts[context.key] = context
+        if active:
+            self._active_routes[route] = context.key
 
     def begin_native_reply(self, context, turn_id):
         """Hold typing from authenticated intake through the final native send.
@@ -110,10 +143,20 @@ class PresenceCoordinator:
         """An account or native route alone does not identify the original persona."""
         results = {key: dict(result) for key, result in self.results.items()
                    if context.key in self._result_contexts.get(key, ())}
+        result_key = self.result_key(context)
+        for key, result in self.results.items():
+            if key in results or key.startswith("typing:"):
+                continue
+            if any((known := self.contexts.get(context_key)) is not None
+                   and self.result_key(known) == result_key
+                   for context_key in self._result_contexts.get(key, ())):
+                results[key] = dict(result)
         account = self.account(context)
         if account not in results:
             latest = self.latest_status(context)
-            if latest and latest["context_key"] == context.key:
+            known = self.contexts.get(latest["context_key"]) if latest else None
+            if latest and (latest["context_key"] == context.key
+                           or known is not None and self.result_key(known) == result_key):
                 results[account] = self.stored_result(latest)
         return results
 
@@ -344,9 +387,11 @@ class PresenceCoordinator:
     def _candidates(self):
         candidates = {}
         for context in tuple(self.contexts.values()):
-            if self._status_available(context):
-                candidates.setdefault(self.account(context), []).append(context)
-        return candidates
+            if not self._status_available(context):
+                continue
+            roles = candidates.setdefault(self.account(context), {})
+            roles[self.role_key(context)] = context
+        return {account: tuple(roles.values()) for account, roles in candidates.items()}
 
     def _status_available(self, context):
         for option in ("presence_enabled", "online_status_enabled"):
@@ -361,10 +406,13 @@ class PresenceCoordinator:
         candidates = self._candidates()
         for account, contexts in candidates.items():
             if len(contexts) != 1:
-                self._record_result(account, {"state": "blocked", "code": "multiple_presence_owners"},
-                                    *(context.key for context in contexts))
+                owned = tuple(context.key for context in self.contexts.values()
+                              if self.account(context) == account)
+                self._record_result(account, {"state": "blocked", "code": "multiple_presence_owners"}, *owned)
                 continue
             context = contexts[0]
+            same_role = tuple(item.key for item in self.contexts.values()
+                              if self.result_key(item) == self.result_key(context))
             desired = self.desired(context)
             if desired is None:
                 continue
@@ -372,7 +420,12 @@ class PresenceCoordinator:
             latest = self.latest_status(context)
             if latest and latest["desired_hash"] == desired_hash:
                 # A previous account result still belongs to its original persona.
-                self._record_result(account, self.stored_result(latest), latest["context_key"])
+                latest_context = self.contexts.get(latest["context_key"])
+                latest_same_role = (latest_context is not None
+                                    and self.result_key(latest_context) == self.result_key(context))
+                keys = ((latest["context_key"], *same_role) if latest_same_role
+                        else (latest["context_key"],))
+                self._record_result(account, self.stored_result(latest), *keys)
                 continue  # ACK, failure and unknown are all persisted; never pulse the same account status.
             operation = "presence-" + digest([account, context.key, desired, latest["operation_id"] if latest else None])
             if self.desired(context) != desired:
@@ -386,7 +439,9 @@ class PresenceCoordinator:
                     if self.desired(context) != desired:
                         raise TaskError("presence_changed", "original public status changed")
                     for other in self.contexts.values():
-                        if other.key != context.key and self.account(other) == account and self._status_available(other):
+                        if (other.key != context.key and self.account(other) == account
+                                and self.role_key(other) != self.role_key(context)
+                                and self._status_available(other)):
                             raise TaskError("multiple_presence_owners", "account has competing status owners")
                 action = (self.port.custom_status(context, desired["wording"], before_dispatch=current)
                           if "wording" in desired else
@@ -394,11 +449,11 @@ class PresenceCoordinator:
                 result = await asyncio.wait_for(action, timeout=3)
             except BaseException as error:
                 result = {"state": "unknown", "code": "presence_interrupted"}
-                self._record_result(account, self._receipt(operation, result), context.key)
+                self._record_result(account, self._receipt(operation, result), *same_role)
                 if isinstance(error, asyncio.CancelledError):
                     raise
             else:
-                self._record_result(account, self._receipt(operation, result), context.key)
+                self._record_result(account, self._receipt(operation, result), *same_role)
 
     def _receipt(self, operation, result):
         with self.runtime.transaction() as connection:
@@ -421,6 +476,7 @@ class PresenceCoordinator:
     async def close(self):
         self.closed = True
         self.native_replies.clear()
+        self._active_routes.clear()
         self.cancel_running()
         workers = [w for _, _, w in self.typing.values()] + ([self.status_worker] if self.status_worker else [])
         if workers:

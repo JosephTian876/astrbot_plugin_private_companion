@@ -44,11 +44,12 @@ def compose_prompt(*, role_instruction, request_instruction, task_prompt, output
     body = request_instruction + "\n" + task_prompt + "\n" + output_contract
     if capability_instruction:
         body += "\n" + capability_instruction
+    # AstrBot upstream content filtering scans multi-system requests much more
+    # aggressively. Keep the exact same instruction order, but put role, body
+    # and the terminal guard in one system message; the guard remains last.
+    system_text = "\n\n".join(part for part in (role_instruction, body, final_guard) if part)
     return PromptComposition(
         layers=layers,
-        system_messages=(
-            {"role": "system", "content": role_instruction},
-            {"role": "system", "content": body},
-        ),
+        system_messages=({"role": "system", "content": system_text},),
         final_instruction=layers[-1].content,
     )

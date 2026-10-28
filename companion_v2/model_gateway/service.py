@@ -13,6 +13,7 @@ from companion_v2.conversation.foreground import PromptRequest
 from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require, stamp
 from companion_v2.execution.runner import TaskRun
 from companion_v2.execution.service import TaskSupervisor, outcome
+from companion_v2.role_profile.task_reference import TaskRoleReference
 from companion_v2.sources.repositories import SourceRepository
 
 from .budget import BudgetDeferral, BudgetLedger
@@ -25,6 +26,21 @@ from .response_diagnostics import checked_response_diagnostics
 
 logger = getLogger(__name__)
 PROACTIVE_PROMPT_SNAPSHOT_LIMIT = 10
+# Background tasks use the self-page role profile as their role reference.
+# Conversation and image safety review keep their own captured instructions.
+TASK_ROLE_REFERENCE_KINDS = frozenset({
+    "conversation.poke_reply",
+    "proactive.compose", "proactive.judge",
+    "role.journal.diary", "role.journal.dream", "role.journal.derive", "role.journal.select",
+    "role.self_review", "role.growth.progress",
+    "role.expression.learn", "role.expression.review", "role.expression.contact_review",
+    "role.state.maintain", "role.reading.consume",
+    "calendar.plan", "memory.reflect",
+    "screen.interpretation",
+    "content.authoring.draft",
+    "conversation.image_narration", "conversation.video_narration",
+    "conversation.context_image_caption",
+})
 
 
 def _redact_prompt_media(value):
@@ -57,9 +73,17 @@ class LocalModelGateway:
         self.ledger = ledger
         self.tasks = tasks
         self.runtime = tasks.runtime
+        self.role_reference = TaskRoleReference(self.runtime)
 
     async def generate(self, run: TaskRun, request: PromptRequest) -> ModelCompletion:
         return await self.open_session(run, request).generate(request)
+
+    def _task_role_request(self, run: TaskRun, request: PromptRequest) -> PromptRequest:
+        """Use the self page as the task role, with the captured persona as fallback."""
+        if run.task.spec.kind not in TASK_ROLE_REFERENCE_KINDS:
+            return request
+        reference = self.role_reference.instruction(run.task.spec.context, self.tasks.now())
+        return replace(request, role_instruction=reference) if reference else request
 
     def open_session(self, run: TaskRun, request: PromptRequest, *, tools: tuple[ToolSpec, ...] = (),
                      tool_filters: tuple[dict, ...] = ()):
@@ -71,6 +95,7 @@ class LocalModelGateway:
             run.validate()
             if connection.execute("SELECT 1 FROM model_requests WHERE task_id = ?", (run.task.task_id,)).fetchone():
                 raise TaskError("model_request_already_started", "inspect the original model calls instead of regenerating")
+            request = self._task_role_request(run, request)
             plan = self.router.resolve(run, request)
             if tools:
                 if any("tools" not in provider.capabilities for provider in plan.providers):

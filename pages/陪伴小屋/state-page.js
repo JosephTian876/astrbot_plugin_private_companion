@@ -252,12 +252,12 @@ window.CompanionStatePage = (() => {
     weather:"让长期安排参考所在地实况；天气凭据由宿主管理。",
     datetime:"查看角色当地时间与日期，设置小屋时区与对话历法背景。",
     patrol:"每天在设定时刻巡视角色状态，保留一段时间的记录。",
-    presentation:"在 QQ 上展示「正在输入」与自定义短状态，需授权通过。",
+    presentation:"正在输入按当前私聊窗口，QQ 在线状态与自定义短状态按角色共享，需授权通过。",
   };
   /* 右端「生效范围」胶囊：与 workspaceOverview 的 scope 保持一致。 */
   const featureScopes={
     energy:"当前人格",health:"当前人格",hunger:"当前人格",sleep:"当前角色 · 共享作息",cycle:"当前人格 · 共享模拟",
-    busy:"只读",location:"只读",mood:"当前人格 · 跨窗口共享",planning:"当前角色 · 私聊隔离",weather:"当前角色 · 私聊共享",datetime:"当前人格",patrol:"当前人格",presentation:"当前 QQ 窗口",
+    busy:"只读",location:"只读",mood:"当前人格 · 跨窗口共享",planning:"当前角色 · 私聊隔离",weather:"当前角色 · 私聊共享",datetime:"当前人格",patrol:"当前人格",presentation:"当前角色 · QQ 展示",
   };
   function openFeatureEditor(feature) {
     const kind=featureEditors[feature];

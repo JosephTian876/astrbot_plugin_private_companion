@@ -55,15 +55,22 @@ def describe_presentation(app, context, *, settings, effective):
                 status["state"] = "blocked" if intent["reason"] != "presence_no_public_wording" else "idle"
             elif intent_field not in desired:
                 status.update(state="idle", desired=None, reason=None)
-            elif context.key not in coordinator.contexts:
-                status.update(state="waiting", reason="presence_context_unbound")
             else:
-                latest = coordinator.latest_status(context)
-                if latest and latest["desired_hash"] == coordinator.intent_hash(desired):
-                    # Only expose the existence of account deduplication across personas.
-                    status["state"] = "recorded" if latest["context_key"] == context.key else "deduplicated"
+                role = coordinator.role_key(context)
+                result_key = coordinator.result_key(context)
+                bound = tuple(item for item in coordinator.contexts.values()
+                              if item.key == context.key or coordinator.role_key(item) == role)
+                if not bound:
+                    status.update(state="waiting", reason="presence_context_unbound")
                 else:
-                    status["state"] = "waiting"
+                    latest = coordinator.latest_status(context)
+                    if latest and latest["desired_hash"] == coordinator.intent_hash(desired):
+                        # Same-role windows share one account-level presentation result.
+                        known = coordinator.contexts.get(latest["context_key"])
+                        same_role = known is not None and coordinator.result_key(known) == result_key
+                        status["state"] = "recorded" if latest["context_key"] == context.key or same_role else "deduplicated"
+                    else:
+                        status["state"] = "waiting"
         except TaskError as error:
             status.update(state="blocked", reason=error.code)
         return status

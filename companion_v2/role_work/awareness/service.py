@@ -13,6 +13,8 @@ are deliberately asymmetric:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
+import unicodedata
 
 from companion_v2.foundation.refs import ScopeKind, ScopeRef, SourceRef, VersionRef, normalize_utc
 
@@ -26,6 +28,31 @@ def _when(value):
     except (TypeError, ValueError):
         return None
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+CONTINUITY_SIMILARITY = 0.62
+
+
+def _normalized_topic(value):
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return "".join(char for char in normalized if char.isalnum())
+
+
+def _topic_similarity(left, right):
+    """Cheap deterministic near-duplicate score for short cross-window text."""
+    left, right = _normalized_topic(left), _normalized_topic(right)
+    if len(left) < 4 or len(right) < 4:
+        return 0.0
+    if left == right:
+        return 1.0
+    if min(len(left), len(right)) >= 5 and (left in right or right in left):
+        return 0.92
+    ratio = SequenceMatcher(None, left, right, autojunk=False).ratio()
+    left_grams = {left[index:index + 2] for index in range(len(left) - 1)}
+    right_grams = {right[index:index + 2] for index in range(len(right) - 1)}
+    union = left_grams | right_grams
+    jaccard = len(left_grams & right_grams) / len(union) if union else 0.0
+    return max(ratio, jaccard)
 
 
 def _source_ref(value):
@@ -90,12 +117,13 @@ class RoleAwareness:
         return self.store.observe_input(connection, context, normalize_utc(at, field="awareness time"),
                                         text, event_key, source, peer_count, quote_sender_ids)
 
-    def record_reply(self, connection, context, at, *, enabled=None):
+    def record_reply(self, connection, context, at, *, text="", event_key="", enabled=None):
         if enabled is False or (enabled is None and not self.enabled(context)):
             return None
-        return self.store.observe_reply(connection, context, normalize_utc(at, field="awareness time"))
+        return self.store.observe_reply(connection, context, normalize_utc(at, field="awareness time"),
+                                        text=text, event_key=event_key)
 
-    def snapshot(self, context, at):
+    def snapshot(self, context, at, *, current_text=""):
         at = normalize_utc(at, field="awareness time")
         values = self._values(context)
         if not self._enabled(context, values):
@@ -112,7 +140,8 @@ class RoleAwareness:
             attention = self._attention(document, context, at, minutes_limit=minutes)
             peer_replies, peer_repliers = self._peer_replies(
                 document, context, at, minutes=peer_reply_minutes)
-            if not recent and not attention and not peer_replies:
+            continuity = self._continuity(document, context, at, current_text, values)
+            if not recent and not attention and not peer_replies and continuity is None:
                 return None
             payload = {}
             if recent:
@@ -123,6 +152,8 @@ class RoleAwareness:
                 payload["peer_replies"] = peer_replies
             if peer_repliers:
                 payload["peer_repliers"] = peer_repliers
+            if continuity is not None:
+                payload["continuity"] = continuity
             return payload
         if context.scope.kind is ScopeKind.GROUP and self._private_contact(context, at, values):
             return {"private_contact": True}
@@ -143,6 +174,66 @@ class RoleAwareness:
             return self.source_validator.validate_reference(reference, observed_at=at).is_success
         except Exception:
             return False
+
+    def _continuity(self, document, context, at, current_text, values):
+        """Match a private follow-up to the same person's recent group question.
+
+        The capsule is intentionally narrow: only the current person's own public
+        group wording and this role's own reply are eligible.  The match is used
+        as conversational continuity, never as authorization or a new fact.
+        """
+        if values.get("person.cross_window_continuity_enabled", True) is False:
+            return None
+        current = _normalized_topic(current_text)
+        if len(current) < 4:
+            return None
+        minutes = self._integer(values, "person.cross_window_continuity_minutes", 30, 5, 180)
+        cutoff = at - timedelta(minutes=minutes)
+        subject = context.actor.subject.subject_id
+        timeline = []
+        for index, item in enumerate(document["events"]):
+            when = _when(item["at"])
+            if when is None or when < cutoff or when > at or not self._same_route(item, context):
+                continue
+            if item["window"] != "group" or item["kind"] not in ("spoke", "reply"):
+                continue
+            if item["kind"] == "spoke" and not self._source_current(item, at):
+                continue
+            timeline.append((when, index, item))
+        timeline.sort(key=lambda row: (row[0], row[1]))
+
+        best = None
+        for when, index, item in timeline:
+            if item["kind"] != "spoke" or item["subject"] != subject or not item["topic"]:
+                continue
+            score = _topic_similarity(current, item["topic"])
+            if score < CONTINUITY_SIMILARITY:
+                continue
+            if best is None or score > best[0] or (score == best[0] and when > best[1]):
+                best = (score, when, index, item)
+        if best is None:
+            return None
+
+        _, question_at, question_index, question = best
+        prior_reply = ""
+        for when, index, item in timeline:
+            if index <= question_index:
+                continue
+            if item["group_id"] != question["group_id"]:
+                continue
+            if item["kind"] == "spoke":
+                # Another person spoke before the role answered; do not attribute
+                # that later reply to this question.
+                break
+            if item["kind"] == "reply" and item["topic"]:
+                prior_reply = item["topic"]
+                break
+        return {
+            "state": "repeat",
+            "minutes_ago": max(0, int((at - question_at).total_seconds() // 60)),
+            "prior_question": question["topic"],
+            "prior_reply": prior_reply,
+        }
 
     def _recent_group_activity(self, document, context, at, *, hours=WINDOW_HOURS, limit=MAX_PROMPT_ITEMS):
         cutoff = at - timedelta(hours=hours)

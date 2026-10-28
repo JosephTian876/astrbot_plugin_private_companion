@@ -505,7 +505,7 @@ class SingleTargetLegacyApplyTests(unittest.IsolatedAsyncioTestCase):
             plan = api._plan(migration, self.v1, session).unwrap()
             state_intents = [item for item in plan["intents"] if item["group_id"] == "role.state"]
             self.assertEqual([item["fields"] for item in state_intents],
-                             [["maintenance_minutes"], ["presence_enabled"]])
+                             [["maintenance_minutes", "presence_enabled"]])
             result = (await api._apply(migration, self.v1, session, plan["plan_token"])).unwrap()
             self.assertEqual(result["errors"], [])
             self.assertNotIn("role.state.enabled", result["written"])

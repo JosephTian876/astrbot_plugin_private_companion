@@ -61,24 +61,14 @@ class RoleProfileConversationTests(MessageFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual(sealed["fields"]["world"], "信件总会晚一个雨季才抵达。")
 
         request = self.messages._request(self.messages.batch(batch), self.context, NOW)
-        self.assertIn("【角色稳定档案】", request.instruction)
-        self.assertIn("姓名：沈知夏", request.instruction)
-        self.assertIn("生日：9 月 18 日", request.instruction)
-        self.assertIn("说话方式：句子简短，先听完再回答，偶尔用干涩的玩笑缓和气氛。", request.instruction)
-        self.assertIn("自称与代词：自称我，不使用本小姐", request.instruction)
-        self.assertIn("典型反应倾向：被夸奖时先嘴硬，再小声道谢。", request.instruction)
-        self.assertIn("口吻示例：示例：你先说完，我在听。", request.instruction)
-        self.assertIn("口吻示例用于体会表达，不照抄台词", request.instruction)
-        self.assertIn("身份经历补充：住在旧城边的电台编辑", request.instruction)
-        self.assertIn("特殊规则：从海上寄出的信至少要经过一整个雨季。", request.instruction)
-        self.assertIn("世界设定补充：信件总会晚一个雨季才抵达。", request.instruction)
-        self.assertNotIn("世界观适配", request.instruction)
-        self.assertIn("也不把一人的关系套到别人", request.instruction)
+        self.assertNotIn("【角色稳定档案】", request.instruction)
+        self.assertNotIn("姓名：沈知夏", request.instruction)
+        self.assertNotIn("说话方式：句子简短，先听完再回答", request.instruction)
         self.assertNotIn("data:image/jpeg;base64,", request.instruction)
 
         self.save_profile("world", "每封信都会在第二天清晨送到。")
         replay = self.messages._request(self.messages.batch(batch), self.context, NOW)
-        self.assertIn("信件总会晚一个雨季才抵达。", replay.instruction)
+        self.assertNotIn("信件总会晚一个雨季才抵达。", replay.instruction)
         self.assertNotIn("每封信都会在第二天清晨送到。", replay.instruction)
 
         other_role = SubjectRef(self.context.scope.installation_id, SubjectKind.BOT, "another-role")
@@ -91,6 +81,15 @@ class RoleProfileConversationTests(MessageFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual(other.fields[f"{GROUP}.name"].value, "")
         self.assertEqual(other.fields[f"{GROUP}.world"].value, "")
         self.assertEqual(other.fields[f"{GROUP}.avatar_data_url"].value, "")
+
+    def test_task_reference_uses_the_same_self_page_for_background_tasks(self):
+        from companion_v2.role_profile.task_reference import TaskRoleReference
+        self.save_profile("name", "沈知夏")
+        self.save_profile("speech_style", "句子简短，先听完再回答。")
+        text = TaskRoleReference(self.runtime).instruction(self.context, NOW)
+        self.assertIn("【角色稳定档案】", text)
+        self.assertIn("姓名：沈知夏", text)
+        self.assertIn("说话方式：句子简短，先听完再回答。", text)
 
     async def test_blank_profile_does_not_add_a_prompt_block(self):
         self.save_profile("identity", " \n ")
