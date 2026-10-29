@@ -21,7 +21,7 @@ from companion_v2.adapters.astrbot.onebot import OneBotPrivateSender
 from companion_v2.adapters.astrbot.onebot_group import OneBotGroupSender
 from companion_v2.adapters.astrbot.platform_sender import AstrBotPlatformSender
 from companion_v2.adapters.astrbot.presence import OneBotPresencePort
-from companion_v2.adapters.astrbot.provider import AstrBotTextProvider
+from companion_v2.adapters.astrbot.provider import AstrBotTextProvider, REPLY_TASK_CAPABILITIES
 from companion_v2.adapters.astrbot.provider_catalog import TextProviderSettings, assemble_providers, loaded_routing
 from companion_v2.adapters.astrbot.tools import CompositeAstrBotToolPort
 from companion_v2.configuration.registry import FieldRegistry
@@ -424,7 +424,7 @@ class MultiHostSession:
         profiles = (ModelTaskProfile(REPLY_KIND, Lane.FOREGROUND, common.provider_id, common.task_prompt,
                     default_fallback=fallback_provider_id, replacement_rules=replacement_rules,
                     fallback_on_refusal=common.fallback_on_refusal,
-                    max_output_tokens=common.max_output_tokens, capabilities=("text", "tools"),
+                    max_output_tokens=common.max_output_tokens, capabilities=REPLY_TASK_CAPABILITIES,
                     prompt_sections=expression_prompt_sections()),
                     poke_reply_profile(common.provider_id, max_output_tokens=min(128, common.max_output_tokens)),
                     contact_profile(common.provider_id, max_output_tokens=common.max_output_tokens),

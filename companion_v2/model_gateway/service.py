@@ -96,6 +96,17 @@ class LocalModelGateway:
 
     def open_session(self, run: TaskRun, request: PromptRequest, *, tools: tuple[ToolSpec, ...] = (),
                      tool_filters: tuple[dict, ...] = ()):
+        """Open the one model session and decide this round's effective tools.
+
+        This is the **single** authority for the tool-capability gate.  Callers
+        pass the full catalog; this method compares it with the authoritative
+        ``plan.providers`` from ``router.resolve()``, drops it for a round whose
+        chain cannot use tools, records the reason in ``plan.audit`` and returns
+        the effective catalog in the session.  Do not add a caller-side
+        prediction (for example with ``router.selected_route()``): it reads the
+        configuration snapshot a second time and can see a different provider
+        chain than the plan that actually executes.
+        """
         if run.supervisor is not self.tasks:
             raise ValueError("gateway must execute against its original supervisor")
         if len(tools) > MAX_TOOL_CATALOG or len({tool.action for tool in tools}) != len(tools):
@@ -106,9 +117,19 @@ class LocalModelGateway:
                 raise TaskError("model_request_already_started", "inspect the original model calls instead of regenerating")
             request = self._task_role_request(run, request)
             plan = self.router.resolve(run, request)
-            if tools:
-                if any("tools" not in provider.capabilities for provider in plan.providers):
-                    raise TaskError("model_capability_mismatch", "tool continuation requires tool-capable providers")
+            if tools and any("tools" not in provider.capabilities for provider in plan.providers):
+                # 与宿主同语义（tool_loop_agent_runner：``modalities`` 不含
+                # ``tool_use`` 时只清空本轮 tools，不判整轮失败）。这里丢弃目录并
+                # 记录原因，而不是让一条本来能发的文本回复失败；整条 provider 链
+                # 都有 tools 能力时，下面的行为与改动前完全一致。
+                # 这是唯一判定点：generation 原样传入目录，不再用
+                # router.selected_route() 另做一次预测（那会多读一次配置，且可能
+                # 与这里真正执行的 plan 分叉）。
+                logger.warning(
+                    "[CompanionV2] 本轮降级为无工具对话 task=%s providers=%s actions=%d",
+                    run.task.task_id, [provider.binding.provider for provider in plan.providers], len(tools))
+                tool_filters = (*tool_filters, {"action": "*", "reason": "provider_without_tool_use"})
+                tools = ()
             if tools or tool_filters:
                 plan = replace(plan, audit={**plan.audit, "tool_catalog_hash": digest(tools),
                                           "tool_actions": [tool.action for tool in tools],
