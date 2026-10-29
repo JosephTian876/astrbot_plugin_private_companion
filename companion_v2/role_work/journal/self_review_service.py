@@ -148,8 +148,6 @@ class SelfReviewService:
                 raise
         try:
             result = require(await self.runner.run(context, identifier))
-            if result.task.state in ("created", "retry_scheduled"):
-                require(self.tasks.discard_queued(identifier, reason="owner_unavailable"))
             report = {"state": result.task.state, "task_id": identifier, "code": result.task.reason}
             self.results[context.key] = report
             return report

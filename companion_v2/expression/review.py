@@ -122,10 +122,6 @@ class ExpressionDraftReview:
         finally:
             self.pending.pop(task_id, None)
             self.results.pop(task_id, None)
-            # Cancellation while waiting for capacity must not leave a queued child.
-            current = self.tasks.read(context, task_id)
-            if current.is_success and current.unwrap().state in ("created", "retry_scheduled"):
-                self.tasks.discard_queued(task_id, reason="owner_unavailable")
 
     async def generate(self, run):
         job = self.pending[run.task.task_id]

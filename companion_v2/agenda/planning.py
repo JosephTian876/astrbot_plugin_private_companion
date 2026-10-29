@@ -335,8 +335,6 @@ class CalendarPlanning:
         try:
             result = require(await self.runner.run(context, identifier))
             task = result.task
-            if task.state in ("created", "retry_scheduled"):
-                task = require(self.tasks.discard_queued(identifier, reason="owner_unavailable"))
             report = {"state": task.state, "mode": mode, "task_id": identifier, "code": task.reason}
             if result.failure_code:
                 report["code"] = result.failure_code

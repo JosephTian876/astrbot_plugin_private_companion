@@ -351,7 +351,9 @@ class OutboundDelivery:
 
     def cancel_unstarted(self, task_id, *, reason):
         with self.runtime.transaction() as connection:
-            task = require(self.tasks.discard_queued(task_id, reason="owner_unavailable"))
+            # Keep the coordinator's actual cause in the task ledger instead of a
+            # generic shutdown label; the row is only queued, never running.
+            task = require(self.tasks.discard_queued(task_id, reason="owner_unavailable", code=reason))
             if task.state == "cancelled":
                 connection.execute("UPDATE background_deliveries SET state = 'cancelled', reason = ? WHERE task_id = ? AND state = 'pending'",
                     (reason, task_id))
