@@ -28,9 +28,9 @@ from .multi_session import MultiHostSession, persona_conversation
 from .multi_settings import MultiHostSettings
 from .bootstrap_provider import resolve_bootstrap_provider
 from .group_settings import GroupTarget
-from .native import installed_native_types
+from .native import installed_native_types, native_text_provider
 from .backup_api import apply_staged_restore
-from .storage_location import selected_backup_directory
+from .storage_location import resolve_data_root, selected_backup_directory
 from .native_extensions import NativeExtensionRegistry, together_execution_binding
 from .native_extensions.builtins import MANAGED_EXTENSIONS, create_bundled_extensions
 from .settings import DELIVERY_AUTHORIZATION_TTL, INSTALLATION_PREFIX, PROFILE_PATTERN, HostControlError
@@ -54,7 +54,10 @@ class AstrBotMultiController:
     def __init__(self, context, config, data_root, *, native_types=None, now=None):
         self.lifecycle_token = uuid4().hex
         self.config = config
-        self.context, self.data_root = context, Path(data_root).resolve()
+        # Hosts may hand us the plugin code tree or a V1 data root when
+        # get_data_dir() is incomplete. Normalize again here so every caller
+        # (not only main.py) lands in an isolated V2 data root.
+        self.context, self.data_root = context, resolve_data_root(Path(data_root).resolve())
         self.integration = IntegrationRegistry(context)
         self.native_types = native_types or installed_native_types()
         self.now = now or (lambda: datetime.now(timezone.utc))
@@ -105,7 +108,7 @@ class AstrBotMultiController:
         # mapping works without a redundant save on a second configuration
         # screen. An explicitly saved provider still wins.
         bootstrap = resolve_bootstrap_provider(
-            self.context, getattr(self.native_types, "provider", None), settings.common.provider_id)
+            self.context, getattr(self.native_types, "is_text_provider", None), settings.common.provider_id)
         if (not settings.common.provider_id and bootstrap.source == "auto"
                 and bootstrap.provider_id):
             settings = replace(settings, common=replace(
@@ -152,7 +155,7 @@ class AstrBotMultiController:
             # again at first use so a blank reviewed setting follows AstrBot's
             # current model instead of failing the mapping-to-start flow.
             bootstrap = resolve_bootstrap_provider(
-                self.context, getattr(self.native_types, "provider", None), "")
+                self.context, getattr(self.native_types, "is_text_provider", None), "")
             if bootstrap.source == "auto" and bootstrap.provider_id:
                 self.settings = replace(self.settings, common=replace(
                     self.settings.common, provider_id=bootstrap.provider_id))
@@ -217,8 +220,28 @@ class AstrBotMultiController:
         configured_target = self._core_target(parked) is not None
         return {"bound": parked.confirmed, "pinned": False, "pending": not parked.confirmed,
                 "confirmed": parked.confirmed, "configured_target": configured_target,
-                **{name: identity[name] for name in
-                   ("platform_id", "account_id", "participant_id", "bot_id", "role_id", "persona_id")}}
+                **self._reviewed_identity(identity)}
+
+    def _reviewed_identity(self, identity):
+        """The role a confirmed window actually routes to after the last review.
+
+        A persona that was renamed or regrouped into another role keeps the parked
+        file's old key.  Comparing that stale key against the live role made
+        开始使用 report host_persona_binding_changed forever, even though the window
+        itself was still the confirmed one, so resolve it through the reviewed map.
+        """
+        current = dict(identity)
+        settings = self.settings
+        if settings is None:
+            return current
+        from .identity_derivation import normalize_persona_id
+        wanted = normalize_persona_id(current.get("persona_id"))
+        mapping = next((item for item in settings.personas
+                        if item.bot_id == current["bot_id"]
+                        and normalize_persona_id(item.persona_id) == wanted), None)
+        current["role_id"] = (mapping.role_id if mapping is not None
+                              else settings.canonical_role_id(current["role_id"]))
+        return current
 
     def _core_target(self, binding):
         settings = self.settings
@@ -229,10 +252,13 @@ class AstrBotMultiController:
                       == (binding.platform_id, binding.account_id, binding.participant_id)), None)
         if match is None:
             return None
-        if binding.persona_id and not any(persona.bot_id == match.bot_id
-                                           and persona.persona_id == binding.persona_id
-                                           for persona in settings.personas):
-            return None
+        if binding.persona_id:
+            from .identity_derivation import normalize_persona_id
+            wanted = normalize_persona_id(binding.persona_id)
+            if not any(persona.bot_id == match.bot_id
+                       and normalize_persona_id(persona.persona_id) == wanted
+                       for persona in settings.personas):
+                return None
         return match
 
     async def proactive_diagnostic_target(self):
@@ -372,8 +398,13 @@ class AstrBotMultiController:
         if request.reason == "host_identity_invalid":
             return {"handled": True, "ok": False, "reason": request.reason,
                     "reply": "人格名不能包含换行或过长，请用一行短名字重发。"}
+        persona_id = request.persona_id
+        if request.kind == "bind" and not persona_id:
+            # 不带人格名时固定这个窗口此刻真实使用的人格。空字符串在运行时只会
+            # 变成 "[%None]"，窗口一旦解析出真实人格就会因未映射而无法回复。
+            persona_id = await self._window_persona(identity)
         candidate = PendingBinding(identity["platform_id"], identity["account_id"],
-                                   identity["participant_id"], request.persona_id)
+                                   identity["participant_id"], persona_id)
         if request.kind == "confirm":
             if existing is None:
                 return {"handled": True, "ok": False, "reason": "host_binding_missing",
@@ -403,6 +434,17 @@ class AstrBotMultiController:
                     "reply": "这条绑定无法成立，请回到「开始使用」查看原因。"}
         return {"handled": True, "ok": True, "confirmed": False,
                 "reply": describe_pin(identity), "binding": self.binding_state()}
+
+    async def _window_persona(self, identity):
+        """The persona this private window actually speaks in, when unnamed."""
+        resolver = getattr(self.session_topology, "window_persona", None)
+        if not callable(resolver):
+            return ""
+        try:
+            return await resolver(identity["platform_id"], identity["participant_id"])
+        except Exception as error:
+            logger.debug("[CompanionV2] 绑定时读取当前人格失败 error_type=%s", type(error).__name__)
+            return ""
 
     def confirm_binding(self):
         parked = self._parked_binding()
@@ -518,7 +560,7 @@ class AstrBotMultiController:
         provider_id = settings.common.provider_id
         provider = self.context.get_provider_by_id(provider_id) if provider_id else None
         model_issue = None
-        if not isinstance(provider, self.native_types.provider):
+        if not native_text_provider(self.native_types, provider):
             model_issue = "host_provider_unavailable" if provider_id else "host_provider_required"
             if not allow_unavailable_model:
                 reason = ("the configured model has no verified native adapter" if provider_id
@@ -538,7 +580,7 @@ class AstrBotMultiController:
         manifest = {"binding_contract": settings.binding_contract,
                     "settings_fingerprint": settings.fingerprint,
                     "provider_fingerprint": provider_fingerprint(provider) if model_issue != "host_provider_required"
-                        and provider is not None and isinstance(provider, self.native_types.provider) else "",
+                        and provider is not None and native_text_provider(self.native_types, provider) else "",
                     "personas": [asdict(persona) for persona in personas]}
         manifest["fingerprint"] = digest(manifest)
         # Account/persona mappings have their own validity. Keep a pending model
@@ -850,9 +892,12 @@ class AstrBotMultiController:
                             raise
                         saved = self.authority.require_manifest()
                         candidate, repaired = recover_repeated_single_target(self.config, saved.get("binding_contract"))
-                        if not repaired:
+                        if repaired:
+                            probed = self._recover_saved_mapping(candidate, probed)
+                        elif self._confirmed_core_window():
+                            await asyncio.to_thread(self._adopt_confirmed_mapping, probed)
+                        else:
                             raise
-                        probed = self._recover_saved_mapping(candidate, probed)
                     await self._assemble(probed)
                 self.last_failure = None
                 return Outcome.success({"loaded": True, "started": False})
@@ -885,6 +930,30 @@ class AstrBotMultiController:
         logger.info("[CompanionV2] 已移除重复迁移的旧私聊目标，恢复已保存的角色映射")
         return restored
 
+    def _confirmed_core_window(self) -> bool:
+        """Whether Dashboard已确认的核心窗口仍在当前映射里。
+
+        只有「开始使用」里确认过、且映射仍然存在的核心管理员窗口才算操作员已复核；
+        没有绑定文件时不猜，继续按绑定变化拒绝启动。
+        """
+        parked = self._parked_binding()
+        return bool(parked is not None and parked.confirmed and self._core_target(parked) is not None)
+
+    def _adopt_confirmed_mapping(self, manifest):
+        """Re-pin a manifest that only lags behind an already-confirmed core window.
+
+        ``confirm_binding`` 把确认过的窗口写进插件配置，但当时的 manifest 还是
+        改动前的映射。此后每次加载都会以 host_binding_changed（private_target /
+        persona）拒绝启动，而页面上没有任何操作能修好它。确认过的窗口就是操作员
+        的复核结论，这里按 reviewed 重新固定；身份归属真的变了仍由
+        host_identity_conflict 拦下。
+        """
+        with self.runtime.transaction():
+            receipt = self.authority.initialize(manifest, reviewed=True,
+                                                allow_legacy_staging=self._adopting_legacy_profile)
+        logger.info("[CompanionV2] 已按开始使用中确认的核心管理员窗口更新账号与角色绑定")
+        return receipt
+
     async def start(self):
         async with self._lifecycle_lock:
             try:
@@ -906,10 +975,13 @@ class AstrBotMultiController:
                     try:
                         await asyncio.to_thread(self.authority.require_manifest, manifest)
                     except TaskError as error:
-                        if error.code != "host_not_initialized":
+                        if error.code == "host_not_initialized":
+                            await self._initialize_manifest_locked(manifest, conversations)
+                            await asyncio.to_thread(self.authority.require_manifest, manifest)
+                        elif error.code == "host_binding_changed" and self._confirmed_core_window():
+                            await asyncio.to_thread(self._adopt_confirmed_mapping, manifest)
+                        else:
                             raise
-                        await self._initialize_manifest_locked(manifest, conversations)
-                        await asyncio.to_thread(self.authority.require_manifest, manifest)
                     if self.session is None or self.session.application.state != "new":
                         await self._assemble(manifest)
                     session = self.session

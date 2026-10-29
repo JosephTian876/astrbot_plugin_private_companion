@@ -59,6 +59,28 @@ def _developer_payload(payload):
     return _developer_content(payload)
 
 
+def _gemini_messages(messages):
+    """AstrBot 的 Gemini 转换用 ``message["name"]`` 回填 function_response。
+
+    OpenAI 的工具结果只带 ``tool_call_id``，所以这里按同一次对话里的
+    tool_calls 把函数名补回去；没有可补的内容时原样返回。
+    """
+    names = {}
+    for message in messages:
+        for call in message.get("tool_calls") or ():
+            function = call.get("function") or {}
+            if isinstance(call.get("id"), str) and isinstance(function.get("name"), str):
+                names[call["id"]] = function["name"]
+    if not names:
+        return messages
+    enriched = []
+    for message in messages:
+        if message.get("role") == "tool" and message.get("tool_call_id") in names:
+            message = {**message, "name": names[message["tool_call_id"]]}
+        enriched.append(message)
+    return enriched
+
+
 def _developer_completion(completion):
     """Return the response body in a log-friendly shape before host parsing."""
     if completion is None:
@@ -173,6 +195,17 @@ class UsageTariff:
                       output_tokens=output if input_tokens is not None else None)
 
 
+def looks_like_text_provider(native):
+    """AstrBot 文本 provider 的公共合同：_query(payloads, tools) + get_model + provider_config。
+
+    原生 Google GenAI、Anthropic 等 provider 与 OpenAI 共享这套表面；是否走
+    OpenAI 专用钩子由适配器按能力判断，而不是按类名白名单。
+    """
+    return (callable(getattr(native, "_query", None))
+            and callable(getattr(native, "get_model", None))
+            and isinstance(getattr(native, "provider_config", None), dict))
+
+
 class AstrBotTextProvider:
     def __init__(self, context, *, bridge, binding, provider_id, version, provider_type,
                  function_tool_type, tool_set_type, tariff: UsageTariff, maximum_output_tokens=4096,
@@ -182,20 +215,36 @@ class AstrBotTextProvider:
             raise ValueError("output token parameter must be selected explicitly")
         if type(maximum_input_estimate) is not int or not 1024 <= maximum_input_estimate <= 1000000:
             raise ValueError("input estimate ceiling is outside this adapter profile")
+        classes = provider_type if isinstance(provider_type, tuple) else (provider_type,)
+        if not classes or any(not isinstance(item, type) for item in classes):
+            raise ValueError("provider needs the verified native provider class")
         self.context, self.bridge, self.binding, self.provider_id = context, bridge, binding, provider_id
         self.native = context.get_provider_by_id(provider_id)
-        if not isinstance(self.native, provider_type):
+        self.verified_type = isinstance(self.native, classes)
+        if not self.verified_type and not looks_like_text_provider(self.native):
             raise ValueError("provider needs the verified native provider class")
-        self.provider_type = provider_type
+        self.provider_types, self.provider_type = classes, classes[0]
+        native_config = getattr(self.native, "provider_config", {})
+        native_kind = str(native_config.get("type") or "") if isinstance(native_config, dict) else ""
+        client = getattr(self.native, "client", None)
+        openai_hooks = (callable(getattr(self.native, "_prepare_chat_payload", None))
+                        and callable(getattr(self.native, "_parse_openai_completion", None))
+                        and callable(getattr(client, "with_options", None)))
+        # 只有具备 OpenAI 专用钩子的 provider 才走 OpenAI 分支；其余按归一化响应处理。
+        self.kind = ("openai" if openai_hooks
+                     else "gemini" if native_kind.startswith("googlegenai") else "native")
         self.config = deepcopy(self.native.provider_config)
         self.config_hash = digest(self.config)
         self.model = self.native.get_model()
         self.client = self.native.client
-        self.parameters = frozenset(self.native.default_params)
+        self.parameters = frozenset(getattr(self.native, "default_params", {}))
         self.function_tool_type, self.tool_set_type = function_tool_type, tool_set_type
         self.tariff, self.output_parameter = tariff, output_parameter
         if type(streaming) is not bool:
             raise ValueError("streaming must be an explicit boolean")
+        if streaming and self.kind != "openai":
+            # 原生 Gemini 的流式协议与本适配器的流式校验器不兼容：降级为一次性返回。
+            streaming = False
         if streaming and not callable(getattr(self.native, "_query_stream", None)):
             raise ValueError("the verified native provider has no streaming transport")
         self.streaming = streaming
@@ -212,15 +261,17 @@ class AstrBotTextProvider:
             ("text", "text"), ("tool_use", "tools"), ("image", "image"), ("audio", "audio"))
             if modality in modalities) if isinstance(modalities, list) and modalities
             else ("text", "tools", "image", "audio"))
+        transport = ("astrbot_openai" if self.kind == "openai" else
+                     "astrbot_gemini" if self.kind == "gemini" else "astrbot_native")
         return LocalProvider(self.binding, capabilities, self.maximum_output_tokens,
-                             self.reserve, self.generate, transport="astrbot_openai", default_streaming=self.streaming,
+                             self.reserve, self.generate, transport=transport, default_streaming=self.streaming,
                              supports_model_override=True, model=self.model)
 
     def _current(self):
         if (self.context.get_provider_by_id(self.provider_id) is not self.native
                 or self.native.client is not self.client or self.native.get_model() != self.model
                 or digest(self.native.provider_config) != self.config_hash
-                or frozenset(self.native.default_params) != self.parameters):
+                or frozenset(getattr(self.native, "default_params", {})) != self.parameters):
             raise TaskError("host_provider_changed", "original host provider/client/configuration was replaced")
 
     def _estimate(self, envelope, wire):
@@ -245,6 +296,13 @@ class AstrBotTextProvider:
                 return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
 
             usage = read(raw, "usage")
+            if hasattr(usage, "input_other"):
+                # AstrBot 的原生 Gemini 用量是 TokenUsage，而不是 OpenAI 的 usage dict。
+                other, cached, output = usage.input_other, usage.input_cached, usage.output
+                if any(type(v) is not int or v < 0 for v in (other, cached, output)):
+                    return None
+                return self.tariff.amount(other, cached, output,
+                                          input_tokens=other + cached, cached_input_tokens=cached)
             prompt = read(usage, "prompt_tokens")
             completion = read(usage, "completion_tokens")
             total = read(usage, "total_tokens")
@@ -297,6 +355,15 @@ class AstrBotTextProvider:
         self._current()
         native = copy(self.native)
         native.provider_config = deepcopy(self.config)
+        if self.kind != "openai":
+            # Gemini 客户端没有 OpenAI 的 with_options；重试次数由 request_max_retries 控制。
+            payload = {"model": self.model, "messages": [{"role": "user", "content": "Reply OK."}],
+                       "max_tokens": 8}
+            result = await native._query(payload, None, request_max_retries=1)
+            self._current()
+            if result is None:
+                raise ValueError("native probe returned no result")
+            return
         native.client = self.client.with_options(max_retries=0)
         if native.client.max_retries != 0:
             raise ValueError("native probe retries could not be disabled")
@@ -328,13 +395,16 @@ class AstrBotTextProvider:
             self._current()
             native = copy(self.native)
             native.provider_config = deepcopy(self.config)
-            native.client = self.client.with_options(max_retries=0)
-            if native.client.max_retries != 0:
-                raise ValueError("client retry layer could not be disabled")
-            native.client = _DeveloperRequestTrace(native.client, self.provider_id,
-                getattr(envelope.original.event, "event_id",
-                        getattr(envelope.original.event, "request_id", "unknown"))).client_view()
+            if self.kind == "openai":
+                native.client = self.client.with_options(max_retries=0)
+                if native.client.max_retries != 0:
+                    raise ValueError("client retry layer could not be disabled")
+                native.client = _DeveloperRequestTrace(native.client, self.provider_id,
+                    getattr(envelope.original.event, "event_id",
+                            getattr(envelope.original.event, "request_id", "unknown"))).client_view()
             streaming = self.streaming if envelope.original.streaming is None else envelope.original.streaming
+            if self.kind != "openai":
+                streaming = False
             if streaming and envelope.original.output_format == "conversation":
                 if not callable(getattr(native, "_query_stream", None)):
                     raise ValueError("native streaming transport is unavailable")
@@ -385,22 +455,29 @@ class AstrBotTextProvider:
                     logger.debug("[CompanionV2][开发者追踪] 原生解析失败 provider=%s error_type=%s",
                                  self.provider_id, type(error).__name__, exc_info=True)
                     raise
-            native._parse_openai_completion = parse
-            if envelope.original.images or envelope.original.audios or envelope.original.videos:
-                # V2 has already materialized and validated exact data URLs. The
-                # host's general image resolver may download, re-encode or log
-                # unresolved locations; none of those are needed for these bytes.
-                async def keep_original_images(contexts):
-                    return deepcopy(contexts)
-                native._materialize_context_image_parts = keep_original_images
-            payload, _ = await native._prepare_chat_payload(prompt=None, contexts=deepcopy(wire.messages),
-                                                          model=envelope.model_override or self.model)
-            if envelope.original.images or envelope.original.audios or envelope.original.videos:
-                def image_materials(messages):
-                    return [message for message in messages if isinstance(message.get("content"), list)]
-                if image_materials(payload["messages"]) != image_materials(wire.messages):
-                    raise ValueError("native preparation changed original images or their coverage and attribution")
-            payload[self.output_parameter] = envelope.max_output_tokens
+            if self.kind == "openai":
+                native._parse_openai_completion = parse
+                if envelope.original.images or envelope.original.audios or envelope.original.videos:
+                    # V2 has already materialized and validated exact data URLs. The
+                    # host's general image resolver may download, re-encode or log
+                    # unresolved locations; none of those are needed for these bytes.
+                    async def keep_original_images(contexts):
+                        return deepcopy(contexts)
+                    native._materialize_context_image_parts = keep_original_images
+                payload, _ = await native._prepare_chat_payload(prompt=None, contexts=deepcopy(wire.messages),
+                                                              model=envelope.model_override or self.model)
+                if envelope.original.images or envelope.original.audios or envelope.original.videos:
+                    def image_materials(messages):
+                        return [message for message in messages if isinstance(message.get("content"), list)]
+                    if image_materials(payload["messages"]) != image_materials(wire.messages):
+                        raise ValueError("native preparation changed original images or their coverage and attribution")
+                payload[self.output_parameter] = envelope.max_output_tokens
+            else:
+                # 原生 Gemini 接受 OpenAI 形状的 messages，由宿主转换为 generate_content；
+                # 输出上限使用 Gemini 认得的 max_tokens。
+                payload = {"model": envelope.model_override or self.model,
+                           "messages": deepcopy(_gemini_messages(wire.messages)),
+                           "max_tokens": envelope.max_output_tokens}
             structured = response_format(envelope.original)
             if structured is not None:
                 payload["response_format"] = structured
@@ -442,6 +519,11 @@ class AstrBotTextProvider:
         try:
             response = (await transcript.query(native, payload, tools) if transcript is not None
                         else await native._query(payload, tools, request_max_retries=1))
+            if self.kind != "openai":
+                # Gemini 的 LLMResponse 没有 OpenAI 解析钩子；直接观察归一化结果。
+                observed.append(response)
+                diagnostics = observe_completion(response)
+                verified_refusal = explicit_refusal(response)
             logger.debug("[CompanionV2][开发者追踪] 模型原始回复 provider=%s response=%s",
                          self.provider_id, _developer_completion(response))
             raw = transcript.usage_receipt if transcript is not None and transcript.usage_receipt else (observed[-1] if observed else None)

@@ -122,6 +122,60 @@ class MainCoreReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(event.send.__self__, event)
         self.assertIs(event.send.__func__, CoreReplyEvent._send)
 
+    async def test_post_debounce_follow_up_joins_the_first_pending_model_request(self):
+        plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
+        first, second = CoreReplyEvent(), CoreReplyEvent()
+        for event, text, identifier, created_at in (
+                (first, "早上吃了什么", "native-first", 1_700_000_000),
+                (second, "中午又吃了什么", "native-second", 1_700_000_001)):
+            event.message_str = text
+            event.message_obj.message = [NS(type="Plain", text=text)]
+            event.message_obj.raw_message["message_id"] = identifier
+            event.created_at = created_at
+        target = NS(key="target", target_id="target")
+        plan = NS(captured=NS(text="早上吃了什么"), context=NS(key="context"),
+                  debounce=Policy(enabled=False))
+        prepared = {
+            "context": object(), "instruction": "Use this companion persona.",
+            "prompt_instruction": "Reply conversationally.",
+            "stable_prompt_instruction": "Use the configured companion voice.",
+            "target_id": "target", "channel": "private", "event_id": "native-first",
+            "event_ref": "event-first", "text": "早上吃了什么",
+            "native_input": NS(text="早上吃了什么", event_id="native-first"),
+        }
+        staging = NS(
+            runtime=None, now=lambda: None, claims=lambda _event: True,
+            target_for_event=lambda _event: target,
+            settings=NS(enabled=True),
+            session=NS(profile=NS(target=target)),
+            session_topology=NS(reply_enabled=AsyncMock(return_value=True), schedule_observe=Mock()),
+            prepare_core_reply_context=AsyncMock(return_value=Outcome.success(plan)),
+            prepare_core_reply=AsyncMock(return_value=Outcome.success(prepared)),
+            authorize_core_reply=AsyncMock(return_value=Outcome.success(True)),
+        )
+        plugin.staging = staging
+        staging.session.core_reply_observations = NS(phase=Mock())
+
+        await plugin.receive_companion_message(first)
+        self.assertTrue(first.is_wake)
+        self.assertTrue(first.is_at_or_wake_command)
+        self.assertEqual(staging.prepare_core_reply.await_count, 1)
+
+        await plugin.receive_companion_message(second)
+        self.assertTrue(second.call_llm)
+        self.assertFalse(second.is_wake)
+        self.assertEqual(staging.prepare_core_reply.await_count, 1)
+
+        request = NS(system_prompt="AstrBot base prompt", prompt="早上吃了什么",
+                     extra_user_content_parts=[])
+        await plugin.prepare_companion_core_request(first, request)
+        self.assertEqual(request.prompt, "早上吃了什么\n中午又吃了什么")
+        current = first.extra[ENTRY.CORE_REPLY_CONTEXT_EXTRA]["prepared"]
+        self.assertEqual(current["text"], "早上吃了什么\n中午又吃了什么")
+        self.assertEqual(current["debounced_message_count"], 2)
+        self.assertEqual([item["text"] for item in current["debounced_inputs"]],
+                         ["早上吃了什么", "中午又吃了什么"])
+
     async def test_private_text_burst_uses_latest_event_for_merge_and_authorization(self):
         plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
         first, second = CoreReplyEvent(), CoreReplyEvent()

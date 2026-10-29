@@ -16,7 +16,7 @@ function status(token = "revision-1", timezone = "Asia/Shanghai", locationName =
       planning_weather_location:locationName ? JSON.stringify({name:locationName}) : "", planning_weather_max_age_minutes:120,
     }},
     model: {edit_token:token, settings:{calendar_enabled:true, calendar_timezone:timezone,
-      holiday_enabled:true, holiday_country:"CN",
+      health_enabled:false, health_proactive_enabled:false, holiday_enabled:true, holiday_country:"CN",
       lunar_enabled:true, automatic_solar_terms_enabled:false, almanac_enabled:false,
       platform_enabled:true, model_route_enabled:true, configured_modalities_enabled:true, guidance:""}},
      contact: {settings:{date_checkin_enabled:true, important_dates:"[]",

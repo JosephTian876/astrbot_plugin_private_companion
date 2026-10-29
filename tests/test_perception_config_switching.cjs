@@ -7,18 +7,18 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const app = fs.readFileSync(path.resolve(__dirname, "../pages/陪伴小屋/app.js"), "utf8");
-const activateSource = app.match(/function activatePerceptionTab\(destination,\{focus=false,scroll=false,modelTab=''\}=\{\}\)\{[\s\S]*?\n\}/)?.[0];
+const activateSource = app.match(/function restorePerceptionSingleDetails\(\)\{[\s\S]*?\n\}\nfunction closePerceptionSingle\(\)\{[\s\S]*?\n\}\nfunction activatePerceptionTab\([\s\S]*?\n\}/)?.[0];
 assert.ok(activateSource, "感知配置选择函数应存在");
 
 function detail(id, hidden = false) {
-  return {id, tagName:"DETAILS", hidden, open:true, summary:{focused:false,focus(){this.focused=true;}},
+  return {id, tagName:"DETAILS", hidden, open:true, dataset:{}, summary:{focused:false,focus(){this.focused=true;}},
     querySelector(selector) { return selector === "summary" ? this.summary : null; },
     scrollIntoView() { this.scrolled = true; }};
 }
 
 function page(id) {
   return {id:`perception-page-${id}`,dataset:{perceptionPage:`config-${id}`},hidden:true,
-    classList:{toggle(){}},scrollIntoView(){this.scrolled=true;}};
+    classList:{toggle(){}},scrollIntoView(){this.scrolled=true;},querySelectorAll(){return [];}};
 }
 
 function tab(id, hidden = false) {
@@ -37,7 +37,7 @@ function panel(id, parentPage, details = []) {
 }
 
 function harness({withTabs = true} = {}) {
-  const pages=[page("environment"),page("models"),page("screen"),page("news")];
+  const pages=[page("environment"),page("models"),page("screen"),page("health"),page("news")];
   const byId=Object.fromEntries(pages.map(item=>[item.dataset.perceptionPage,item]));
   const environment=panel("config-environment",byId["config-environment"],[
     detail("perception-detail-place"),detail("perception-detail-calendar"),detail("perception-detail-important-days"),
@@ -50,19 +50,22 @@ function harness({withTabs = true} = {}) {
   const devices=panel("config-screen",byId["config-screen"],[
     detail("perception-detail-device-access"),detail("perception-detail-providers"),detail("perception-detail-mihome",true),
   ]);
+  const health=panel("config-health",byId["config-health"],[detail("perception-detail-health")]);
   const news=panel("config-news",byId["config-news"],[detail("perception-detail-external")]);
   const balance=panel("config-balance",byId["config-news"],[detail("perception-detail-balance-source"),detail("perception-detail-balance")]);
   const recall=panel("config-recall",byId["config-news"],[detail("perception-detail-recalls")]);
   const injection=panel("config-injection",byId["config-models"],[detail("perception-detail-injection")]);
-  const panels=[environment,models,devices,news,balance,recall,injection];
+  const panels=[environment,models,devices,health,news,balance,recall,injection];
   const tabs=withTabs?[
-    tab("config-environment"),tab("config-models"),tab("config-screen"),tab("config-news"),
+    tab("config-environment"),tab("config-models"),tab("config-screen"),tab("config-health"),tab("config-news"),
   ]:[];
-  const workspace={id:"perceptionConfigWorkspace",hidden:true,scrollIntoView(){this.scrolled=true;}};
+  const workspace={id:"perceptionConfigWorkspace",hidden:true,scrollIntoView(){this.scrolled=true;},classList:{names:new Set(),toggle(name,on){on?this.names.add(name):this.names.delete(name);},contains(name){return this.names.has(name);}}};
+  const singleHead={id:"perceptionSingleItemHead",hidden:true};
+  const singleTitle={id:"perceptionSingleItemTitle",textContent:""};
   const selections=[];
-  const nodes=new Map([workspace,...pages,...panels,...panels.flatMap(item=>item.details)].map(item=>[item.id,item]));
+  const nodes=new Map([workspace,singleHead,singleTitle,...pages,...panels,...panels.flatMap(item=>item.details)].map(item=>[item.id,item]));
   const context={
-    document:{getElementById:id=>nodes.get(id)||null,documentElement:{dataset:{motion:"full"}}},
+    document:{getElementById:id=>nodes.get(id)||null,documentElement:{dataset:{motion:"full"}},querySelectorAll(selector){return selector==='[data-perception-single-hidden]'?[...nodes.values()].filter(node=>node.dataset&&node.dataset.perceptionSingleHidden!==undefined):[];}},
     window:{matchMedia:()=>({matches:false}),CompanionPerceptionOverviewPage:{select(...args){selections.push(args);}}},
     state:{reduceMotion:false},
     $$(selector){
@@ -72,9 +75,9 @@ function harness({withTabs = true} = {}) {
     },
     icons(){},
   };
-  vm.runInNewContext(`${activateSource}\nglobalThis.activatePerceptionTab=activatePerceptionTab;`,context);
-  return {activate:context.activatePerceptionTab,pages,panels,tabs,workspace,selections,
-    environment,models,devices,news,balance,recall,injection};
+  vm.runInNewContext(`${activateSource}\nglobalThis.activatePerceptionTab=activatePerceptionTab;globalThis.closePerceptionSingle=closePerceptionSingle;`,context);
+  return {activate:context.activatePerceptionTab,closeSingle:context.closePerceptionSingle,pages,panels,tabs,workspace,singleHead,singleTitle,selections,
+    environment,models,devices,health,news,balance,recall,injection};
 }
 
 test("dashboard selections open the matching child page and keep every configuration visible",()=>{
@@ -83,12 +86,12 @@ test("dashboard selections open the matching child page and keep every configura
 
   assert.equal(view.workspace.hidden,false);
   assert.equal(view.pages[0].hidden,false);
-  assert.deepEqual(view.pages.slice(1).map(item=>item.hidden),[true,true,true]);
+  assert.deepEqual(view.pages.slice(1).map(item=>item.hidden),[true,true,true,true]);
   assert.equal(view.environment.details.every(item=>item.open),true);
   assert.equal(view.selections.at(-1)[0],"config-environment:perception-detail-place");
 });
 
-test("the four tabs switch child pages and keep their selection state accessible",()=>{
+test("the perception tabs switch child pages and keep their selection state accessible",()=>{
   const view=harness();
   view.activate("config-screen",{focus:true});
 
@@ -111,7 +114,7 @@ test("invalid destinations and unavailable tabs do not open a child page",()=>{
   assert.equal(view.pages.every(item=>item.hidden),true);
 });
 
-test("model links select the requested task route and external links stay on the fourth page",()=>{
+test("model links select the requested task route and external links stay on the fifth page",()=>{
   const view=harness();
   for(const modelTab of ["fn","voice","image"]){
     view.activate("config-models:perception-detail-model-route",{modelTab,scroll:true});
@@ -123,8 +126,8 @@ test("model links select the requested task route and external links stay on the
   assert.equal(view.workspace.scrolled,true);
 
   view.activate("config-balance:perception-detail-balance-source");
-  assert.equal(view.pages[3].hidden,false);
-  assert.equal(view.tabs[3].attributes["aria-selected"],"true");
+  assert.equal(view.pages[4].hidden,false);
+  assert.equal(view.tabs[4].attributes["aria-selected"],"true");
   assert.equal(view.pages[1].hidden,true);
   assert.equal(view.balance.details[0].open,true);
 });
@@ -143,11 +146,12 @@ test("deep links focus their real section without collapsing sibling settings",(
   assert.equal(view.devices.details[2].open,true);
 });
 
-test("configuration cards are expanded by default and grouped into the four designed pages",()=>{
+test("configuration cards are expanded by default and grouped into the five designed pages",()=>{
   for(const [id,pageId] of [
     ["config-environment","perception-page-environment"],
     ["config-models","perception-page-models"],
     ["config-screen","perception-page-reality"],
+    ["config-health","perception-page-health"],
     ["config-news","perception-page-external"],
     ["config-balance","perception-page-external"],
     ["config-recall","perception-page-external"],
@@ -163,7 +167,8 @@ test("configuration cards are expanded by default and grouped into the four desi
   assert.match(app,/01<\/span><h2>时空与环境<\/h2>/);
   assert.match(app,/02<\/span><h2>模型能力<\/h2>/);
   assert.match(app,/03<\/span><h2>现实触及功能<\/h2>/);
-  assert.match(app,/04<\/span><h2>外部与记录<\/h2>/);
+  assert.match(app,/04<\/span><h2>健康感知<\/h2>/);
+  assert.match(app,/05<\/span><h2>外部与记录<\/h2>/);
 });
 
 test("date controls and important day settings stay in the time page",()=>{
@@ -213,4 +218,26 @@ test("model routes still open the requested voice or image tab after navigation"
     vm.runInNewContext(`(function(){${branch}})()`,context);
     assert.deepEqual(actions,[["navigate","manage","models",undefined],["tab",`#modelWorkspace [data-model-tab="${modelTabTarget}"]`]]);
   }
+});
+
+test("a single board item opens only its own configuration panel",()=>{
+  const view=harness();
+  view.activate("config-screen:perception-detail-device-access",{single:true,itemId:"device-location",itemTitle:"当前定位"});
+
+  assert.equal(view.workspace.hidden,false);
+  assert.equal(view.workspace.classList.contains("is-single-item"),true);
+  assert.equal(view.pages[2].hidden,false);
+  assert.equal(view.devices.details[0].hidden,false);
+  assert.equal(view.devices.details[1].hidden,true);
+  assert.equal(view.devices.details[2].hidden,true);
+  assert.equal(view.singleHead.hidden,false);
+  assert.equal(view.singleTitle.textContent,"当前定位");
+
+  view.closeSingle();
+  assert.equal(view.workspace.hidden,true);
+  assert.equal(view.workspace.classList.contains("is-single-item"),false);
+  assert.equal(view.singleHead.hidden,true);
+  assert.equal(view.devices.details[0].hidden,false);
+  assert.equal(view.devices.details[1].hidden,false);
+  assert.equal(view.devices.details[2].hidden,true);
 });

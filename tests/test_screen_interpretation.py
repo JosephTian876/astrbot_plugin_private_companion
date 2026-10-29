@@ -322,7 +322,13 @@ class ScreenInterpretationTests(ScreenChainFixture, unittest.IsolatedAsyncioTest
 
 
 class ScreenPeekDecisionTests(ScreenChainFixture, unittest.IsolatedAsyncioTestCase):
+    def make_core(self):
+        """主动窥屏现在只服务核心管理员窗口。"""
+        self.policy.set_tier(self.important.subject, AuthorizationTier.CORE,
+                             expected_revision=self.policy.revision, observed_at=NOW)
+
     async def test_goodnight_peek_waits_and_cancels_when_the_user_returns(self):
+        self.make_core()
         host = await self.start()
         app = host.application
         self.window_settings(app, {"interpretation_enabled": True}).unwrap()
@@ -341,6 +347,7 @@ class ScreenPeekDecisionTests(ScreenChainFixture, unittest.IsolatedAsyncioTestCa
         self.assertIsNone(events.peek_due(context, self.preferences(app, context), self.clock.now()))
 
     async def test_followup_peek_needs_silence_and_keeps_its_own_cooldown(self):
+        self.make_core()
         host = await self.start()
         app = host.application
         self.window_settings(app, {"interpretation_enabled": True}).unwrap()

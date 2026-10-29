@@ -13,11 +13,13 @@ window.CompanionNativeExtensionPanel = (() => {
     {id:"gateway", title:"网关与访问", summary:"监听地址、端口、外部地址", keys:["enabled","host","port","public_base_url"]},
     {id:"pairing", title:"配对与身份", summary:"配对令牌、绑定用户与会话有效期", keys:["pairing_token","allowed_user_id","session_ttl_hours"]},
     {id:"location", title:"位置与地图", summary:"位置有效期、高德逆地理编码与请求参数", keys:["location_ttl_seconds","amap_reverse_geocode_enabled","amap_api_key","amap_cache_ttl_seconds","amap_request_timeout_seconds"]},
-    {id:"activity", title:"身体数据与活动摘要", summary:"健康数据、前台活动上报与缓存时效", keys:["telemetry_enabled","telemetry_ttl_seconds","activity_enabled","activity_ttl_seconds"]},
+    {id:"activity", title:"前台活动摘要", summary:"前台活动上报与缓存时效", keys:["activity_enabled","activity_ttl_seconds"]},
     {id:"rooms", title:"房间与屏幕", summary:"统一房间代理与屏幕共享状态", keys:["proxy_rooms","screen_upload_enabled"]},
   ];
   function mobileSettingGroups(field) {
-    const entries = Object.entries(field?.items || {});
+    /* Health ingestion is owned by the single switch under Perception. */
+    const managedByPerception = new Set(["telemetry_enabled", "telemetry_ttl_seconds"]);
+    const entries = Object.entries(field?.items || {}).filter(([key]) => !managedByPerception.has(key));
     const used = new Set();
     const groups = MOBILE_SETTING_GROUPS.map(group => {
       const fields = entries.filter(([key]) => group.keys.includes(key));

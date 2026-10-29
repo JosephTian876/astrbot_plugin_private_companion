@@ -27,7 +27,7 @@ from companion_v2.adapters.astrbot.native import (
     configured_default_persona_id, native_client_connected, persona_instruction, report_slow_native_lookup,
     supported_platform_name,
 )
-from companion_v2.adapters.astrbot.provider import provider_fingerprint
+from companion_v2.adapters.astrbot.provider import looks_like_text_provider, provider_fingerprint
 from companion_v2.adapters.astrbot.provider_catalog import TextProviderSettings, assemble_providers
 from companion_v2.adapters.astrbot.staging import NativeAdapterTypes
 from companion_v2.adapters.astrbot.staging_config import REQUIRED_CAPABILITIES, StagingConfiguration
@@ -53,6 +53,14 @@ SESSION_SETTINGS_LOOKUP_BUDGET_SECONDS = 1.0
 _session_settings_cache = {}
 _session_settings_reads = {}
 _session_settings_versions = {}
+
+
+def native_text_provider(native_types, provider):
+    """Registered text class, or any provider exposing the AstrBot text surface."""
+    checker = getattr(native_types, "is_text_provider", None)
+    if callable(checker):
+        return bool(checker(provider))
+    return isinstance(provider, getattr(native_types, "provider", ()) or ()) or looks_like_text_provider(provider)
 
 
 def _native_video_provider(context, bridge, native_types, native, settings):
@@ -285,6 +293,9 @@ def installed_native_types() -> NativeAdapterTypes:
         file_loader=load_native_file,
         video_provider_type=ProviderGoogleGenAI,
         video_provider_factory=_native_video_provider,
+        # AstrBot's native Google GenAI provider also speaks text; the V2 text
+        # adapter translates its OpenAI-shaped payload onto generate_content.
+        text_provider_types=(ProviderGoogleGenAI,),
         session_persona_override_lookup=load_session_persona_override,
         persona_snapshot_lookup=load_persona_snapshot_selection,
         persona_selection_lookup=resolve_native_persona_selection,
@@ -348,7 +359,7 @@ class NativeProbeService:
         self.now = now
 
     def _streaming_report(self, settings: HostSettings, provider) -> dict[str, Any]:
-        available = isinstance(provider, self.native_types.provider) and callable(
+        available = native_text_provider(self.native_types, provider) and callable(
             getattr(provider, "_query_stream", None)
         )
         return {
@@ -391,7 +402,7 @@ class NativeProbeService:
             native_config = getattr(provider, "provider_config", {})
             candidate = native_config.get("id") if isinstance(native_config, dict) else None
             provider_id = candidate if isinstance(candidate, str) else ""
-            if isinstance(provider, self.native_types.provider):
+            if native_text_provider(self.native_types, provider):
                 provider_hash = provider_fingerprint(provider)
         return {
             "platform_id": metadata.id,
@@ -403,7 +414,7 @@ class NativeProbeService:
             "resolved_provider_id": provider_id or None,
             "provider_type": type(provider).__module__ + "." + type(provider).__qualname__ if provider else None,
             "provider_fingerprint": provider_hash,
-            "provider_supported": isinstance(provider, self.native_types.provider),
+            "provider_supported": native_text_provider(self.native_types, provider),
             "streaming": self._streaming_report(settings, provider),
             "target_ready": bool(
                 settings.account_id and settings.participant_id and settings.provider_id
@@ -459,7 +470,7 @@ class NativeProbeService:
         instruction = persona_instruction(persona)
 
         provider = self.context.get_provider_by_id(settings.provider_id)
-        if not isinstance(provider, self.native_types.provider):
+        if not native_text_provider(self.native_types, provider):
             raise HostControlError("staging_provider_unsupported", "the configured provider does not use the verified AstrBot adapter")
         assemble_providers(self.context, bridge=None, native_types=self.native_types,
                            primary_id=settings.provider_id, additional=settings.additional_providers,

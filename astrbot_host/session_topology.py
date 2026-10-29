@@ -307,6 +307,43 @@ class SessionTopology:
                     if inspect.isawaitable(resolved) else resolved)
         return conversation_persona_id or configured_default_persona_id(self.controller.context, umo)
 
+    async def window_persona(self, platform_id, participant_id):
+        """The persona AstrBot resolves for one private window, or "".
+
+        A bind command without a persona name is meant to follow the window's own
+        voice, but pinning an empty string is not enough: the runtime maps personas
+        by exact name, so the empty pin becomes "[%None]" and a window that resolves
+        a real persona is rejected with ``host_persona_window_unbound``. Resolve the
+        name once, at bind time, so the pinned role matches what will speak.
+        """
+        if not all(type(value) is str and value for value in (platform_id, participant_id)):
+            return ""
+        umo = f"{platform_id}:FriendMessage:{participant_id}"
+        manager = getattr(self.controller.context, "conversation_manager", None)
+        if manager is None:
+            return ""
+        try:
+            conversation_id = await bounded_native_lookup(
+                manager.get_curr_conversation_id(umo), operation="conversation_id")
+            conversation_persona_id = None
+            if conversation_id is not None:
+                conversation = await bounded_native_lookup(
+                    manager.get_conversation(umo, conversation_id, create_if_not_exists=False),
+                    operation="conversation")
+                if conversation is not None:
+                    conversation_persona_id = getattr(conversation, "persona_id", None)
+            selected = await self._selected_native_persona(umo, conversation_persona_id)
+        except (TaskError, AttributeError, TypeError, ValueError, KeyError):
+            return ""
+        if not isinstance(selected, str):
+            return ""
+        selected = selected.strip()
+        if not selected or selected == "default" or selected == "[%None]":
+            return ""
+        if len(selected) > 120 or any(ord(char) < 32 for char in selected):
+            return ""
+        return selected
+
     async def reply_enabled(self, event):
         try:
             services = await asyncio.wait_for(

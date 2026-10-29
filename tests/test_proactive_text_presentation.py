@@ -2,8 +2,11 @@
 
 import json
 import unittest
+from dataclasses import replace
 
 from companion_v2.conversation.reply_management import ReplyManagement
+from companion_v2.execution.models import TaskError
+from companion_v2.model_gateway.models import Amount
 from companion_v2.conversation.text_processing import text_policy
 from tests.proactive_support import ContactFixture
 from tests.test_role_tool_loop import answered
@@ -61,6 +64,25 @@ class ProactiveTextPresentationTests(ContactFixture, unittest.IsolatedAsyncioTes
         instruction = text_policy(captured).instruction
         self.assertIn("日常表达要求", instruction)
         self.assertIn("只说短句，别总结我。", instruction)
+
+    async def test_contact_retries_without_optional_context_when_prompt_exceeds_model_profile(self):
+        reservations = {"count": 0}
+        provider = self.providers[0]
+        def reserve(envelope):
+            reservations["count"] += 1
+            if reservations["count"] == 1:
+                raise TaskError("host_model_limit", "request exceeds its declared input/output profile")
+            return Amount(100, 100)
+        self.providers = (replace(provider, reserve=reserve),)
+
+        app = await self.enabled()
+        task = (await self.contact(app)).unwrap().task
+        self.assertEqual(task.state, "succeeded")
+        await self.delivery_state(app, task.task_id, "delivered")
+        self.assertEqual(reservations["count"], 3)
+        self.assertTrue(self.called)
+        self.assertTrue(any(item.purpose == "contact_intent"
+                            for item in self.called[-1].original.context.materials))
 
     async def test_internal_reaction_expression_metadata_never_reaches_contact_delivery(self):
         app = await self.enabled()

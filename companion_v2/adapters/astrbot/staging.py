@@ -93,9 +93,27 @@ class NativeAdapterTypes:
     session_persona_override_lookup: object | None = None
     persona_snapshot_lookup: object | None = None
     persona_selection_lookup: object | None = None
+    text_provider_types: tuple[type, ...] = ()
+
+    @property
+    def provider_types(self):
+        """Every native class the V2 text transport may wrap.
+
+        OpenAI-compatible providers keep using ``provider``; additional classes
+        (for example AstrBot's native Google GenAI provider) are listed here and
+        translated by the same adapter.
+        """
+        return (self.provider,) + tuple(self.text_provider_types)
+
+    def is_text_provider(self, provider):
+        """Registered class or the public AstrBot text-provider surface."""
+        from .provider import looks_like_text_provider
+        return isinstance(provider, self.provider_types) or looks_like_text_provider(provider)
 
     def __post_init__(self):
         check_version(self.version)
+        if any(not isinstance(item, type) for item in self.text_provider_types):
+            raise ValueError("text provider types must be native provider classes")
         if (self.file is None) != (self.file_loader is None) or (self.file is not None and (
                 not isinstance(self.file, type) or not callable(self.file_loader))):
             raise ValueError("file intake requires an explicit native type and loader")
@@ -251,12 +269,12 @@ class AstrBotStagingSession:
         self.identity = PersistentIdentityDirectory(runtime)
         # These identities are stable across a restart of the same native config.
         native = context.get_provider_by_id(profile.provider_id)
-        if not isinstance(native, native_types.provider):
+        if not native_types.is_text_provider(native):
             raise ValueError("staging provider is unavailable or has an unverified native type")
         binding = ProviderBinding("model.text", profile.provider_id, native_types.version,
             provider_fingerprint(native))
         self.model = AstrBotTextProvider(context, bridge=self.bridge, binding=binding,
-            provider_id=profile.provider_id, version=native_types.version, provider_type=native_types.provider,
+            provider_id=profile.provider_id, version=native_types.version, provider_type=native_types.provider_types,
             function_tool_type=native_types.function_tool, tool_set_type=native_types.tool_set,
             tariff=profile.tariff, maximum_output_tokens=profile.max_output_tokens,
             maximum_input_estimate=profile.maximum_input_estimate, output_parameter=profile.output_parameter,

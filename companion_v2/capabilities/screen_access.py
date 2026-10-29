@@ -11,6 +11,8 @@ from companion_v2.storage.codec import scope_values
 from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
 
+from .privacy import is_core
+
 
 EXTENSION = "companion.screen.native"
 PACKAGE_ID = "astrbot_plugin_private_companion.screen"
@@ -36,8 +38,9 @@ class ScreenAccess:
             raise TaskError("screen_provider_changed", "the loaded Screen package changed")
 
     def _access(self, operator, at, *, action="capability.view", require_active_context=True):
-        if self.context.scope.kind is not ScopeKind.PRIVATE:
-            raise TaskError("screen_private_required", "Screen access is available for private conversations")
+        # 核心管理员默认可用：任何会话范围都不再是门槛。
+        if is_core(self.runtime, operator.subject):
+            return
         if require_active_context:
             require(self.application.tasks.authorize_context(
                 self.context, action="conversation.reply", observed_at=at))
@@ -89,9 +92,10 @@ class ScreenAccess:
                 and installed.desired_state is CapabilityDesiredState.ACTIVE)
             active = bool(same_package and installed.desired_state is CapabilityDesiredState.ACTIVE)
             role_enabled = bool(selection and selection.enabled)
-            read_consented = consents.get("screen.read", (None, 0))[0] == CapabilityAuthorizationState.ACTIVE.value
-            process_consented = consents.get("screen.process", (None, 0))[0] == CapabilityAuthorizationState.ACTIVE.value
-            can_manage = self.policy.scope_access(operator, scope=self.context.scope,
+            core = is_core(self.runtime, operator.subject)
+            read_consented = core or consents.get("screen.read", (None, 0))[0] == CapabilityAuthorizationState.ACTIVE.value
+            process_consented = core or consents.get("screen.process", (None, 0))[0] == CapabilityAuthorizationState.ACTIVE.value
+            can_manage = core or self.policy.scope_access(operator, scope=self.context.scope,
                 action="capability.role.set", observed_at=at, core_only=True).is_success
             catalog = getattr(self.application, "external", None)
             invokable = bool(catalog and any(tool.action == ACTION for tool in catalog.catalog_for(self.context)))

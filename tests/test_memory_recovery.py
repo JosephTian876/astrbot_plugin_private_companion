@@ -86,6 +86,59 @@ class MemoryRecoveryTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         await reflection.run(context, prepared["batch_id"])
         self.assertEqual(len(seen), 2)
 
+    async def test_invalid_anniversary_shape_gets_one_format_repair(self):
+        host, context, prepared = await self.setup_reflection()
+        original, seen = self.model_behavior, []
+        async def once(envelope):
+            seen.append(envelope)
+            if len(seen) == 1:
+                output = json.loads((await original(envelope)).draft.text)
+                output["anniversaries"] = [
+                    {"label": "第一次见面", "reason": "错误地返回了多个候选", "confidence": 0.8,
+                     "evidence_handle": "s1"},
+                    {"label": "第一次一起吃饭", "reason": "错误地返回了多个候选", "confidence": 0.8,
+                     "evidence_handle": "s1"},
+                ]
+                return answered(encode(output))
+            repair = json.loads(next(m.payload for m in envelope.original.context.materials
+                                     if m.purpose == "format_repair"))
+            self.assertEqual(repair["issues"][0]["code"], "invalid_anniversaries")
+            return await original(envelope)
+        self.model_behavior = once
+        reflection = host.application.memory_reflection
+        result = (await reflection.run(context, prepared["batch_id"])).unwrap()
+        self.assertEqual(result["state"], "complete", result)
+        self.assertTrue(result["repair_batch"])
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(len(self.atoms(host.application)), 1)
+
+    async def test_unknown_evidence_handle_gets_auto_repair(self):
+        host, context, prepared = await self.setup_reflection()
+        original, seen = self.model_behavior, []
+        async def once(envelope):
+            seen.append(envelope)
+            if len(seen) == 1:
+                output = json.loads((await original(envelope)).draft.text)
+                for item in output["proposals"]:
+                    item["proposal"]["evidence_handles"] = ["s999"]
+                return answered(encode(output))
+            repair = json.loads(next(m.payload for m in envelope.original.context.materials
+                                     if m.purpose == "format_repair"))
+            self.assertIn("unknown_evidence", [item["problem"]["code"] for item in repair["items"]])
+            proposals = []
+            for item in repair["items"]:
+                raw = item["raw"]
+                raw["evidence_handles"] = ["s1"]
+                proposals.append({"item_id": item["item_id"], "proposal": raw})
+            return answered(encode({"summary": "已修正来源编号。", "proposals": proposals}))
+        self.model_behavior = once
+        reflection = host.application.memory_reflection
+        result = (await reflection.run(context, prepared["batch_id"])).unwrap()
+        self.assertEqual(result["state"], "complete", result)
+        self.assertTrue(result["repair_batch"])
+        self.assertEqual(len(seen), 2)
+        self.assertGreaterEqual(len(self.atoms(host.application)), 1)
+
     async def test_repeated_format_failure_is_bounded_and_never_becomes_empty(self):
         host, context, prepared = await self.setup_reflection()
         async def invalid(_):

@@ -241,6 +241,40 @@ def build_wire(envelope, *, model_name=""):
     return wire
 
 
+def _decode_host_parsed_response(response, wire):
+    """Decode a normalized AstrBot response without a ChatCompletion object.
+
+    OpenAI-compatible Responses API providers return an ``LLMResponse`` whose
+    ``raw_completion`` is a Responses object with ``output`` items instead of
+    ``choices``. AstrBot has already normalized text and function calls onto
+    the response, so validate those fields rather than assuming ChatCompletions.
+    """
+    names = list(response.tools_call_name or ())
+    arguments = list(response.tools_call_args or ())
+    identifiers = list(response.tools_call_ids or ())
+    if names or arguments or identifiers:
+        if (len(names) != len(arguments) or len(names) != len(identifiers)
+                or not 1 <= len(names) <= 8):
+            raise ValueError("incomplete or unbounded tool result")
+        calls = []
+        for call_id, name, raw_arguments in zip(identifiers, names, arguments):
+            if type(call_id) is not str or not call_id or type(name) is not str or name not in wire.aliases:
+                raise ValueError("model requested an undeclared tool")
+            if isinstance(raw_arguments, str):
+                parsed_arguments = strict_json(raw_arguments)
+            elif isinstance(raw_arguments, dict):
+                parsed_arguments = raw_arguments
+            else:
+                raise ValueError("model tool arguments must be an object")
+            if not isinstance(parsed_arguments, dict):
+                raise ValueError("model tool arguments must be an object")
+            calls.append(ToolCall(call_id, wire.aliases[name], encode(parsed_arguments)))
+        if len({call.call_id for call in calls}) != len(calls):
+            raise ValueError("duplicate tool call id")
+        return None, tuple(calls)
+    return decode_text_response(response.completion_text, wire)
+
+
 def decode_response(response, wire):
     """Validate raw tool arguments as well as the host's parsed result.
 
@@ -248,7 +282,12 @@ def decode_response(response, wire):
     never turn a malformed effectful call into a valid zero-argument operation.
     """
     completion = response.raw_completion
-    if len(completion.choices) != 1:
+    choices = getattr(completion, "choices", None)
+    if choices is None:
+        # Responses API: AstrBot's LLMResponse carries normalized text/tool
+        # fields and its raw_completion has no ChatCompletion ``choices``.
+        return _decode_host_parsed_response(response, wire)
+    if len(choices) != 1:
         raise ValueError("exactly one model result is required")
     choice = completion.choices[0]
     native_calls = choice.message.tool_calls or []

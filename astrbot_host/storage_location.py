@@ -122,6 +122,10 @@ def selected_root(default_root: Path, selected_path: object) -> Path:
     if not candidate.is_absolute():
         raise ValueError("storage path must be absolute")
     target = (candidate / PLUGIN_NAME).resolve()
+    if _looks_like_plugin_code_dir(target):
+        raise ValueError("storage path cannot be the plugin code directory")
+    if _looks_like_v1_root(target):
+        raise ValueError("storage path cannot be the V1 data directory")
     if target == default or target.is_relative_to(default) or default.is_relative_to(target):
         raise ValueError("storage path cannot be inside the current plugin data directory")
     return target
@@ -365,7 +369,7 @@ def _copy_verified(source: Path, destination: Path) -> None:
 
 def prepare_storage_root(default_root: Path, config: object) -> Path:
     """Move V2 data before controllers open it; the AstrBot root keeps a tiny pointer."""
-    default = Path(default_root).resolve()
+    default = resolve_data_root(Path(default_root).resolve())
     storage = config.get("storage", {}) if isinstance(config, dict) else {}
     selected = storage.get("path", "") if isinstance(storage, dict) else ""
     pointer_document = _read_pointer_document(default)

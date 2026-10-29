@@ -1,5 +1,15 @@
 # 更新日志
 
+## 7.0.1
+- 2026-10-29：修复群聊被明确 @ 时同一条回复发送两次的问题。@ 命中后本轮已经确定为回复，不再向模型注入 `group.participation.choose`；避免 AstrBot 先发送正文、再执行该工具触发第二轮发送。
+- 2026-10-29：修复「学习与成长 → 语义理解与素材」的全局策略页打不开、报 `语义素材请求与当前接口不匹配` 的问题。`GET /semantic?global=true` 现在跳过仅属于会话目标的 `target_id` 解析，不再触发 `KeyError` → `semantic_request_invalid`；全局 `analysis_provider` 设置恢复可编辑。
+- 2026-10-29：扩展 AstrBot 文本 Provider 识别与选择：除 `openai_chat_completion` 外，支持 `openai_responses` / `ProviderOpenAIResponses` 等暴露文本能力的 Provider；响应解码同时接受 ChatCompletion 与 Responses 归一化结果，工具调用仍校验名称、ID 和参数。
+- 2026-10-29：修复 AstrBot `get_data_dir()` 返回插件代码目录或 V1 数据根时，V2 将其当作运行数据根并报 `StoragePathError` 的问题；控制器、存储根解析和自定义存储路径统一归一化，拒绝写入代码目录和旧版数据目录。
+- 2026-10-29：修复管理员私聊绑定在角色别名/窗口人格漂移后被误判为 `host_persona_binding_changed` 的问题；目标窗口未变时按当前角色自动修复绑定并继续测试，同时保留明确的诊断原因。
+- 2026-10-29：新建管理员绑定时读取窗口实际人格，避免空人格被写成 `[%None]` 后与真实窗口人格不一致。
+- 2026-10-29：主动联系在遇到较小上下文模型时先做只读 Provider 预检；超过输入/输出档案时省略可选记忆与历史并保留当前事件、来源证据和角色指令，仍超出则返回明确错误，不再在首次模型请求时中断。
+- 2026-10-29：README 版本、群聊 LLM 指令和 7.0.1 发布说明同步。
+
 ## 7.0.0 — 2026-10-29 正式版
 
 7.0 系列正式版。此前的 7.0.1–7.0.21 为正式版前的内部迭代，逐版记录已移入 `CHANGELOG_PRE_7.0.0.md`；本版本统一以 **7.0.0** 发布。
@@ -16,6 +26,8 @@
 
 ### 修复
 
+- 修复 AstrBot `get_data_dir()` 返回插件代码目录或 V1 数据根时，V2 仍把该目录当作运行数据根、触发 `StoragePathError: V2 must not use a V1 plugin directory as its data root` 的问题。现在控制器构造和 `prepare_storage_root()` 都会再次归一化数据根；自定义存储路径也会拒绝插件代码目录和 V1 数据目录，避免把数据库写进代码或旧版用户数据。
+- 修复 OpenAI Responses API Provider（AstrBot `openai_responses` / `ProviderOpenAIResponses`）返回 `Response` 对象时，V2 仍按 ChatCompletion 的 `.choices` 解析而报 `AttributeError` / `response_contract_rejected` 的问题。现在同时支持 `openai_chat_completion` 与 `openai_responses`：文本从宿主归一化后的 `completion_text` 读取，工具调用校验 `tools_call_name` / `tools_call_ids` / `tools_call_args`，不再要求 `raw_completion.choices`。
 - 修复 Gemini Provider 在后台角色参考替换后，把稳定档案误当成宿主原始人格进行 `verify_role()` 校验，导致 `proactive.compose`、`proactive.judge`、日记、成长和反思等后台任务报 `host_persona_changed` 的问题；现在只校验捕获的宿主人格，不删除稳定档案，也不跳过人格校验。
 - 修复热重载接管正在生成的回复时，发送前因旧版 `Outcome` 类型校验中断的问题；授权结果、会话身份与语音设置随当前实例接续，未知发送结果仍不重发。
 - 修复普通文本与流式回复经过可选语音处理时，非字典上下文被误当成语音配置、在授权发送前异常的问题。

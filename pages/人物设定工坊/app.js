@@ -1,7 +1,6 @@
 "use strict";
 (() => {
   const $ = id => document.getElementById(id);
-  const LONG_MODEL_TIMEOUT = {timeoutMs: 180000};
   const sectionRows = [
     ["identity", "基本信息", "<Role_Profile>", "姓名、身份、经历、职业"],
     ["appearance", "外貌特征", "<Role_Profile>", "外貌、衣着与标志特征"],
@@ -83,6 +82,7 @@
     return result;
   }
   function errorText(error) { return errors[error && error.code] || errors[error && error.message] || (error && error.message) || "这一操作没有完成，请刷新后重试。"; }
+  const LONG_MODEL_TIMEOUT = {timeoutMs: 180000};
   function post(path, body, options) { return bridge.apiPost(path, body, options).then(unwrap); }
   function get(path, body) { return bridge.apiGet(path, body).then(unwrap); }
   function workspaceKey() { return "companion.persona-workshop.v2." + encodeURIComponent(sourceId || "current"); }

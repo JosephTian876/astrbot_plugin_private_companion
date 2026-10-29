@@ -365,12 +365,13 @@ IMAGE_PROVIDER_GROUP = {
 def text_provider_catalog(controller):
     """Return the live AstrBot text providers shared by model pages and drafts."""
     context = controller.context
-    expected_type = getattr(getattr(controller, "native_types", None), "provider", None)
+    from .bootstrap_provider import supported_text_provider, text_provider_predicate
+    expected_type = text_provider_predicate(getattr(controller, "native_types", None))
     if expected_type is None:
         raise TaskError("model_catalog_unavailable", "AstrBot text provider type is unavailable")
     providers = []
     for provider in list(context.get_all_providers() or []):
-        if not isinstance(provider, expected_type):
+        if not supported_text_provider(provider, expected_type):
             continue
         meta = provider.meta() if callable(getattr(provider, "meta", None)) else None
         identifier = str(getattr(meta, "id", "") or getattr(provider, "id", "") or "").strip()

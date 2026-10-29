@@ -36,6 +36,14 @@ def _provider_id(native):
                or getattr(native, "provider_config", {}).get("id", "")).strip()
 
 
+def _text_provider(native_types, native):
+    """Registered text class, or any provider exposing the AstrBot text surface."""
+    checker = getattr(native_types, "is_text_provider", None)
+    if callable(checker):
+        return bool(checker(native))
+    return isinstance(native, getattr(native_types, "provider_types", ()) or ())
+
+
 def loaded_routing(fallback_provider_id, replacement_rules, provider_ids):
     """Keep saved default routes only while their AstrBot providers are loaded."""
     available = frozenset(provider_ids)
@@ -71,10 +79,10 @@ def assemble_providers(context, *, bridge, native_types, primary_id, additional=
     candidates = []
     seen = set()
     for native in inventory:
-        if isinstance(native, native_types.provider):
-            adapter_kind = "text"
-        elif native_types.video_provider_type is not None and isinstance(native, native_types.video_provider_type):
+        if native_types.video_provider_type is not None and isinstance(native, native_types.video_provider_type):
             adapter_kind = "video"
+        elif _text_provider(native_types, native):
+            adapter_kind = "text"
         else:
             continue
         try:
@@ -96,7 +104,8 @@ def assemble_providers(context, *, bridge, native_types, primary_id, additional=
             else:
                 adapter = AstrBotTextProvider(context, bridge=bridge,
                     binding=ProviderBinding("model.text", provider_id, native_types.version, provider_fingerprint(native)),
-                    provider_id=provider_id, version=native_types.version, provider_type=native_types.provider,
+                    provider_id=provider_id, version=native_types.version,
+                    provider_type=getattr(native_types, "provider_types", native_types.provider),
                     function_tool_type=native_types.function_tool, tool_set_type=native_types.tool_set,
                     tariff=settings.tariff, maximum_output_tokens=settings.maximum_output_tokens,
                     maximum_input_estimate=settings.maximum_input_estimate, output_parameter=settings.output_parameter,

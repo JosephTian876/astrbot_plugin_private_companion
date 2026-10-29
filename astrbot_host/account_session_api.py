@@ -15,7 +15,8 @@ from companion_v2.execution.models import TaskError, digest
 from .multi_settings import MultiHostSettings
 from .native import remember_session_settings
 from .settings import HostControlError
-from .bootstrap_provider import resolve_bootstrap_provider, text_provider_catalog
+from .bootstrap_provider import (resolve_bootstrap_provider, text_provider_catalog,
+                                 text_provider_predicate)
 
 
 PREFIX = "/astrbot_plugin_private_companion/accounts"
@@ -52,7 +53,7 @@ class AccountSessionWebAPI:
     def _model_providers(self):
         """Return loaded AstrBot providers that can start the V2 host."""
         context = getattr(self.controller, "context", None)
-        expected_type = getattr(getattr(self.controller, "native_types", None), "provider", None)
+        expected_type = text_provider_predicate(getattr(self.controller, "native_types", None))
         if context is None:
             return []
         return text_provider_catalog(context, expected_type)
@@ -64,7 +65,7 @@ class AccountSessionWebAPI:
 
     def _model_selection(self):
         context = getattr(self.controller, "context", None)
-        expected_type = getattr(getattr(self.controller, "native_types", None), "provider", None)
+        expected_type = text_provider_predicate(getattr(self.controller, "native_types", None))
         if context is None:
             return None
         return resolve_bootstrap_provider(context, expected_type, self._configured_provider_id())
@@ -72,7 +73,7 @@ class AccountSessionWebAPI:
     def _model_view(self):
         configured = self._configured_provider_id()
         context = getattr(self.controller, "context", None)
-        expected_type = getattr(getattr(self.controller, "native_types", None), "provider", None)
+        expected_type = text_provider_predicate(getattr(self.controller, "native_types", None))
         selection = (resolve_bootstrap_provider(context, expected_type, configured)
                      if context is not None else None)
         providers = self._model_providers()
@@ -421,7 +422,7 @@ class AccountSessionWebAPI:
             if not provider_id or len(provider_id) > 512:
                 raise TaskError("account_config_invalid", "the shared model provider id is invalid")
             available = {item["id"] for item in self._model_view()["providers"]}
-            expected_type = getattr(getattr(self.controller, "native_types", None), "provider", None)
+            expected_type = text_provider_predicate(getattr(self.controller, "native_types", None))
             provider = (self.controller.context.get_provider_by_id(provider_id)
                         if getattr(self.controller, "context", None) is not None else None)
             if (provider_id not in available or expected_type is None

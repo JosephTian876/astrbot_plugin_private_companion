@@ -1,4 +1,4 @@
-/* 闄即灏忓眿澶栧３甯冨眬銆? *
+﻿/* 闄即灏忓眿澶栧３甯冨眬銆? *
  * 鏂偣灏哄害锛堥〉闈㈢骇锛屽彧鏈夎繖鍑犳。锛涙柊澧為〉闈㈢骇瑙勫垯璇锋寕鍒板叾涓竴妗ｏ級锛? *   360   瓒呯獎鎵嬫満锛堝鑸敹鍒版渶灏忋€侀潰鏉垮崟鍒楋級
  *   520   绐勬墜鏈猴紙涓ゅ垪缃戞牸鏀舵垚涓€鍒楋級
  *   650   鎵嬫満妯睆 / 灏忓钩鏉? *   760   骞虫澘绔栧睆锛氬乏鏍忓彉鎴愭í鍚戝浘鏍囨潯
@@ -433,7 +433,7 @@
 #homeShell[data-away="true"] .stage-region .voxel-room { pointer-events: none; }
 #homeShell[data-away="true"] .stage-region .room-stage { cursor: pointer; }
 #homeShell[data-away="true"] .stage-region .room-stage::after {
-  content: "鍥炲埌灏忓眿";
+  content: "回到小屋";
   position: absolute;
   right: var(--sp-2);
   bottom: var(--sp-2);

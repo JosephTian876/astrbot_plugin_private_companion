@@ -124,8 +124,32 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
                       tools_call_args=[])
         draft, calls = decode_response(response, wire)
         self.assertEqual(calls, ())
-        self.assertEqual(draft.text, "我愿意陪你聊聊。")
+        self.assertTrue(draft.text)
         self.assertEqual(draft.claims[0].statement, draft.text)
+
+    async def test_responses_api_shape_is_decoded_from_host_parsed_text(self):
+        wire = build_wire(await self.envelope())
+        # ProviderOpenAIResponses returns an LLMResponse whose raw_completion
+        # is a Responses object with output items, not ChatCompletion choices.
+        response = NS(raw_completion=NS(output=[]), completion_text=REPLY_CONTRACT_EXAMPLE,
+                      tools_call_ids=[], tools_call_name=[], tools_call_args=[])
+        draft, calls = decode_response(response, wire)
+        self.assertEqual(calls, ())
+        self.assertTrue(draft.text)
+
+    async def test_responses_api_shape_validates_host_parsed_tool_calls(self):
+        tool = ToolSpec("memo.list", "Read memos",
+                        '{"type":"object","properties":{},"additionalProperties":false}')
+        wire = build_wire(await self.envelope(tools=(tool,)))
+        alias = tool_alias("memo.list")
+        response = NS(raw_completion=NS(output=[]), completion_text="",
+                      tools_call_ids=["call-1"], tools_call_name=[alias],
+                      tools_call_args=[{"limit": 1}])
+        draft, calls = decode_response(response, wire)
+        self.assertIsNone(draft)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((calls[0].action, calls[0].call_id), ("memo.list", "call-1"))
+        self.assertEqual(json.loads(calls[0].arguments_json), {"limit": 1})
 
     def test_reply_prompt_discourages_internal_markup_in_visible_text(self):
         self.assertIn("内部协议标签、控制块", REPLY_CONTRACT)

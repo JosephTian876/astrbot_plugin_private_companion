@@ -196,7 +196,9 @@ class SemanticWebAPI:
             selection = {key:query[key] for key in ("target_id","role_id","session_id","global") if key in query}
             service, context = self.resolve(selection)
             result = self.status(service,context)
-            if hasattr(self.controller.settings, "all_targets"):
+            if context is not None and hasattr(self.controller.settings, "all_targets"):
+                # Global settings requests intentionally carry no target/role.
+                # Resolve target-specific group sessions only for a chat scope.
                 target = self.controller.settings.target(query["target_id"])
                 if isinstance(target, GroupTarget):
                     result["sessions"] = list(self.group_sessions(target, query["role_id"], service))

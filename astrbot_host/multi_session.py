@@ -409,7 +409,7 @@ class MultiHostSession:
             file_settings=lambda scope, role: file_intake_settings(runtime, scope, role))
         self.model = AstrBotTextProvider(native_context, bridge=self.bridge,
             binding=ProviderBinding("model.text", common.provider_id, native_types.version, provider_fingerprint),
-            provider_id=common.provider_id, version=native_types.version, provider_type=native_types.provider,
+            provider_id=common.provider_id, version=native_types.version, provider_type=native_types.provider_types,
             function_tool_type=native_types.function_tool, tool_set_type=native_types.tool_set,
             tariff=common.tariff, maximum_output_tokens=common.max_output_tokens,
             maximum_input_estimate=common.maximum_input_estimate, output_parameter=common.output_parameter,

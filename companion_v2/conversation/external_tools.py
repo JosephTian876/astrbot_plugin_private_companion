@@ -16,6 +16,7 @@ from types import MappingProxyType
 from typing import Awaitable, Callable
 
 from companion_v2.capabilities.models import CapabilityPackageDescriptor
+from companion_v2.capabilities.privacy import PRIVACY_ACTIONS, is_core
 from companion_v2.capabilities.repositories import CapabilityRepository
 from companion_v2.execution.models import (
     Lane, ProviderBinding, SideEffect, TaskClaim, TaskContext, TaskDefinition, TaskError,
@@ -258,13 +259,20 @@ class ExternalToolExecutor:
         return provider
 
     def _admit(self, descriptor, context, at):
-        if context.scope.kind is ScopeKind.GROUP and descriptor.tool.action not in GROUP_IMAGE_ACTIONS:
+        action = descriptor.tool.action
+        privacy = action in PRIVACY_ACTIONS
+        core = is_core(self.runtime, context.actor.subject) if privacy else False
+        # 隐私能力不再按会话范围拦截：群聊和私聊使用同一份授权判定。
+        if (context.scope.kind is ScopeKind.GROUP and action not in GROUP_IMAGE_ACTIONS
+                and not privacy):
             raise TaskError("tool_not_available", "this external action is not exposed to a group conversation")
         provider = self._provider(descriptor)
         if provider.admit is not None:
             require(self.tasks.authorize_context(context, action="conversation.reply", observed_at=at))
             return require(provider.admit(context, at))
-        require(self.tasks.authorize_context(context, action="extension.tool.invoke", observed_at=at))
+        # 核心管理员默认可用：不再要求该会话的 extension.tool.invoke 授权。
+        if not core:
+            require(self.tasks.authorize_context(context, action="extension.tool.invoke", observed_at=at))
         package = descriptor.package
         installed = require(self.capabilities.installation(extension_id=package.extension_id))
         if (installed.package_id, installed.package_version, installed.artifact_hash) != (
@@ -276,6 +284,8 @@ class ExternalToolExecutor:
             raise TaskError("external_package_changed", "tool differs from the trusted package catalog")
         require(self.capabilities.require_role_enabled(extension_id=package.extension_id,
                 role=context.role_binding.role, bot_id=context.scope.bot_id))
+        if core:
+            return package
         return require(self.capabilities.authorize(extension_id=package.extension_id,
                        capability_id=descriptor.binding.capability, subject=context.actor.subject, scope=context.scope))
 

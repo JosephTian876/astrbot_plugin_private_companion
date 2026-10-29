@@ -21,8 +21,9 @@ from companion_v2.proactive.scheduling import DIAGNOSTIC_ENVIRONMENT_VARIANTS
 from companion_v2.sources.privacy import redact_text
 
 from .binding_store import PendingBinding, binding_path, read_binding, write_binding
-from .bootstrap_provider import resolve_bootstrap_provider, text_provider_catalog
-from .identity_derivation import derive_bot_id, derive_role_id
+from .bootstrap_provider import (resolve_bootstrap_provider, supported_text_provider,
+                                 text_provider_catalog, text_provider_predicate)
+from .identity_derivation import derive_bot_id, derive_role_id, normalize_persona_id
 from .management_identity import dashboard_operator
 from .persona_catalog import available_personas
 from .settings import HostControlError
@@ -79,6 +80,7 @@ PROACTIVE_TEST_SUGGESTIONS = {
     "delivery_result_unknown": "投递结果未知；核对核心管理员私聊与平台消息记录。确认是否收到前不要重试本次测试。",
     "delivery_failed": "检查 OneBot 私聊连接、机器人在线状态和平台返回错误；确认没有收到后，再用新的验收尝试重测。",
     "setup_core_window_ambiguous": "检查已配置私聊目标的核心用户身份；主动测试只会发送到唯一且当前有效的核心管理员私聊窗口。",
+    "host_persona_binding_changed": "绑定已按当前窗口自动修复；若反复出现，请在「开始使用」重新确认管理员私聊窗口。",
 }
 
 PROACTIVE_TEST_FAILURE_LABELS = {
@@ -95,6 +97,7 @@ PROACTIVE_TEST_FAILURE_LABELS = {
     "authorization_revoked": ("authorization", "当前 Dashboard 身份的管理授权已撤销"),
     "authorization_expired": ("authorization", "当前 Dashboard 身份的管理授权已过期"),
     "authorization_not_active": ("authorization", "当前 Dashboard 身份的管理授权尚未生效"),
+    "host_persona_binding_changed": ("binding", "管理员私聊绑定已变化"),
     "contact_attempt_budget": ("attempt_budget", "主动模型调用次数上限已触发"),
     "contact_delivery_budget": ("delivery_budget", "本私聊今日实际联系额度已用完"),
     "contact_permission_required": ("authorization", "主动联系授权未通过"),
@@ -171,6 +174,7 @@ PROACTIVE_TEST_STAGE_BY_CODE = {
     "setup_core_window_not_configured": "binding",
     "setup_core_window_ambiguous": "binding",
     "setup_private_window_required": "binding",
+    "host_persona_binding_changed": "binding",
     "staging_not_initialized": "runtime",
     "proactive_diagnostic_unavailable": "runtime",
     "contact_permission_required": "settings",
@@ -265,7 +269,7 @@ class SetupWebAPI:
 
     def _model_providers(self) -> list[dict]:
         context = getattr(self.controller, "context", None)
-        expected_type = getattr(getattr(self.controller, "native_types", None), "provider", None)
+        expected_type = text_provider_predicate(getattr(self.controller, "native_types", None))
         return text_provider_catalog(context, expected_type) if context is not None else []
 
     def _configured_provider_id(self) -> str:
@@ -275,7 +279,7 @@ class SetupWebAPI:
 
     def _model_selection(self):
         context = getattr(self.controller, "context", None)
-        expected_type = getattr(getattr(self.controller, "native_types", None), "provider", None)
+        expected_type = text_provider_predicate(getattr(self.controller, "native_types", None))
         return (resolve_bootstrap_provider(context, expected_type, self._configured_provider_id())
                 if context is not None else None)
 
@@ -501,8 +505,9 @@ class SetupWebAPI:
                 raise TaskError("setup_step_order_invalid", "confirm the core administrator window before choosing a model")
             available = {item["id"] for item in status["model"]["providers"]}
             provider = self.controller.context.get_provider_by_id(provider_id)
-            expected_type = getattr(getattr(self.controller, "native_types", None), "provider", None)
-            if provider_id not in available or expected_type is None or not isinstance(provider, expected_type):
+            expected_type = text_provider_predicate(getattr(self.controller, "native_types", None))
+            if (provider_id not in available or expected_type is None
+                    or not supported_text_provider(provider, expected_type)):
                 raise TaskError("host_provider_unavailable", "choose a loaded AstrBot text provider supported by V2")
             config = self.controller.config
             if not isinstance(config, dict):
@@ -657,6 +662,49 @@ class SetupWebAPI:
             raise TaskError("setup_private_window_required", "the active test requires the confirmed private window")
         return session, context, instruction
 
+    def _canonical_role(self, role_id):
+        settings = getattr(self.controller, "settings", None)
+        canonical = getattr(settings, "canonical_role_id", None)
+        return canonical(role_id) if callable(canonical) else str(role_id or "")
+
+    @staticmethod
+    def _context_role(context):
+        role = getattr(getattr(context, "role_binding", None), "role", None)
+        return getattr(role, "subject_id", None)
+
+    def _role_matches_binding(self, binding_role, context):
+        """角色比对容错：任一侧缺信息就不校验，别名链视为同一角色。"""
+        actual = self._context_role(context)
+        if not binding_role or not actual:
+            return True
+        return self._canonical_role(binding_role) == self._canonical_role(actual)
+
+    def _repair_parked_binding(self, target, context):
+        """窗口目标没变时，按当前角色重写过期的人格映射，而不是中断流程。"""
+        actual = self._context_role(context)
+        root = getattr(self.controller, "binding_root", None)
+        if not actual or root is None:
+            return False
+        parked = read_binding(root)
+        if parked is None:
+            return False
+        settings = getattr(self.controller, "settings", None)
+        wanted = self._canonical_role(actual)
+        matches = [item for item in getattr(settings, "personas", ())
+                   if item.bot_id == target.bot_id and self._canonical_role(item.role_id) == wanted]
+        if len(matches) != 1:
+            return False
+        persona_id = matches[0].persona_id
+        if normalize_persona_id(persona_id) == normalize_persona_id(parked.persona_id):
+            return False
+        try:
+            write_binding(root, PendingBinding(parked.platform_id, parked.account_id,
+                parked.participant_id, persona_id, parked.confirmed))
+        except (OSError, ValueError):
+            return False
+        logger.info("[CompanionV2] 管理员私聊绑定已按当前窗口人格自动修复 target=%s", target.target_id)
+        return True
+
     async def _setup_context_with_target(self):
         binding = self._binding()
         if not binding.get("bound") or binding.get("pending"):
@@ -688,8 +736,10 @@ class SetupWebAPI:
                     or (target.platform_id, target.account_id, target.participant_id) != (
                         current.get("platform_id"), current.get("account_id"), current.get("participant_id"))):
                 raise TaskError("setup_binding_confirmation_required", "the administrator private window changed during setup")
-            if current.get("role_id") and context.role_binding.role.subject_id != current["role_id"]:
-                raise TaskError("host_persona_binding_changed", "the administrator role changed; confirm the window again")
+            if not self._role_matches_binding(current.get("role_id"), context):
+                # 窗口目标没变时，角色漂移只修绑定、不阻断测试。
+                if not self._repair_parked_binding(target, context):
+                    logger.warning("[CompanionV2] 管理员私聊窗口角色与绑定不一致，按当前窗口继续 code=host_persona_binding_changed")
             return session, context, instruction, target
         else:
             context = session.profile.target
@@ -726,8 +776,9 @@ class SetupWebAPI:
                 (fallback_target.platform_id, fallback_target.account_id, fallback_target.participant_id)):
             raise TaskError("setup_binding_confirmation_required",
                             "the core administrator binding changed during the diagnostic")
-        if binding.get("role_id") and context.role_binding.role.subject_id != binding["role_id"]:
-            raise TaskError("host_persona_binding_changed", "the administrator role changed during the diagnostic")
+        if not self._role_matches_binding(binding.get("role_id"), context):
+            if not self._repair_parked_binding(fallback_target, context):
+                logger.warning("[CompanionV2] 诊断期间管理员角色与绑定不一致，按当前窗口继续 code=host_persona_binding_changed")
         resolver = getattr(self.controller, "proactive_diagnostic_target", None)
         if not callable(resolver) or await resolver() != fallback_target:
             raise TaskError("setup_binding_confirmation_required",
@@ -740,8 +791,11 @@ class SetupWebAPI:
         if not getattr(self.controller, "_multi_host", False):
             return self.controller
         _session, context, _instruction, target = await self._setup_context_with_target()
+        role_id = self._context_role(context) or self._binding().get("role_id") or ""
+        if not role_id:
+            raise TaskError("setup_binding_confirmation_required", "confirm the core administrator private window first")
         from .multi_api import TargetControllerView
-        return TargetControllerView(self.controller, target.target_id, context.role_binding.role.subject_id)
+        return TargetControllerView(self.controller, target.target_id, role_id)
 
     @staticmethod
     def _operator(controller, username):
@@ -1092,7 +1146,7 @@ class SetupWebAPI:
                     "started_at": started, "finished_at": datetime.now(timezone.utc).isoformat(),
                     "stages": stages, "replay_allowed": False}))
             except TaskError as error:
-                failure_stage = PROACTIVE_TEST_STAGE_BY_CODE.get(error.code, "authorization")
+                failure_stage = PROACTIVE_TEST_STAGE_BY_CODE.get(error.code, "execution")
                 return self._response(Outcome.success(self._diagnostic_failure(
                     data.get("purpose") if "data" in locals() and isinstance(data, dict) else None,
                     None, failure_stage, error.code, str(error))))
