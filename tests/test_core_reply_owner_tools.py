@@ -15,8 +15,8 @@ from astrbot.core.message.components import Image
 from astrbot.core.message.message_event_result import MessageChain
 from mcp.types import CallToolResult
 
-from astrbot_host.core_reply import prepare_core_reply_event
-from astrbot_host.core_reply_tools import inject_core_reply_tools, native_tool_name
+from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, prepare_core_reply_event
+from astrbot_host.core_reply_tools import inject_core_reply_tools, inject_core_turn_notes, native_tool_name
 from astrbot_host.core_reply_reactions import observe_core_cached_image, observe_core_media_send_returned
 from companion_v2.agenda.models import Schedule
 from companion_v2.conversation.recalls import MessageRecall
@@ -200,6 +200,34 @@ class CoreReplySemanticOwnerToolTests(NativeOwnerCalls, MultiFixture, unittest.I
         with self.semantic.store.db() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM uses").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM reaction_deliveries").fetchone()[0], 1)
+        self.assert_no_reply_work()
+
+    async def test_reaction_tool_set_and_system_prefix_stay_stable_across_turns(self):
+        settings = self.semantic.store.settings()
+        self.semantic.store.configure({"reactions_trigger_probability": 0.0,
+            "reactions_cooldown_seconds": 0}, settings["revision"])
+        first = self.event(identifier="native-reaction-off", text="今天有点累")
+        _, first_request = await self.bind(first)
+        first_tools = [(tool.name, tool.description, tool.parameters) for tool in first_request.func_tool.tools]
+        first_system = first_request.system_prompt
+        self.assertIn(native_tool_name("reaction.search"), [tool[0] for tool in first_tools])
+        self.assertIn("本轮不使用图库表情", first.get_extra(CORE_REPLY_CONTEXT_EXTRA)["_turn_notes"]["reactions"])
+        inject_core_turn_notes(first, first_request)
+        self.assertTrue(any(getattr(part, "text", "").startswith("<companion_v2_native_reactions>")
+                            for part in first_request.extra_user_content_parts))
+        refused = json.loads(await self.invoke(first, first_request, "reaction.search", {"intent": "安慰"}))
+        self.assertEqual((refused["state"], refused["code"]), ("failed", "reaction_unavailable"))
+
+        revision = self.semantic.store.settings()["revision"]
+        self.semantic.store.configure({"reactions_trigger_probability": 1.0}, revision)
+        second = self.event(identifier="native-reaction-on", text="今天有点累")
+        _, second_request = await self.bind(second)
+        second_tools = [(tool.name, tool.description, tool.parameters) for tool in second_request.func_tool.tools]
+        self.assertIn("本轮图库表情可用", second.get_extra(CORE_REPLY_CONTEXT_EXTRA)["_turn_notes"]["reactions"])
+        # The per-turn roll must not change what the provider caches: same tool
+        # definitions and same system prompt on both turns.
+        self.assertEqual(first_tools, second_tools)
+        self.assertEqual(first_system, second_request.system_prompt)
         self.assert_no_reply_work()
 
 

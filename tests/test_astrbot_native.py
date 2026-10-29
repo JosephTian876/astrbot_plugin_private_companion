@@ -90,6 +90,30 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.bridge.persona_snapshot_lookup.assert_awaited_once_with(
             self.native, "qq-main:FriendMessage:200", "conversation-1")
 
+    async def test_default_persona_mapping_follows_selected_native_persona(self):
+        account = self.bridge.accounts[("qq-main", "100")]
+        self.map_second_native_persona()
+        self.bridge.personas = {
+            ("bot-a", "[%None]"): HostPersona("bot-a", "[%None]", ROLE, digest(""))
+        }
+        self.bridge.session_persona_override_lookup = AsyncMock(return_value=None)
+        self.bridge.persona_snapshot_lookup = AsyncMock(return_value=None)
+        self.bridge.persona_selection_lookup = AsyncMock(return_value="second")
+
+        umo = self.bridge._umo("qq-main", "200")
+        cid, selected, persona, special = await self.bridge._selected_persona(account, umo)
+        _, _, _, projection, instruction = await self.bridge._selected_role_snapshot(account, umo)
+        _, second_role, second_instruction = await self.bridge._role_for_umo(account, umo)
+        self.bridge.persona_selection_lookup = AsyncMock(return_value="original")
+        _, original_role, original_instruction = await self.bridge._role_for_umo(account, umo)
+
+        self.assertEqual((cid, selected, persona["name"], special),
+                         ("conversation-1", "second", "second", False))
+        self.assertEqual((projection.persona_id, projection.role, instruction), ("second", ROLE, persona["prompt"]))
+        self.assertEqual((second_role, second_instruction), (ROLE, persona["prompt"]))
+        self.assertEqual((original_role, original_instruction), (ROLE, self.native.persona["prompt"]))
+        self.assertNotIn(("bot-a", "second"), self.bridge.personas)
+
     async def test_uncached_multiple_v2_personas_resolve_the_astrbot_selection_once(self):
         account = self.bridge.accounts[("qq-main", "100")]
         self.map_second_native_persona()
@@ -190,6 +214,32 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TaskError) as raised:
             await self.bridge.verified_persona(self.native_context.scope, self.native_context.role_binding)
         self.assertEqual(raised.exception.code, "host_conversation_changed")
+
+    async def test_verified_persona_accepts_prompt_and_conversation_updates_for_the_same_role(self):
+        await self.envelope()
+        self.native.cid = "conversation-after-reset"
+        self.native.persona["prompt"] = "重置后仍属于同一角色的提示词。"
+
+        current = await self.bridge.verified_persona(self.native_context.scope, self.native_context.role_binding)
+
+        self.assertEqual(current["prompt"], "重置后仍属于同一角色的提示词。")
+
+    async def test_verify_role_rejects_a_role_remap_but_accepts_prompt_edits(self):
+        await self.envelope()
+        self.native.persona["prompt"] = "已编辑的人格表达。"
+
+        prompt = await self.bridge.verify_role(self.native_context.scope,
+                                               self.native_context.role_binding,
+                                               instruction="捕获时的旧提示词。")
+
+        self.assertEqual(prompt, "已编辑的人格表达。")
+        projection = self.bridge.personas[("bot-a", "original")]
+        self.assertEqual(projection.instruction_hash, digest(prompt))
+        self.bridge.personas[("bot-a", "original")] = replace(
+            projection, role=SubjectRef(INSTALLATION, SubjectKind.BOT, "replacement-role"))
+        with self.assertRaises(TaskError) as changed:
+            await self.bridge.verify_role(self.native_context.scope, self.native_context.role_binding)
+        self.assertEqual(changed.exception.code, "host_persona_changed")
 
     async def test_verified_persona_uses_v2_binding_without_host_persona_lookup(self):
         await self.envelope()
@@ -304,13 +354,15 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.failure.code if result.failure else None, expected)
         self.assertFalse(NativeInputPorts().authenticated_principal(FakeEvent(self.native)).is_success)
 
-    async def test_v2_single_persona_binding_ignores_astrbot_selection_and_detects_prompt_edits(self):
+    async def test_v2_single_persona_binding_ignores_astrbot_selection_and_accepts_prompt_edits(self):
         self.native.selected = "other"
         captured = await self.bridge.capture(FakeEvent(self.native))
         self.assertTrue(captured.is_success)
         self.assertEqual(captured.unwrap().instruction, self.native.persona["prompt"])
         self.native.persona["prompt"] = "新人格"
-        self.assertEqual((await self.bridge.capture(FakeEvent(self.native))).failure.code, "host_persona_changed")
+        updated = await self.bridge.capture(FakeEvent(self.native))
+        self.assertTrue(updated.is_success, updated.failure)
+        self.assertEqual(updated.unwrap().instruction, "新人格")
 
     async def test_installed_persona_snapshot_accepts_prompt_updates_until_manual_refresh(self):
         self.bridge.persona_window_snapshot_lookup = lambda umo, account_id: {

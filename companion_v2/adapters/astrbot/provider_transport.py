@@ -16,3 +16,24 @@ def definitely_not_sent(error):
             return True
         error = error.__cause__
     return False
+
+
+_HTTP_REJECTION_STATUSES = frozenset({400, 401, 403, 404, 405, 415, 422, 429})
+
+
+def rejected_before_generation(error):
+    """Return true for HTTP responses that reject a request before generation.
+
+    These are typed client-side rejections (bad request, auth, unsupported
+    media, rate limit), not transport timeouts. No completion was produced, so
+    the caller may safely mark the model call as not started and avoid leaving
+    a reflection batch permanently ``running``.
+    """
+    seen = set()
+    while isinstance(error, Exception) and id(error) not in seen:
+        seen.add(id(error))
+        status = getattr(error, "status_code", None)
+        if type(status) is int and status in _HTTP_REJECTION_STATUSES:
+            return True
+        error = error.__cause__
+    return False

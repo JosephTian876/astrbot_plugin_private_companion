@@ -6,7 +6,7 @@
   const errors = { dashboard_identity_required: "请从已登录的 AstrBot 管理界面打开本页面。", staging_not_initialized: "角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。",
     host_not_running: "请先启动当前 V2 配置。", life_not_bound: "请先启动当前 V2 配置，以载入原角色。", authorization_revoked: "执行权限已关闭或撤销，请确认生活日程设置。",
     authorization_missing: "请先启用生活日程与执行权限。", life_view_stale: "记录或权限已经变化，请刷新后重新确认。", life_reading_unresolved: "原阅读结果尚未确定，不能重复调用。",
-    life_reading_active: "当前片段仍在阅读，请完成或取消后再入睡。", life_sleeping: "角色正在睡眠，请先醒来再阅读。", journal_trigger_unresolved: "原书写仍在进行、结果未知或已经成功，不能重复执行。",
+    life_reading_active: "当前片段仍在阅读，请完成或取消后再入睡。", life_sleeping: "角色正在睡眠，请先醒来再阅读。", life_command_invalid: "生活记录或操作信息已变化，请刷新后重新尝试。", journal_trigger_unresolved: "原书写仍在进行、结果未知或已经成功，不能重复执行。",
     configuration_revision_conflict: "设置已变化，请刷新后重新保存。", core_access_required: "当前账号没有本体管理权限。", source_revoked: "原文已撤回，依赖它的内容已停止使用。" };
   let bridge, state, selected, dialogAction, dialogItem, busy = false, dirty = false, tab = "archive";
   let datePages = [null], datePage = 0, activityCursor = null, polling = null;
@@ -25,6 +25,15 @@
   function localizedError(value) {
     const code = value?.code || value?.data?.code || value?.response?.data?.code || value?.message;
     return Object.assign(new Error(errors[code] || "操作未完成，请刷新确认记录状态后重试。"), {code});
+  }
+  function operationKey() {
+    const webCrypto = window.crypto;
+    if (typeof webCrypto?.randomUUID === "function") return webCrypto.randomUUID();
+    if (typeof webCrypto?.getRandomValues === "function") {
+      return Array.from(webCrypto.getRandomValues(new Uint8Array(16)),
+        value => value.toString(16).padStart(2, "0")).join("");
+    }
+    return "life-" + Date.now() + "-" + Math.random().toString(36).slice(2);
   }
   function unwrap(response) {
     const wrapped = ["ok", "error"].includes(response?.status) && response?.data !== undefined ? response : ["ok", "error"].includes(response?.data?.status) && response?.data?.data !== undefined ? response.data : null;
@@ -61,7 +70,7 @@
       else { body.kind = item.kind; body.local_date = item.local_date; }
     }
     const signature = JSON.stringify(body);
-    if (!pending.has(signature)) pending.set(signature, { ...body, operation_key: crypto.randomUUID() });
+    if (!pending.has(signature)) pending.set(signature, { ...body, operation_key: operationKey() });
     controls(true); $("dialog-error").hidden = true;
     notice(["diary", "dream", "derive"].includes(action) ? "正在书写…" : "正在保存…");
     try {

@@ -86,6 +86,10 @@ class RealityTouchCameraMixin:
         return consent if isinstance(consent, dict) else {}
 
     def _reality_touch_camera_consented(self, user: dict[str, Any]) -> bool:
+        # 管理员默认可用：摄像头不再要求该用户单独确认。
+        user_id = _single_line(user.get("user_id"), 120)
+        if user_id and self._is_configured_admin_user_id(user_id):
+            return True
         consent = self._reality_touch_camera_consent(user)
         capabilities = consent.get("granted_capabilities")
         return (

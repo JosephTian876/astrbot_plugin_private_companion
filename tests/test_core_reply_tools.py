@@ -19,8 +19,8 @@ from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from mcp.types import CallToolResult
 
 from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, prepare_core_reply_event
-from astrbot_host.core_reply_tools import (CoreReplyToolSession, close_core_reply_tools, inject_core_reply_tools,
-                                           native_tool_name)
+from astrbot_host.core_reply_tools import (CoreReplyToolSession, close_core_reply_tools, group_tool_manifest,
+                                           inject_core_reply_tools, native_tool_name)
 from astrbot_host.core_reply_telemetry import observe_core_agent_begin, prepare_core_reply_telemetry
 from astrbot_host.core_reply_tool_dispatch import observe_core_tool_dispatch_begin, restore_core_tool_dispatch
 from companion_v2.agenda.service import AgendaService
@@ -71,6 +71,32 @@ class CoreReplyToolsTests(ExternalFixture, unittest.IsolatedAsyncioTestCase):
         wrapper = self.wrapper(action, arguments, call_id, event)
         output = [value async for value in call_local_llm_tool(wrapper, tool.call, "call", **arguments)]
         return json.loads(output[-1])
+
+    def test_group_tool_manifest_is_static_and_ordered(self):
+        offered = tuple(NS(spec=NS(action=action)) for action in (
+            "news.lookup", "group.memory.query", "slang.search",
+            "group.participation.choose", "group.behavior.learn", "turn.evidence"))
+        lean = [item.spec.action for item in group_tool_manifest(offered, "lean")]
+        self.assertEqual(lean, ["group.participation.choose", "group.memory.query", "slang.search"])
+        standard = [item.spec.action for item in group_tool_manifest(offered, "standard")]
+        self.assertEqual(standard, ["group.participation.choose", "group.memory.query", "slang.search",
+                                    "group.behavior.learn", "turn.evidence"])
+        full = [item.spec.action for item in group_tool_manifest(offered, "full")]
+        self.assertEqual(full, [item.spec.action for item in offered])
+
+    def test_tool_order_is_canonical_for_gemini_and_anthropic_serialisers(self):
+        async def handler(event, **arguments):
+            return "native"
+
+        # AstrBot sorts only the OpenAI schema; Gemini/Anthropic keep insertion
+        # order, so host registration order would otherwise reach the provider.
+        later = FunctionTool("zz_native", "Later tool", {"type": "object"}, handler)
+        earlier = FunctionTool("aa_native", "Earlier tool", {"type": "object"}, handler)
+        self.request.func_tool = ToolSet(tools=[later, earlier])
+        inject_core_reply_tools(self.event, self.request, application=self.app)
+        names = [tool.name for tool in self.request.func_tool.tools]
+        self.assertEqual(names, sorted(names))
+        self.assertIn("aa_native", names)
 
     def test_append_keeps_native_handlers_and_does_not_mutate_shared_catalog(self):
         async def existing_handler(event, **arguments):

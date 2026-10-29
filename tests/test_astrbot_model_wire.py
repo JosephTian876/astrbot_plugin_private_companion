@@ -18,6 +18,22 @@ REPORTED_USAGE = Amount(40, 90, input_tokens=30, cached_input_tokens=10, output_
 
 
 class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_provider_registry_refresh_rebinds_same_configuration(self):
+        envelope = await self.envelope()
+        original = self.native.provider
+        replacement = type(original)()
+        self.native.provider = replacement
+
+        response = await self.native_model.generate(envelope)
+        self.assertEqual(response.status, "generated")
+        self.assertIs(self.native_model.native, replacement)
+        self.assertIs(self.native_model.client, replacement.client)
+
+        replacement.provider_config = {**replacement.provider_config, "model": "changed"}
+        with self.assertRaises(TaskError) as error:
+            self.native_model._current()
+        self.assertEqual(error.exception.code, "host_provider_changed")
+
     async def test_task_profile_prompt_preserves_the_original_host_persona_guard(self):
         envelope = await self.envelope()
         request = replace(envelope.original, role_instruction="角色稳定档案：温和、细心。",
@@ -385,6 +401,20 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.usage, Amount(0, 0) if state == "not_started" else None)
                 self.assertNotIn("private transport detail", "\n".join(captured.output))
         self.assertEqual(len(self.native.provider.client.state.calls), 3)
+
+    async def test_http_client_rejection_is_marked_not_started(self):
+        class Rejected(Exception):
+            status_code = 400
+
+        envelope = await self.envelope()
+        async def reject(*_):
+            raise Rejected("invalid request")
+
+        self.native.provider.client.state.behavior = reject
+        result = await self.native_model.generate(envelope)
+        self.assertEqual(result.status, "not_started")
+        self.assertEqual(result.failure, ModelFailure.TRANSPORT)
+        self.assertEqual(result.usage, Amount(0, 0))
 
     async def test_usage_does_not_require_an_optional_total_or_completion_id(self):
         usage = self.native_model._usage(NS(usage=NS(prompt_tokens=30, completion_tokens=10,

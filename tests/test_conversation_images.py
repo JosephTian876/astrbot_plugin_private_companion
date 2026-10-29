@@ -296,7 +296,7 @@ class ConversationImageTests(ImageFixture, unittest.IsolatedAsyncioTestCase):
             self.native.cid = "replaced-conversation"
             return inspect_image(image_bytes(), locator.position)
         self.bridge.image_loader = switch_role
-        self.assertEqual((await self.bridge.capture(self.image_event("changed"))).failure.code, "host_persona_changed")
+        self.assertTrue((await self.bridge.capture(self.image_event("changed"))).is_success)
 
     async def test_loading_images_does_not_hold_a_storage_transaction(self):
         async def loader(locator):

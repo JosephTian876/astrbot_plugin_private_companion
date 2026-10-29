@@ -384,6 +384,14 @@ class StateMaintenanceTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         await self.start(host)
         return host, app, context, manager
 
+    async def test_source_conversion_accepts_existing_references_and_stored_mappings(self):
+        _, app, context, _ = await self.ready()
+        source = self.source(app, context, "maintenance-source-ref")
+        from companion_v2.identity_policy.private_domain import as_source_ref
+
+        self.assertIs(as_source_ref(source), source)
+        self.assertEqual(as_source_ref(json.loads(encode(source))), source)
+
     async def test_model_maintenance_keeps_persona_shared_budget_and_no_duplicate_calls(self):
         _, app, context, _ = await self.ready()
         self.model_behavior = lambda env: asyncio.sleep(0, result=answered(encode(state_data(hunger="有点饿", energy=45))))

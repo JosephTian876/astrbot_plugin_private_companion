@@ -59,6 +59,26 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
         with patch("astrbot_host.setup_api.request", request):
             return await getattr(self.api, name)()
 
+    async def test_profile_save_accepts_the_full_field_set(self):
+        body = {
+            "target": "role_profile",
+            "operation_key": "setup-profile-body-limit",
+            "edit_token": "0" * 64,
+            "changes": {"identity": "身" * 2000, "personality": "格" * 2400,
+                        "world": "世" * 4200},
+        }
+        self.assertGreater(len(json.dumps(body, ensure_ascii=False).encode("utf-8")), 4096)
+        reached = []
+
+        async def stop_after_body():
+            reached.append(True)
+            raise TaskError("test_body_accepted", "profile body was accepted")
+
+        with patch.object(self.api, "_setup_context", stop_after_body):
+            result = await self.call("save_profile", body)
+        self.assertTrue(reached, result)
+        self.assertEqual(result["data"]["code"], "test_body_accepted")
+
     async def test_setup_api_has_no_runtime_mode_endpoint_or_status_field(self):
         routes = {route for route, *_ in self.api.routes()}
         self.assertNotIn("/astrbot_plugin_private_companion/setup/mode", routes)
@@ -876,13 +896,26 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(restored["automatic_enabled"])
         from companion_v2.proactive.configuration import GROUP, target_for
         recovered_identity = recovered_session.application.tasks.identity
-        self.assertFalse(any(grant.capability == GROUP and grant.grant_id.startswith("proactive-managed:")
+        self.assertTrue(any(grant.capability == GROUP and grant.grant_id.startswith("proactive-managed:")
             and grant.state.value == "active" for grant in recovered_identity.snapshot().grants))
         legacy = recovered_session.application.runtime.read_one(
             "SELECT value_json FROM configuration_values WHERE target_key = ? AND field_id = ?",
             (target_for(context).key, GROUP + ".enabled"))
         self.assertEqual(legacy["value_json"], "false")
         self.assertEqual(self.message_calls(), [])
+
+        started = await self.controller.start()
+        self.assertIsNone(started.failure, started.failure)
+        active_session = self.controller.session
+        active_context = active_session.profile.target
+        operator = dashboard_operator(self.controller.runtime, "administrator", at=NOW)
+        manager = ContactManagement(active_session.application, active_context)
+        current = manager.status(operator).unwrap()
+        manager.configure(operator, {"operation_key": "reenable-after-setup-test",
+            "edit_token": current["edit_token"], "changes": {"enabled": True}}).unwrap()
+        access = active_session.application.tasks.identity.authorize(
+            active_context.actor, scope=active_context.scope, capability=GROUP, observed_at=NOW)
+        self.assertTrue(access.is_success, access.failure)
 
     async def test_reconnect_route_starts_only_a_completed_setup(self):
         denied = await self.call("reconnect_host")

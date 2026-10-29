@@ -31,6 +31,43 @@ MEMORY_READ_ACTIONS = frozenset({
     "memory.query", "memory.legacy.query", "memory.sources", "memory.operation.get", "memory.query.status",
 })
 GROUP_READ_ACTIONS = frozenset({"group.memory.query", "group.memory.legacy.query", "group.memory.operation"})
+
+# Stable window-level manifests.  The order is part of the cached tool prefix:
+# append new actions at the end and bump TOOL_MANIFEST_VERSION when the schema
+# changes, never splice a tool in because one message looks special.
+TOOL_MANIFEST_VERSION = "2026-10-29.1"
+LEAN_GROUP_TOOL_ORDER = ("group.participation.choose", "group.memory.query",
+                         "group.memory.remember", "acquaintance.recall",
+                         "reaction.search", "slang.search")
+LEAN_GROUP_ACTIONS = frozenset(LEAN_GROUP_TOOL_ORDER)
+STANDARD_GROUP_ACTIONS = LEAN_GROUP_ACTIONS | frozenset((
+    "group.behavior.learn", "group.behavior.feedback", "slang.learn", "turn.evidence"))
+LEAN_GROUP_INSTRUCTION = ("【群聊精简工具】本轮工具集固定且很小。决定接话时直接写出回复，不要先调用 "
+    "group.participation.choose；只有决定旁听或等待时才调用 choose(mode=skip)。"
+    "不要因为缺少某个工具就声称无法回应，先用自然语言把当前能说的说完。")
+
+
+def group_tool_manifest(offered, profile):
+    """Return the fixed group manifest for one window-level profile.
+
+    ``full`` keeps the ordinary catalogue.  ``lean`` and ``standard`` filter to
+    the same ordered allowlist on every turn, so the provider's cached tool
+    prefix does not change when a message happens to carry an image or mention.
+    """
+    if profile not in ("lean", "standard"):
+        return tuple(offered)
+    allowed = LEAN_GROUP_ACTIONS if profile == "lean" else STANDARD_GROUP_ACTIONS
+    order = {action: index for index, action in enumerate(LEAN_GROUP_TOOL_ORDER)}
+    filtered, seen = [], set()
+    for item in offered:
+        action = item.spec.action
+        if action not in allowed or action in seen:
+            continue
+        seen.add(action)
+        filtered.append(item)
+    filtered.sort(key=lambda item: order.get(item.spec.action, len(order)))
+    return tuple(filtered)
+
 TOOL_INSTRUCTION = """陪伴工具作用于当前会话与角色，日常聊天可直接回应，需要行动时再调用。工具材料供参考，按实际结果说明：查不到不证明从未发生；unknown 表示结果暂未确认，既不证明成功，也不证明失败或保存丢失。自然说明尚未确认，不编造已经拍好、生成后丢失等过程，也不更换调用编号或引导用户重做同一未知操作。只能用该能力提供的查询方式核对，其他工具查不到不能改变原操作状态。提醒登记不代表平台发送。
 证据句柄用于工具，当前消息需作为证据时先调用 turn.evidence；记忆提议引用本轮提供的真实句柄。来源通常不打断聊天，被追问时再自然说明。
 对方接受刚提出的具体游戏、共处或通话邀请时，调用当前开放的对应工具创建或接续活动，以成功结果为准并给出完整房间链接，不用口头报坐标代替真实对局。不编链接，不在入口未就绪或工具未开放时声称已建房、开局或拨通。
@@ -156,6 +193,8 @@ class CoreReplyToolSession:
         if not isinstance(self.context, TaskContext) or not callable(state.get("authorize")):
             raise TaskError("core_tool_context_invalid", "core tools require the admitted event context")
         self.turn_id = "core-reply:" + digest([self.context.key, _field(self.prepared, "event_id")])
+        profile = _field(self.prepared, "group_tool_profile", "full")
+        self.group_tool_profile = profile if profile in ("lean", "standard", "full") else "full"
         self.native_response = self.native_run_context = None
         self.native_calls = []
         from .core_reply_media import frozen_image_locators
@@ -231,7 +270,8 @@ class CoreReplyToolSession:
             offered.extend(_OfferedTool(spec, "weather") for spec in weather.catalog_for(context))
         semantic = getattr(tools, "semantic", None)
         if semantic is not None:
-            offered.extend(_OfferedTool(spec, "semantic") for spec in semantic.catalog_for(context, self.turn_id))
+            offered.extend(_OfferedTool(spec, "semantic")
+                           for spec in semantic.catalog_for(context, self.turn_id, mount_stable=True))
             news = getattr(semantic, "news_context", None)
             if news is not None:
                 offered.extend(_OfferedTool(spec, "news") for spec in news.catalog_for(context))
@@ -246,6 +286,8 @@ class CoreReplyToolSession:
                     context, (spec.action for spec in native_tools)))
         if _field(self.prepared, "native_source_future") is not None:
             offered.append(_OfferedTool(EVIDENCE_SPEC, "evidence"))
+        if self.context.scope.kind is ScopeKind.GROUP and self.group_tool_profile in ("lean", "standard"):
+            return group_tool_manifest(offered, self.group_tool_profile)
         return tuple(offered)
 
     def choose_participation(self, wrapper, arguments):
@@ -534,6 +576,7 @@ def inject_core_reply_tools(event, req, *, application):
     state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
     if not isinstance(state, dict):
         return ()
+    state["_turn_notes"] = {}
     session = state.get("_tool_session")
     if (not isinstance(session, CoreReplyToolSession) or session.application is not application
             or session.prepared is not state.get("prepared")):
@@ -547,14 +590,24 @@ def inject_core_reply_tools(event, req, *, application):
         inject_core_reaction_instruction(event, req, semantic, session.turn_id)
     existing = list(getattr(getattr(req, "func_tool", None), "tools", ()))
     existing = [tool for tool in existing if not isinstance(tool, CoreReplyFunctionTool)]
+    if session.group_tool_profile == "lean" and session.context.scope.kind is ScopeKind.GROUP:
+        # The lean manifest owns the group tool surface.  Host shell, file,
+        # python and search schemas are large and rarely needed for banter.
+        existing = []
     names = {tool.name for tool in existing}
     appended = [CoreReplyFunctionTool(session, item) for item in offered
                 if native_tool_name(item.spec.action) not in names]
     if appended:
-        req.func_tool = ToolSet(tools=[*existing, *appended])
+        # AstrBot only canonicalises the OpenAI schema; the Gemini and Anthropic
+        # serialisers keep insertion order.  Sort here so every provider sees the
+        # same declaration order no matter how the host registered its tools.
+        req.func_tool = ToolSet(tools=sorted([*existing, *appended], key=lambda tool: tool.name))
         current = getattr(req, "system_prompt", "") or ""
         if TOOL_INSTRUCTION not in current:
             req.system_prompt = (current.rstrip() + "\n\n" + TOOL_INSTRUCTION).lstrip()
+        if (session.group_tool_profile == "lean" and session.context.scope.kind is ScopeKind.GROUP
+                and LEAN_GROUP_INSTRUCTION not in req.system_prompt):
+            req.system_prompt = (req.system_prompt.rstrip() + "\n\n" + LEAN_GROUP_INSTRUCTION).lstrip()
         if any(item.owner == "authoring" for item in offered):
             from companion_v2.conversation.content.authoring_workflow import INSTRUCTION as AUTHORING_INSTRUCTION
             if AUTHORING_INSTRUCTION not in req.system_prompt:
@@ -564,9 +617,27 @@ def inject_core_reply_tools(event, req, *, application):
             if DIAGNOSTIC_INSTRUCTION not in req.system_prompt:
                 req.system_prompt += "\n\n" + DIAGNOSTIC_INSTRUCTION
     elif getattr(req, "func_tool", None) is not None:
-        req.func_tool = ToolSet(tools=existing)
+        req.func_tool = ToolSet(tools=sorted(existing, key=lambda tool: tool.name))
     inject_core_image_prompt(session, req, offered, image_values)
     return tuple(tool._action for tool in appended)
+
+
+def inject_core_turn_notes(event, req):
+    """Apply per-turn directives as user content, after the host cleared them.
+
+    System prompt and tool definitions stay identical between turns; only this
+    turn's directive rides the current user message, which no prefix cache
+    covers anyway.
+    """
+    state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+    if not isinstance(state, dict):
+        return
+    notes = state.get("_turn_notes")
+    if not isinstance(notes, dict):
+        return
+    from .native_extensions.request_context import set_turn_context
+    for name in ("reactions", "image"):
+        set_turn_context(req, name, str(notes.get(name) or ""))
 
 
 async def close_core_reply_tools(application):

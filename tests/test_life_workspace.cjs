@@ -1,0 +1,91 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const test = require("node:test");
+const vm = require("node:vm");
+
+class Element {
+  constructor() {
+    this.listeners = new Map();
+    this.children = [];
+    this.dataset = {};
+    this.value = "";
+    this.textContent = "";
+    this.hidden = false;
+    this.disabled = false;
+    this.checked = false;
+    this.open = false;
+  }
+  addEventListener(name, callback) { this.listeners.set(name, callback); }
+  replaceChildren(...children) { this.children = children; }
+  append(...children) { this.children.push(...children); }
+  setAttribute() {}
+  showModal() { this.open = true; }
+  close() { this.open = false; }
+  click() { this.listeners.get("click")?.({preventDefault() {}}); }
+  submit() { this.listeners.get("submit")?.({preventDefault() {}}); }
+}
+
+test("life workspace sends with getRandomValues and localizes command errors", async () => {
+  const sourcePath = path.join(__dirname, "..", "pages", "日记与生活", "app.js");
+  const source = fs.readFileSync(sourcePath, "utf8");
+  const ids = new Set([...source.matchAll(/\$\("([^"]+)"\)/g)].map((match) => match[1]));
+  const elements = new Map([...ids].map((id) => [id, new Element()]));
+  const document = {
+    hidden: false,
+    getElementById: (id) => elements.get(id) || new Element(),
+    createElement: () => new Element(),
+    querySelectorAll: () => [],
+    addEventListener() {},
+  };
+  const requests = [];
+  const status = {
+    role_id: "role-test",
+    host_state: "running",
+    config: {
+      enabled: true, diary_enabled: true, sleep_enabled: true, reading_enabled: false,
+      derive_enabled: false, timezone: "UTC", diary_time: "22:00", sleep_time: "23:00",
+      sleep_timezone: "UTC", sleep_variation_minutes: 0, sleep_window_minutes: 60,
+      sleep_minutes: 480,
+    },
+    journals: [], activities: [], receipts: [], running: [],
+    next_diary_at: null, next_sleep_at: null, next_date: null, next_activity: null,
+    view_token: "view-test", edit_token: "edit-test", sleep_schedule: null,
+  };
+  const bridge = {
+    ready: async () => bridge,
+    getContext: () => ({display: {role_name: "测试角色"}}),
+    apiGet: async () => status,
+    apiPost: async (endpoint, body) => {
+      requests.push({endpoint, body});
+      return {status: "error", data: {code: "life_command_invalid"}};
+    },
+  };
+  const webCrypto = {
+    getRandomValues(bytes) {
+      bytes.fill(10);
+      return bytes;
+    },
+  };
+  const sandbox = {
+    window: {crypto: webCrypto, AstrBotPluginPage: bridge},
+    document,
+    Option: class extends Element {
+      constructor(label, value) { super(); this.textContent = label; this.value = value; }
+    },
+    setTimeout,
+    clearTimeout,
+  };
+  vm.runInNewContext(source, sandbox, {filename: sourcePath});
+  await new Promise(setImmediate);
+  await new Promise(setImmediate);
+
+  elements.get("start-sleep").click();
+  elements.get("editor-form").submit();
+  await new Promise(setImmediate);
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].endpoint, "life/command");
+  assert.match(requests[0].body.operation_key, /^(?:[0-9a-f]{32}|life-[0-9]+-[a-z0-9]+)$/);
+  assert.equal(elements.get("notice").textContent, "生活记录或操作信息已变化，请刷新后重新尝试。");
+});

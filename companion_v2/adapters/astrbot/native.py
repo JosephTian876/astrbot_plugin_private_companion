@@ -10,7 +10,7 @@ import asyncio
 import inspect
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from companion_v2.execution.models import TaskError, digest, encode, require
@@ -512,6 +512,19 @@ class NativePrivateBridge:
     def _role_conversation_id(conversation_id, role):
         return conversation_id
 
+    def _persona_projection(self, account, persona_id):
+        if persona_id is not None and type(persona_id) is not str:
+            return None
+        projection = self.personas.get((account.bot_id, persona_id))
+        if projection is not None:
+            return projection
+        mappings = [item for (bot_id, _), item in self.personas.items() if bot_id == account.bot_id]
+        if len(mappings) == 1 and mappings[0].persona_id == "[%None]":
+            projection = mappings[0]
+            return (projection if persona_id in (None, "[%None]")
+                    else replace(projection, persona_id=persona_id))
+        return None
+
     async def _role(self, account, sender_id):
         umo = self._umo(account.platform_id, sender_id)
         conversation_id, role, instruction = await self._role_for_umo(account, umo)
@@ -524,6 +537,7 @@ class NativePrivateBridge:
         projected_ids = tuple(persona_id for bot_id, persona_id in self.personas if bot_id == account.bot_id)
         if not projected_ids:
             raise TaskError("host_persona_unmapped", "this Bot has no V2 persona mapping")
+        follows_window_persona = len(projected_ids) == 1 and projected_ids[0] == "[%None]"
 
         snapshot = None
         if self.persona_window_snapshot_lookup is not None:
@@ -531,7 +545,8 @@ class NativePrivateBridge:
             if inspect.isawaitable(snapshot):
                 snapshot = await bounded_native_lookup(snapshot, operation="persona_snapshot", report_slow=False)
         snapshot_persona = (snapshot.get("persona_id") if isinstance(snapshot, dict)
-            and snapshot.get("bot_id") == account.bot_id and snapshot.get("persona_id") in projected_ids
+            and snapshot.get("bot_id") == account.bot_id
+            and self._persona_projection(account, snapshot.get("persona_id")) is not None
             and (snapshot.get("conversation_id") == cid
                  or snapshot.get("selection_source") == "verified")
             else None)
@@ -578,7 +593,7 @@ class NativePrivateBridge:
                     selected = conversation_persona_id
                     if selected != "[%None]" and not selected:
                         selected = configured_default_persona_id(self.context, umo)
-            if selected not in projected_ids:
+            if selected not in projected_ids and not (follows_window_persona and selected not in (None, "[%None]")):
                 raise TaskError(
                     "host_persona_window_unbound",
                     "AstrBot's selected persona is not mapped to this V2 Bot; refresh the window snapshot",
@@ -599,7 +614,7 @@ class NativePrivateBridge:
                 raise TaskError("host_persona_unavailable", "the V2 persona mapping no longer exists in AstrBot")
             if persona.get("name") != selected:
                 raise TaskError("host_persona_invalid", "AstrBot returned a different persona than the V2 mapping")
-        projection = self.personas.get((account.bot_id, selected))
+        projection = self._persona_projection(account, selected)
         if (projection is not None and self.persona_window_snapshot_update is not None
                 and not used_override):
             self.persona_window_snapshot_update(
@@ -613,7 +628,7 @@ class NativePrivateBridge:
 
     async def _selected_role_snapshot(self, account, umo):
         cid, selected, persona, special = await self._selected_persona(account, umo)
-        projection = self.personas.get((account.bot_id, selected))
+        projection = self._persona_projection(account, selected)
         if special or projection is None or (persona is None and selected not in (None, "[%None]")):
             raise TaskError("host_persona_unmapped", "selected persona needs an explicit V2 projection")
         if persona is not None and persona.get("name") != selected:
@@ -624,8 +639,12 @@ class NativePrivateBridge:
     def _confirm_persona_projection(self, account, selected, projection, instruction):
         if self.persona_window_snapshot_lookup is not None:
             return projection
-        if digest(instruction) != projection.instruction_hash:
-            raise TaskError("host_persona_changed", "persona prompt/examples changed; refresh the trusted projection")
+        fingerprint = digest(instruction)
+        if fingerprint != projection.instruction_hash:
+            projection = replace(projection, instruction_hash=fingerprint)
+            if ((account.bot_id, selected) in self.personas
+                    or (account.bot_id, "[%None]") not in self.personas):
+                self.personas[(account.bot_id, selected)] = projection
         return projection
 
     async def _role_for_umo(self, account, umo):
@@ -734,8 +753,8 @@ class NativePrivateBridge:
             raise TaskError("host_route_changed", "original private session is inconsistent")
         cid, role, prompt = await self._role(self.accounts[(scope.platform, scope.account_id)], sender)
         self.client(scope)
-        if cid != scope.conversation_id or role != binding.role or (instruction is not None and prompt != instruction):
-            raise TaskError("host_persona_changed", "host conversation/persona differs from the original turn")
+        if role != binding.role:
+            raise TaskError("host_persona_changed", "host role differs from the original turn")
         return prompt
 
     def _verified_persona_umo(self, scope, binding, account):
@@ -750,9 +769,8 @@ class NativePrivateBridge:
         umo = self._verified_persona_umo(scope, binding, account)
         cid, selected, _, projection, prompt = await self._selected_role_snapshot(account, umo)
         projection = self._confirm_persona_projection(account, selected, projection, prompt)
-        conversation_id = self._role_conversation_id(self._conversation_key(umo, cid), projection.role)
-        if projection.role != binding.role or conversation_id != scope.conversation_id:
-            raise TaskError("host_persona_changed", "selected host persona differs from the verified conversation")
+        if projection.role != binding.role:
+            raise TaskError("host_persona_changed", "selected host persona differs from the verified role")
         self.client(scope)
         return {"persona_id": projection.persona_id, "prompt": prompt,
                 "bot_id": scope.bot_id, "account_id": scope.account_id}
@@ -920,10 +938,10 @@ class NativePrivateBridge:
                     client=event_client, scope=scope, payload_budget=65536 - sum(map(len, text_parts)))
                 text = "".join(file_text.get(position, part) for position, part in enumerate(text_parts))
             if images or quotes or forwards or audios or videos or frozen_files:
-                # Network/image preparation is outside SQLite; host changes during
-                # that await must not let a stale role or revoked human be admitted.
+                # Network/media preparation is outside SQLite; recheck the role,
+                # authenticated sender and client before admitting the captured input.
                 fresh_cid, fresh_role, fresh_instruction = await self._role(account, sender)
-                if (fresh_cid, fresh_role, fresh_instruction) != (cid, role, instruction):
+                if fresh_role != role:
                     raise TaskError("host_persona_changed", "host role changed while preparing attachments")
                 fresh_actor = require(self.identities.resolve_authenticated(principal, observed_at=self.now()))
                 if (fresh_actor.subject, fresh_actor.binding_id, fresh_actor.binding_revision) != (

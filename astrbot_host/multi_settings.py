@@ -33,6 +33,23 @@ class PersonaMapping:
     role_id: str
 
 
+def find_persona_mapping(mappings, bot_id, persona_id):
+    """Resolve a persona mapping, including a lone legacy follow-window entry."""
+    def value(row, key):
+        return row.get(key) if isinstance(row, dict) else getattr(row, key, None)
+
+    rows = [row for row in mappings if value(row, "bot_id") == bot_id
+            and value(row, "persona_id") == persona_id]
+    if rows:
+        return rows[0]
+    bot_rows = [row for row in mappings if value(row, "bot_id") == bot_id]
+    if len(bot_rows) == 1 and value(bot_rows[0], "persona_id") == "[%None]":
+        if isinstance(bot_rows[0], dict):
+            return {**bot_rows[0], "persona_id": persona_id}
+        return replace(bot_rows[0], persona_id=persona_id)
+    return None
+
+
 @dataclass(frozen=True)
 class WindowLink:
     """One primary private window and the windows merged into it.

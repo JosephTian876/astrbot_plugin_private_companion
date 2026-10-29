@@ -132,6 +132,13 @@ def _alias(item, value, kind, at):
         return
     aliases = [entry for entry in item.get("aliases", ())
                if isinstance(entry, dict) and entry.get("value") != value]
+    previous = next((entry for entry in aliases
+                     if isinstance(entry, dict) and entry.get("kind") == kind), None)
+    if previous is not None and previous.get("value"):
+        renames = [entry for entry in item.get("renames", ()) if isinstance(entry, dict)]
+        renames.insert(0, {"at": _iso(at), "kind": kind,
+                           "old": previous["value"], "new": value})
+        item["renames"] = renames[:8]
     aliases.insert(0, {"value": value, "kind": kind, "last_seen": _iso(at)})
     item["aliases"] = aliases[:MAX_ALIASES]
 
@@ -251,7 +258,24 @@ def project_document(document, *, people=(), group_id=""):
                                               "active_days": int(observation.get("active_days") or 0),
                                               "first_seen": observation.get("first_seen"),
                                               "last_seen": observation.get("last_seen"),
-                                              "recent": list(observation.get("recent") or ())[:MAX_RECENT]}})
+                                              "recent": list(observation.get("recent") or ())[:MAX_RECENT]},
+                        "recent_renames": [{key: entry.get(key) for key in ("at", "kind", "old", "new")}
+                                           for entry in (value.get("renames") or observation.get("renames") or ())[:3]
+                                           if isinstance(entry, dict)]})
+    # A display name is not an identity.  When two accounts carry the same
+    # label (or one account reuses another's old name), say so explicitly so the
+    # model cannot treat the name as proof of who is speaking.
+    label_counts = {}
+    for item in members:
+        for label in {item.get("display_name"), *(item.get("aliases") or ())}:
+            key = " ".join(str(label or "").split()).casefold()
+            if key:
+                label_counts[key] = label_counts.get(key, 0) + 1
+    for item in members:
+        labels = {item.get("display_name"), *(item.get("aliases") or ())}
+        item["name_collision"] = any(
+            label_counts.get(" ".join(str(label or "").split()).casefold(), 0) > 1
+            for label in labels if str(label or "").strip())
     members.sort(key=lambda item: (-(item["group_observation"]["message_count"]), item["native_account_id"]))
     edges = []
     for value in document["edges"].values():
@@ -507,7 +531,9 @@ class GroupRelationshipStore:
         if not edge_values:
             edge_values = project_document(document, group_id=context.scope.native_scope_id)["edges"][:MAX_PROMPT_EDGES]
         payload = {"current_members": current[:4], "nearby_interactions": edge_values[:MAX_PROMPT_EDGES],
-                   "instruction": "账号是本轮认证归因；名称、熟人卡和互动边只是参考，互动边不代表现实关系。"}
+                   "instruction": ("账号是本轮认证归因；名称、熟人卡和互动边只是参考，互动边不代表现实关系。"
+                                   "name_collision=true 表示同名或与别的账号旧名相同，必须以账号区分，不能认亲、合并身份或套用称呼；"
+                                   "recent_renames 只是改名痕迹，旧名不能当作新账号的身份证明。")}
         text = encode(payload)
         if len(text) > char_limit:
             payload["current_members"] = [{"native_account_id": item["native_account_id"],

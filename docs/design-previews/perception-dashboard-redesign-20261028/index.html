@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>感知仪表盘 · 重新设计</title>
+<style>
+:root{
+  --bg:#f4f6f3; --panel:#fff; --panel-soft:#f8faf7; --line:#e4e9e1; --line-strong:#d8e0d2;
+  --text:#1d2820; --muted:#748075; --faint:#9aa59c;
+  --green:#315c42; --green-2:#e9f2e9; --mint:#dceadc;
+  --amber:#b27a2b; --amber-bg:#fbf2df; --red:#b65a54; --red-bg:#fbeceb;
+  --blue:#55758a; --shadow:0 12px 34px rgba(35,60,42,.06);
+  font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;
+}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-size:13px}
+.page{width:100%;min-height:100vh;padding:30px 38px 42px}
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:22px}
+.kicker{font-size:10px;letter-spacing:.17em;color:var(--faint);font-weight:700;margin-bottom:4px}
+h1{margin:0;font-size:25px;letter-spacing:-.03em;font-weight:650}
+.sub{margin:7px 0 0;color:var(--muted);font-size:12px}
+.head-right{display:flex;gap:9px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--muted);font-size:11px;white-space:nowrap}
+.pill b{color:var(--text);font-weight:600}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px var(--green-2)}
+.btn{border:1px solid var(--line-strong);background:var(--panel);color:var(--text);border-radius:9px;padding:8px 13px;font:inherit;font-size:12px;cursor:pointer}
+.btn.primary{border-color:var(--green);background:var(--green);color:#fff}
+.notice{display:flex;align-items:center;gap:11px;padding:12px 15px;border:1px solid #eedcb8;background:linear-gradient(90deg,#fcf7ea,#fbfaf4);border-radius:12px;margin-bottom:16px;color:#745325}
+.notice .ic{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;background:#f4e3bc;font-size:12px;font-weight:700;flex:none}
+.notice strong{font-size:12px}.notice span{color:#8d7859;font-size:11.5px}
+.notice .chips{margin-left:auto;display:flex;gap:7px;flex-wrap:wrap}
+.notice-chip{border:1px solid #e7d3aa;background:#fffdf8;border-radius:999px;padding:5px 10px;color:#7f6132;font-size:11px;cursor:pointer}
+.dashboard{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:15px;box-shadow:var(--shadow);overflow:hidden}
+.card-inner{padding:18px}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+.card-title{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:650;letter-spacing:.01em}
+.card-title .ic{width:29px;height:29px;border-radius:9px;background:var(--green-2);display:grid;place-items:center;color:var(--green);flex:none}
+.card-title svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.card-meta{font-size:10.5px;color:var(--faint);white-space:nowrap}
+.hero{grid-column:span 8;background:linear-gradient(135deg,#fbfcf9 0%,#f5f8f2 70%,#f0f5ed 100%)}
+.health{grid-column:span 4}
+.reality{grid-column:span 4}
+.models{grid-column:span 4}
+.activity{grid-column:span 4}
+.hero-inner{padding:20px 22px 18px;min-height:286px;display:flex;flex-direction:column}
+.clock-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.clock{font-size:42px;letter-spacing:-.06em;font-weight:560;line-height:1;color:#26342b}
+.date{margin-top:9px;color:var(--muted);font-size:12px}
+.date span{color:var(--faint);margin:0 5px}
+.weather-badge{display:flex;align-items:center;gap:9px;padding:8px 12px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.65);color:var(--muted);font-size:11.5px}
+.weather-badge strong{color:var(--text);font-size:12px}
+.hero-divider{height:1px;background:linear-gradient(90deg,var(--line),transparent);margin:18px 0 15px}
+.weather-main{display:flex;align-items:center;gap:16px}
+.weather-icon{width:58px;height:58px;border-radius:15px;background:#e7efe6;display:grid;place-items:center;color:#4f6f54}
+.weather-icon svg{width:30px;height:30px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.temp{font-size:37px;line-height:1;font-weight:560;letter-spacing:-.05em}.temp small{font-size:18px;color:#728178;margin-left:2px;letter-spacing:0}
+.cond{margin-top:5px;color:var(--muted);font-size:12px}.cond b{color:#45554a;font-weight:600}.cond span{color:var(--faint);margin:0 6px}
+.hero-facts{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+.fact{font-size:11px;color:#617064;background:rgba(255,255,255,.7);border:1px solid var(--line);border-radius:8px;padding:6px 9px}
+.hero-foot{margin-top:auto;display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--faint);font-size:11px}
+.hero-foot b{color:#59675d;font-weight:600}
+.health-card{min-height:286px;display:flex;flex-direction:column}
+.health-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.health-state{border-radius:999px;padding:4px 9px;font-size:10.5px;background:var(--amber-bg);color:var(--amber);border:1px solid #eedcbb}
+.health-body{margin-top:18px;display:flex;gap:13px;align-items:center}
+.health-orb{width:54px;height:54px;border-radius:16px;background:linear-gradient(145deg,#eef5ec,#e2eee2);display:grid;place-items:center;color:#44664b}
+.health-orb svg{width:25px;height:25px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.health-title{font-size:16px;font-weight:600;letter-spacing:-.02em}.health-sub{color:var(--muted);font-size:11.5px;margin-top:4px}
+.health-empty{margin-top:14px;border:1px dashed var(--line-strong);background:#fbfcfa;border-radius:11px;padding:12px;color:var(--muted);font-size:11.5px;line-height:1.65}
+.health-actions{display:flex;gap:8px;margin-top:auto;padding-top:14px}.health-actions .btn{flex:1;text-align:center}
+.health-proactive{margin-top:10px;display:flex;align-items:center;gap:7px;color:var(--faint);font-size:10.5px}
+.health-proactive .dot{width:6px;height:6px;background:var(--faint);box-shadow:none}
+.reality-card .card-inner,.model-card .card-inner,.activity-card .card-inner{min-height:330px;display:flex;flex-direction:column}
+.channel-list{display:flex;flex-direction:column;gap:2px}
+.channel{display:grid;grid-template-columns:26px minmax(80px,1fr) auto;gap:9px;align-items:center;padding:9px 0;border-bottom:1px solid #f0f2ef}
+.channel:last-child{border-bottom:none}.channel-ic{width:26px;height:26px;border-radius:8px;background:#f5f7f4;display:grid;place-items:center;color:#718075}.channel-ic svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.channel-name{font-size:11.5px;color:#435046}.channel-value{font-size:10.5px;color:var(--faint);text-align:right;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis}
+.channel-value.ok{color:#4e7458}.channel-value.warn{color:#a47631}.channel-value.off{color:#9aa59c}
+.model-lines{display:flex;flex-direction:column;gap:9px;margin-top:2px}
+.model-line{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid #f0f2ef}
+.model-line:last-child{border-bottom:none}.model-label{color:var(--muted);font-size:11px}.model-name{font-size:11.5px;color:#344238;text-align:right;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-line .dot{box-shadow:none;width:6px;height:6px;margin-right:6px}.model-line .right{display:flex;align-items:center}
+.activity-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.activity-item{border:1px solid var(--line);background:#fbfcfa;border-radius:10px;padding:11px 12px;min-height:76px;display:flex;flex-direction:column;justify-content:space-between}
+.activity-item .label{font-size:10.5px;color:var(--faint)}.activity-item .value{font-size:16px;font-weight:600;letter-spacing:-.02em}.activity-item .value small{font-size:10px;color:var(--muted);font-weight:400;margin-left:3px}
+.activity-item .foot{font-size:10px;color:var(--muted)}
+.activity-list{margin-top:12px;display:flex;flex-direction:column;gap:2px}
+.mini-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #f0f2ef;font-size:11px}
+.mini-row:last-child{border-bottom:none}.mini-row .l{color:var(--muted)}.mini-row .r{color:#4e5d52}.mini-row .r.warn{color:#a47631}.mini-row .r.off{color:var(--faint)}
+.card-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:auto;padding-top:12px;border-top:1px solid #f0f2ef;font-size:10.5px;color:var(--faint)}
+.link{color:var(--green);text-decoration:none;font-size:10.5px;font-weight:600}
+.scope{display:flex;gap:6px;flex-wrap:wrap}.tag{font-size:9.5px;padding:3px 7px;border-radius:6px;background:#f3f6f2;color:#738074}
+@media(max-width:1200px){.page{padding:22px}.hero{grid-column:span 12}.health{grid-column:span 5}.reality,.models,.activity{grid-column:span 4}}
+@media(max-width:900px){.health,.reality,.models,.activity{grid-column:span 12}.notice{align-items:flex-start;flex-wrap:wrap}.notice .chips{margin-left:22px}}
+</style>
+</head>
+<body>
+<main class="page">
+  <header class="page-head">
+    <div>
+      <div class="kicker">REAL-TIME PERCEPTION</div>
+      <h1>感知仪表盘</h1>
+      <p class="sub">只展示此刻真实可用、最近同步或明确需要处理的状态；配置统一放在下方工作区。</p>
+    </div>
+    <div class="head-right">
+      <span class="pill"><span class="dot"></span>状态已同步 <b>19:53</b></span>
+      <span class="pill"><b>4</b> 组 · <b>12</b> 个感知通道</span>
+      <button class="btn">重新读取状态</button>
+    </div>
+  </header>
+
+  <section class="notice">
+    <span class="ic">!</span>
+    <div><strong>有 2 项需要处理</strong><br><span>不是连接故障，按需授权或绑定后即可恢复对应通道。</span></div>
+    <div class="chips">
+      <button class="notice-chip">手机读取 · 待授权 →</button>
+      <button class="notice-chip">华为运动健康 · 未绑定 →</button>
+    </div>
+  </section>
+
+  <section class="dashboard">
+    <article class="card hero">
+      <div class="hero-inner">
+        <div class="clock-row">
+          <div>
+            <div class="clock">19:53<span style="font-size:14px;color:#93a096;letter-spacing:0;margin-left:7px">周三</span></div>
+            <div class="date">10 月 28 日<span>·</span>农历九月十九</div>
+          </div>
+          <div class="weather-badge"><span>●</span><strong>东莞</strong><span>· 当前实况</span></div>
+        </div>
+        <div class="hero-divider"></div>
+        <div class="weather-main">
+          <div class="weather-icon">
+            <svg viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 0 0 .8-7.9A6 6 0 0 0 6.4 9.4 4.3 4.3 0 0 0 7 18Z"/><path d="M8 21h8"/></svg>
+          </div>
+          <div>
+            <div class="temp">26<small>°C</small></div>
+            <div class="cond"><b>多云</b><span>·</span>湿度 66%<span>·</span>风速 14 km/h</div>
+          </div>
+        </div>
+        <div class="hero-facts">
+          <span class="fact">农历九月十九</span>
+          <span class="fact">宜 听歌 · 忌 硬撑</span>
+          <span class="fact">今天没有临近的生日或纪念日</span>
+        </div>
+        <div class="hero-foot">
+          <span>环境来源：<b>和风天气</b> · 观测于 19:48</span>
+          <span>天气预警：<b style="color:#4f7057">当前无预警</b></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="card health">
+      <div class="card-inner health-card">
+        <div class="card-head">
+          <div class="card-title">
+            <span class="ic"><svg viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 21l7.8-7.5 1.1-1.1a5.5 5.5 0 0 0-.1-7.8Z"/></svg></span>
+            健康感知
+          </div>
+          <span class="card-meta">独立数据源</span>
+        </div>
+        <div class="health-top"><span class="health-state">未绑定</span><span class="card-meta">华为运动健康</span></div>
+        <div class="health-body">
+          <span class="health-orb"><svg viewBox="0 0 24 24"><path d="M3 12h4l2.2-4.2L13 16l2.1-4H21"/><path d="M12 21a9 9 0 1 0-9-9"/></svg></span>
+          <div><div class="health-title">绑定后读取个人健康摘要</div><div class="health-sub">睡眠 · 静息心率 · HRV · 运动记录</div></div>
+        </div>
+        <div class="health-empty">尚未绑定账号。绑定属于当前 AstrBot 安装，不需要填写其他人的账号；健康数据不会进入群聊。</div>
+        <div class="health-actions"><button class="btn primary">绑定华为账号</button><button class="btn">了解数据边界</button></div>
+        <div class="health-proactive"><span class="dot"></span>健康事件参与主动联系 · 未启用</div>
+      </div>
+    </article>
+
+    <article class="card reality">
+      <div class="card-inner reality-card">
+        <div class="card-head">
+          <div class="card-title"><span class="ic"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M9 7h6M9 11h6M9 15h4"/></svg></span>现实触及</div>
+          <span class="card-meta">6 个通道</span>
+        </div>
+        <div class="channel-list">
+          <div class="channel"><span class="channel-ic"><svg viewBox="0 0 24 24"><path d="M12 21s7-5.2 7-11a7 7 0 1 0-14 0c0 5.8 7 11 7 11Z"/><circle cx="12" cy="10" r="2.5"/></svg></span><span class="channel-name">当前定位</span><span class="channel-value off">手机读取未授权</span></div>
+          <div class="channel"><span class="channel-ic"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H4z"/><path d="M8 21h8"/></svg></span><span class="channel-name">识屏</span><span class="channel-value off">暂无已保存解读</span></div>
+          <div class="channel"><span class="channel-ic"><svg viewBox="0 0 24 24"><rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M10 18.5h4"/></svg></span><span class="channel-name">手机状态</span><span class="channel-value off">手机读取未授权</span></div>
+          <div class="channel"><span class="channel-ic"><svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3"/></svg></span><span class="channel-name">摄像头</span><span class="channel-value warn">未就绪</span></div>
+          <div class="channel"><span class="channel-ic"><svg viewBox="0 0 24 24"><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg></span><span class="channel-name">米家设备</span><span class="channel-value ok">只读状态已开启</span></div>
+          <div class="channel"><span class="channel-ic"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h10M4 17h13"/></svg></span><span class="channel-name">授权记录</span><span class="channel-value ok">2 项已授权</span></div>
+        </div>
+        <div class="card-foot"><span>设备授权只对当前私聊窗口生效</span><a class="link" href="#">管理授权 →</a></div>
+      </div>
+    </article>
+
+    <article class="card models">
+      <div class="card-inner model-card">
+        <div class="card-head">
+          <div class="card-title"><span class="ic"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M9 9h6v6H9z"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg></span>模型与连接</div>
+          <span class="card-meta">4 条路由</span>
+        </div>
+        <div class="model-lines">
+          <div class="model-line"><span class="model-label">对话模型</span><span class="right"><i class="dot"></i><span class="model-name">deepseek-v4.1-flash</span></span></div>
+          <div class="model-line"><span class="model-label">语音模型</span><span class="right"><i class="dot"></i><span class="model-name">s2.1-pro-free</span></span></div>
+          <div class="model-line"><span class="model-label">生图模型</span><span class="right"><i class="dot"></i><span class="model-name">gpt-image-2.5</span></span></div>
+          <div class="model-line"><span class="model-label">视觉模型</span><span class="right"><i class="dot"></i><span class="model-name">deepseek-v4.1-flash</span></span></div>
+        </div>
+        <div class="card-foot"><span>模型只影响能力，不改变当前人格</span><a class="link" href="#">模型设置 →</a></div>
+      </div>
+    </article>
+
+    <article class="card activity">
+      <div class="card-inner activity-card">
+        <div class="card-head">
+          <div class="card-title"><span class="ic"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="M8 10h8M8 14h5"/></svg></span>主动与记录</div>
+          <span class="card-meta">今天的节奏</span>
+        </div>
+        <div class="activity-grid">
+          <div class="activity-item"><span class="label">主动联系</span><span class="value">1<small>/ 3</small></span><span class="foot">下次窗口约 20:30</span></div>
+          <div class="activity-item"><span class="label">服务余额</span><span class="value">168.76</span><span class="foot">NewAPI · 刚刚</span></div>
+        </div>
+        <div class="activity-list">
+          <div class="mini-row"><span class="l">外部资讯</span><span class="r">10 条 · 56 分钟前</span></div>
+          <div class="mini-row"><span class="l">撤回记录</span><span class="r off">当前窗口暂无记录</span></div>
+          <div class="mini-row"><span class="l">健康主动事件</span><span class="r warn">绑定后可参与</span></div>
+        </div>
+        <div class="card-foot"><span>所有频率与免打扰沿用主动联系设置</span><a class="link" href="#">打开主动联系 →</a></div>
+      </div>
+    </article>
+  </section>
+</main>
+</body>
+</html>

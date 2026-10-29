@@ -23,7 +23,7 @@ from .native import check_version, native_id
 from .memory_output import capture, explicit_refusal, response_format
 from .streaming import StreamTranscript
 from .response_diagnostics import observe_completion
-from .provider_transport import definitely_not_sent
+from .provider_transport import definitely_not_sent, rejected_before_generation
 
 
 RESERVED_EXTRA = frozenset({"model", "messages", "tools", "functions", "function_call", "tool_choice",
@@ -268,11 +268,18 @@ class AstrBotTextProvider:
                              supports_model_override=True, model=self.model)
 
     def _current(self):
-        if (self.context.get_provider_by_id(self.provider_id) is not self.native
-                or self.native.client is not self.client or self.native.get_model() != self.model
-                or digest(self.native.provider_config) != self.config_hash
-                or frozenset(getattr(self.native, "default_params", {})) != self.parameters):
-            raise TaskError("host_provider_changed", "original host provider/client/configuration was replaced")
+        current = self.context.get_provider_by_id(self.provider_id)
+        if not isinstance(current, self.provider_type):
+            raise TaskError("host_provider_changed", "original host provider is unavailable")
+        # AstrBot may rebuild provider instances when its provider registry is
+        # refreshed. That is not a provider change if the model, configuration
+        # and accepted parameters are still the same. Rebind the live instance
+        # instead of failing every background task admitted before the refresh.
+        if (current.get_model() != self.model
+                or digest(current.provider_config) != self.config_hash
+                or frozenset(getattr(current, "default_params", {})) != self.parameters):
+            raise TaskError("host_provider_changed", "original host provider/configuration was replaced")
+        self.native, self.client = current, current.client
 
     def _estimate(self, envelope, wire):
         estimated = wire.input_estimate()
@@ -594,9 +601,9 @@ class AstrBotTextProvider:
             diagnostics = replace(diagnostics, error_type=error_type,
                 error_code=task_error_code if task_error_code != "unavailable" else None,
                 status_code=status_code if type(status_code) is int else None)
-            if (final_failure is ModelFailure.TRANSPORT and raw is None
-                    and transcript is None and definitely_not_sent(error)):
-                logger.warning("[CompanionV2] 模型连接未建立，请求未发送 provider=%s error_type=%s",
+            if (raw is None and transcript is None
+                    and (definitely_not_sent(error) or rejected_before_generation(error))):
+                logger.warning("[CompanionV2] 模型请求确认未生成，标记为未开始 provider=%s error_type=%s",
                                self.provider_id, error_type)
                 return ProviderResponse("not_started", usage=Amount(0, 0), receipt_ref=receipt,
                                         failure=final_failure, diagnostics=diagnostics)

@@ -92,10 +92,12 @@ class ScreenAccess:
                 and installed.desired_state is CapabilityDesiredState.ACTIVE)
             active = bool(same_package and installed.desired_state is CapabilityDesiredState.ACTIVE)
             role_enabled = bool(selection and selection.enabled)
-            core = is_core(self.runtime, operator.subject)
+            # 默认可用看的是这个窗口实际发起的操作者；管理权限仍看 Dashboard 身份。
+            core = is_core(self.runtime, self.context.actor.subject)
+            manage_core = is_core(self.runtime, operator.subject)
             read_consented = core or consents.get("screen.read", (None, 0))[0] == CapabilityAuthorizationState.ACTIVE.value
             process_consented = core or consents.get("screen.process", (None, 0))[0] == CapabilityAuthorizationState.ACTIVE.value
-            can_manage = core or self.policy.scope_access(operator, scope=self.context.scope,
+            can_manage = manage_core or self.policy.scope_access(operator, scope=self.context.scope,
                 action="capability.role.set", observed_at=at, core_only=True).is_success
             catalog = getattr(self.application, "external", None)
             invokable = bool(catalog and any(tool.action == ACTION for tool in catalog.catalog_for(self.context)))

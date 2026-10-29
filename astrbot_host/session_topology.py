@@ -21,6 +21,7 @@ from companion_v2.adapters.astrbot.native import (
 from companion_v2.execution.models import TaskError, digest
 from .identity_derivation import derive_bot_id, derive_role_id, role_display_name
 from .native import SESSION_SETTINGS_LOOKUP_BUDGET_SECONDS, load_session_settings
+from .multi_settings import find_persona_mapping
 
 
 logger = logging.getLogger(__name__)
@@ -206,8 +207,9 @@ class SessionTopology:
         platform, kind, peer = route
         target = (settings.private_target(platform, account_id, peer) if kind == "private"
                   else settings.group_target(platform, account_id, peer))
-        mapping = next((item for item in settings.personas
-                        if item.bot_id == bot_id and item.persona_id == persona_id and item.role_id == role_id), None)
+        mapping = find_persona_mapping(settings.personas, bot_id, persona_id)
+        if mapping is not None and mapping.role_id != role_id:
+            mapping = None
         if (target is None or target.bot_id != bot_id or mapping is None
                 or not any(item.self_id == account_id and item.bot_id == bot_id for item in settings.accounts)):
             return
@@ -221,9 +223,8 @@ class SessionTopology:
         settings = self.controller.settings
         if snapshot is None or settings is None or snapshot["bot_id"] != bot_id:
             return None
-        return next((item for item in settings.personas
-                     if item.bot_id == bot_id and item.persona_id == snapshot["persona_id"]
-                     and item.role_id == snapshot["role_id"]), None)
+        mapping = find_persona_mapping(settings.personas, bot_id, snapshot["persona_id"])
+        return mapping if mapping is not None and mapping.role_id == snapshot["role_id"] else None
 
     def _publish_persona_role_snapshot(self, targets, *, complete, scope_kind=None):
         discovered = {}
@@ -282,11 +283,11 @@ class SessionTopology:
                     selected = await self._selected_native_persona(umo, None)
             except TaskError:
                 continue
-            mapping = next((item for item in candidates if item.persona_id == selected), None)
+            mapping = find_persona_mapping(candidates, target.bot_id, selected)
             if mapping is None:
                 continue
             self._persona_role_snapshot[key] = {
-                "bot_id": target.bot_id, "persona_id": mapping.persona_id,
+                "bot_id": target.bot_id, "persona_id": selected or mapping.persona_id,
                 "role_id": mapping.role_id, "conversation_id": None,
                 "selection_source": "configured",
             }
@@ -625,8 +626,8 @@ class SessionTopology:
                                       for persona_id in role_row.get("persona_ids", []) if persona_id}
                     selected = next(iter(configured_ids)) if len(configured_ids) == 1 else ""
                     persona_source = "role_mapping" if selected and binding else "unresolved"
-            role = next((row["role_id"] for row in mappings if row.get("bot_id") == account["bot_id"]
-                         and row.get("persona_id") == selected), None)
+            mapping = find_persona_mapping(mappings, account["bot_id"], selected)
+            role = mapping.get("role_id") if isinstance(mapping, dict) else getattr(mapping, "role_id", None)
             if binding and not self.controller._multi_host:
                 role = binding["roles"][0]["role_id"]
             key = "session-" + digest([platform, account["account_id"], umo])[:24]

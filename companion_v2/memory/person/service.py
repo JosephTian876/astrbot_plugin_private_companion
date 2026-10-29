@@ -14,7 +14,7 @@ from companion_v2.execution.models import TaskError, encode, require, stamp
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.memory.models import text
 from .access import OWNER, card_id, owner_for_subject, owner_key, resolve_subject
-from .models import KIND, MAX_GROUP_CARDS, aggregate, bind_route, clean_name, count_input, display_name, empty_document, known_names
+from .models import KIND, MAX_GROUP_CARDS, aggregate, bind_route, clean_name, count_input, display_name, empty_document, known_names, legacy_nickname
 
 
 UPSERT = """INSERT INTO memory_views VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
@@ -79,10 +79,18 @@ class PersonAcquaintance:
                                      (identifier, KIND)).fetchone()
             document = json.loads(row["document_json"]) if row is not None else empty_document()
             bind_route(document, context)
+            now = stamp(self.tasks.now())
+            events = document.get("display_name_events")
+            if not isinstance(events, list):
+                events = []
+                document["display_name_events"] = events
             changed = False
             if nickname and nickname != document["platform_nickname"]:
+                if document["platform_nickname"]:
+                    events.insert(0, {"at": now, "kind": "platform_nickname",
+                                      "old": document["platform_nickname"], "new": nickname})
                 document["platform_nickname"] = nickname
-                document["nickname_updated_at"] = stamp(self.tasks.now())
+                document["nickname_updated_at"] = now
                 changed = True
             if group_id is not None and card:
                 cards = document["group_cards"]
@@ -90,10 +98,14 @@ class PersonAcquaintance:
                 if current is None or current["card"] != card:
                     if current is None and len(cards) >= MAX_GROUP_CARDS:
                         cards.pop(min(cards, key=lambda key: cards[key]["updated_at"]))
-                    cards[group_id] = {"card": card, "updated_at": stamp(self.tasks.now())}
+                    if current is not None and current["card"]:
+                        events.insert(0, {"at": now, "kind": "group_card", "group_id": group_id,
+                                          "old": current["card"], "new": card})
+                    cards[group_id] = {"card": card, "updated_at": now}
                     changed = True
             if not changed:
                 return
+            document["display_name_events"] = events[:16]
             connection.execute(UPSERT, (identifier, owner, KIND, row["revision"] + 1 if row is not None else 1,
                                         encode(document), encode({"owner": OWNER}), stamp(self.tasks.now())))
 
@@ -106,8 +118,15 @@ class PersonAcquaintance:
     def projection(self, context, document, *, budget, with_contexts=False):
         name, basis = display_name(document, context.scope)
         summary = aggregate(document)
-        payload = {"display_name": name, "name_basis": basis,
+        legacy = legacy_nickname(document)
+        events = [entry for entry in (document.get("display_name_events") or ())
+                  if isinstance(entry, dict) and entry.get("new")]
+        payload = {"native_account_id": document.get("native_account_id"),
+                   "display_name": name, "name_basis": basis,
+                   "address_name": legacy, "address_basis": "legacy_private_contact" if legacy else None,
                    "known_names": list(known_names(document, context.scope)),
+                   "recent_renames": [{key: entry.get(key) for key in ("at", "kind", "old", "new")}
+                                      for entry in events[:3]],
                    "msg_count": summary["msg_count"],
                    "active_days": summary["active_days"], "first_seen": summary["first_seen"],
                    "last_seen": summary["last_seen"]}
@@ -116,7 +135,8 @@ class PersonAcquaintance:
                                          "last_seen": entry["last_seen"]}
                                    for key, entry in sorted(document["contexts"].items())}
         while len(encode(payload).encode("utf-8")) > budget and payload:
-            for key in ("contexts", "known_names", "first_seen", "last_seen", "display_name", "name_basis"):
+            for key in ("contexts", "recent_renames", "known_names", "first_seen", "last_seen",
+                        "address_basis", "msg_count", "active_days"):
                 if key in payload:
                     del payload[key]
                     break
@@ -179,6 +199,25 @@ class PersonAcquaintance:
             return False
         document = json.loads(row["document_json"])
         return bool(document.get("contexts", {}).get("private") or document.get("legacy_private_contact"))
+
+    def speaker_name(self, context, at=None):
+        """The display name for one already authorized speaker, or None.
+
+        Group history needs the name attached to the same account that authored
+        the message; the caller must never infer a name from another speaker.
+        """
+        if not self.available(context):
+            return None
+        try:
+            if at is not None:
+                self.check(context, at=at)
+        except TaskError:
+            return None
+        row = self.row(owner_key(context))
+        if row is None or row["state"] != "active":
+            return None
+        name, _ = display_name(json.loads(row["document_json"]), context.scope)
+        return name
 
     # -- model tool ----------------------------------------------------------
 

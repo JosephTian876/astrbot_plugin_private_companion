@@ -109,6 +109,46 @@ class LegacySocialProfileTests(unittest.TestCase):
         self.assertEqual(mapped[0].boundary_note, "相处边界")
         self.assertEqual(mapped[0].important_memories[0].content, "群内印象")
 
+    def test_group_import_merges_curated_account_profiles_into_the_group(self):
+        from astrbot_host.legacy_group_data_api import LegacyGroupDataWebAPI
+
+        plan = self.plan({"worldbook_member_profiles": {
+            "200": {"name": "比折", "aliases": ["珝环"], "content": "最亲密的人", "priority": 120},
+            "201": {"name": "随遇而安", "content": "白名单群内实际发言自动建立的仅观察角色档案。",
+                    "projection_kind": "group_observation", "group_observation_scope_ids": ["789"]},
+        }})
+        _, base_members, _, group_members = map_legacy_worldbook(
+            plan, source_group_id="789", confirm_member_ids=True, include_group=True)
+        group_members = LegacyGroupDataWebAPI._remap_group_members(group_members, "789", "790")
+        merged = LegacyGroupDataWebAPI._merge_group_members(base_members, group_members, "790")
+        by_account = {member.declared_account_ids[0]: member for member in merged}
+        self.assertEqual(by_account["200"].content, "最亲密的人")
+        self.assertEqual(by_account["200"].aliases, ("珝环",))
+        self.assertEqual(by_account["200"].group_ids, ("790",))
+        self.assertEqual(by_account["201"].group_ids, ("790",))
+
+    def test_group_import_limits_accounts_and_preserves_ambiguous_people(self):
+        from astrbot_host.legacy_group_data_api import LegacyGroupDataWebAPI
+
+        curated = MemberEntry("curated", name="甲", declared_account_ids=("200", "999"),
+                              content="人工维护资料", priority=120)
+        imported = LegacyGroupDataWebAPI._merge_group_members(
+            (curated,), (), "790", recorded_accounts={"200"})
+        self.assertEqual(len(imported), 1)
+        self.assertEqual(imported[0].declared_account_ids, ("200",))
+
+        ambiguous = MemberEntry("ambiguous", name="同一名称", declared_account_ids=("200", "201"),
+                                content="人工维护资料", priority=120)
+        group_members = (
+            MemberEntry("group-200", name="同一名称", declared_account_ids=("200",),
+                        content="群观察甲", priority=100, group_ids=("790",)),
+            MemberEntry("group-201", name="同一名称", declared_account_ids=("201",),
+                        content="群观察乙", priority=100, group_ids=("790",)),
+        )
+        preserved = LegacyGroupDataWebAPI._merge_group_members(
+            (ambiguous,), group_members, "790", recorded_accounts={"200", "201"})
+        self.assertEqual({item.entry_id for item in preserved}, {"group-200", "group-201"})
+
     def test_long_current_speaker_material_is_bounded_without_dropping_the_member(self):
         member = MemberEntry("member", name="阿岚", declared_account_ids=("200",), content="很长的相处记录" * 100,
                              identity_note="身份备注" * 100, boundary_note="相处边界" * 100)

@@ -22,6 +22,7 @@ from astrbot_host.identity_derivation import (
     derive_bot_id,
     derive_role_id,
     derived_identity,
+    derive_core_target_id,
     normalize_persona_id,
     persona_label,
     role_display_name,
@@ -90,6 +91,17 @@ class DerivationTests(unittest.TestCase):
 
     def test_an_opaque_official_account_is_accepted(self):
         self.assertTrue(derive_bot_id("607097777B7E7FE3E162A8F56825F8521").startswith("bot-"))
+
+    def test_unicode_native_account_is_accepted_with_an_ascii_storage_id(self):
+        value = identity(account_id="官方实例", participant_id="用户一")
+        self.assertEqual(value["account_id"], "官方实例")
+        self.assertTrue(value["bot_id"].isascii())
+        self.assertTrue(value["role_id"].isascii())
+
+    def test_unicode_native_binding_gets_a_stable_ascii_target_id(self):
+        target = derive_core_target_id("官方平台", "官方实例", "用户一")
+        self.assertEqual(target, derive_core_target_id("官方平台", "官方实例", "用户一"))
+        self.assertRegex(target, r"^setup-core-[0-9a-f]{24}$")
 
     def test_a_missing_platform_is_refused(self):
         for bad in ("", "   ", None):

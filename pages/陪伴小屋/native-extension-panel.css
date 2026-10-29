@@ -304,16 +304,117 @@
 .native-management-bottom > p { color: var(--secondary); font-size: var(--fs-micro); line-height: 1.8; margin: 0; }
 .native-management-bottom > p.is-error { color: var(--t-status-error); }
 @media (max-width: 680px) {
-  .detail-dialog.detail-dialog-native-extension { width: 100%; max-width: 100%; }
+  :root:has(.detail-dialog.detail-dialog-native-extension[open]) { scrollbar-gutter: auto; }
+  .detail-dialog.detail-dialog-native-extension {
+    inset: 0;
+    width: 100vw;
+    max-width: 100vw;
+    max-height: 100dvh;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+    padding-bottom: env(safe-area-inset-bottom);
+    overscroll-behavior: contain;
+  }
+  .detail-dialog.detail-dialog-native-extension .dialog-head {
+    min-height: 73px;
+    padding: max(var(--sp-4), env(safe-area-inset-top)) var(--sp-4) var(--sp-3);
+    align-items: center;
+  }
+  .detail-dialog.detail-dialog-native-extension .dialog-head h2 {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: var(--fs-title);
+    line-height: 1.4;
+  }
+  .detail-dialog.detail-dialog-native-extension .dialog-head::before { display: none; }
+  .detail-dialog.detail-dialog-native-extension .dialog-head > .icon-button {
+    flex: 0 0 44px;
+    width: 44px;
+    height: 44px;
+  }
+  .detail-dialog.detail-dialog-native-extension .dialog-body {
+    padding: var(--sp-4);
+  }
+  .native-extension-panel .button,
+  .native-management summary,
+  .mobile-config-section > summary { min-height: 44px; }
   .native-extension-workspace { grid-template-columns: 1fr; gap: var(--sp-4); }
-  .native-extension-nav { position: static; flex-direction: row; flex-wrap: wrap; max-height: none; gap: var(--sp-1); }
-  .native-extension-nav button { padding: var(--sp-2); font-size: var(--fs-micro); }
-  .native-extension-lifecycle { flex-wrap: wrap; }
-  .native-extension-savebar { align-items: stretch; flex-direction: column; }
-  .native-extension-savebar > div { justify-content: flex-end; flex-wrap: wrap; }
+  .native-extension-nav {
+    position: sticky;
+    top: calc(57px + max(var(--sp-4), env(safe-area-inset-top)));
+    z-index: 2;
+    width: 100%;
+    min-width: 0;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    max-height: none;
+    gap: var(--sp-1);
+    margin: calc(var(--sp-4) * -1) calc(var(--sp-4) * -1) var(--sp-3);
+    padding: var(--sp-2) var(--sp-4);
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    background: color-mix(in srgb, var(--t-surface, var(--bg)) 92%, transparent);
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: none;
+  }
+  .native-extension-nav::-webkit-scrollbar { display: none; }
+  .native-extension-nav button {
+    flex: 0 0 auto;
+    min-height: 44px;
+    padding: var(--sp-2) var(--sp-3);
+    font-size: var(--fs-micro);
+    white-space: nowrap;
+  }
+  .native-extension-head { gap: var(--sp-3); }
+  .native-extension-head h3 { font-size: var(--fs-lead); line-height: 1.4; }
+  .native-extension-status { align-self: flex-start; }
+  .native-extension-lifecycle { align-items: flex-start; flex-direction: column; gap: var(--sp-3); }
+  .native-extension-lifecycle > div { width: 100%; flex-wrap: wrap; }
+  .native-extension-lifecycle .button,
+  .native-extension-savebar .button,
+  .native-extension-template-actions .button,
+  .native-management-actions .button { min-height: 44px; }
+  .native-extension-search { margin-bottom: var(--sp-3); }
+  .native-extension-search input,
+  .native-extension-field input:not([type="checkbox"]),
+  .native-extension-field textarea,
+  .native-extension-field select,
+  .native-extension-template-actions select,
+  .native-management-field input,
+  .native-management-field select { min-height: 44px; font-size: max(1rem, calc(var(--fs-body) + 2px)); }
+  .native-extension-switch { width: 44px; height: 28px; }
+  .native-extension-switch-track { height: 28px; }
+  .native-extension-switch-track::after { width: 20px; height: 20px; margin: 3px; }
+  .native-extension-switch input:checked + span::after { transform: translateX(16px); }
+  .native-extension-field { padding: var(--sp-3) 0; }
+  .native-extension-savebar {
+    align-items: stretch;
+    flex-direction: column;
+    margin: var(--sp-4) calc(var(--sp-4) * -1) calc(var(--sp-4) * -1);
+    padding: var(--sp-3) var(--sp-4) max(var(--sp-3), env(safe-area-inset-bottom));
+  }
+  .native-extension-savebar p { max-height: 4.8em; overflow: auto; }
+  .native-extension-savebar > div { justify-content: stretch; flex-wrap: nowrap; }
+  .native-extension-savebar > div .button { flex: 1 1 0; }
   .native-management-qr { flex-direction: column; align-items: flex-start; }
   .native-management-bottom { flex-direction: column; align-items: flex-start; }
   .mobile-gateway-facts { grid-template-columns: minmax(0, 1fr); }
   .mobile-gateway-actionbar { align-items: stretch; flex-direction: column; }
   .mobile-pairing-token { align-items: stretch; flex-direction: column; }
+}
+
+@media (max-width: 380px) {
+  .detail-dialog.detail-dialog-native-extension .dialog-body { padding-inline: var(--sp-3); }
+  .native-extension-nav {
+    margin-inline: calc(var(--sp-3) * -1);
+    padding-inline: var(--sp-3);
+  }
+  .native-extension-savebar {
+    margin-inline: calc(var(--sp-3) * -1);
+    padding-inline: var(--sp-3);
+  }
+  .native-extension-head { flex-direction: column; }
+  .native-extension-status { align-self: flex-start; }
+  .native-extension-savebar > div { flex-direction: column; }
 }

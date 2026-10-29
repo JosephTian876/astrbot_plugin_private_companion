@@ -33,6 +33,10 @@ class WakeupAlarmMixin(RealityTouchCameraMixin, RealityTouchAudioMixin):
         return consent if isinstance(consent, dict) else {}
 
     def _reality_touch_capability_consented(self, user: dict[str, Any], capability: str) -> bool:
+        # 管理员（V2 核心管理身份或显式授权名单）默认可用，不再需要逐用户确认。
+        user_id = _single_line(user.get("user_id"), 120)
+        if user_id and self._is_configured_admin_user_id(user_id):
+            return True
         consent = self._reality_touch_consent(user)
         capabilities = consent.get("granted_capabilities")
         return (

@@ -259,18 +259,28 @@ class RoleLifeRuntime:
             await self.derive(target, event)
         return result
 
-    def launch(self, key, factory):
+    def launch(self, key, factory, *, timeout_seconds=None):
         if self._closed or key in self._workers:
             return False
         async def execute():
             try:
-                return await factory()
+                work = factory()
+                return (await asyncio.wait_for(work, timeout=timeout_seconds)
+                        if timeout_seconds is not None else await work)
+            except asyncio.TimeoutError:
+                return Outcome.failed("life_wake_timeout", "scheduled wake did not finish before its deadline")
             except TaskError as error:
                 return Outcome.failed(error.code, str(error))
             except Exception:
                 return Outcome.failed("life_execution_failed", "routine stopped; inspect its recorded outcome")
         self._workers[key] = asyncio.create_task(execute(), name="companion:life:" + key)
-        self._workers[key].add_done_callback(lambda done: self.app.notify())
+        def collect(done):
+            if timeout_seconds is not None and self._workers.get(key) is done:
+                if not done.cancelled():
+                    self.results[key] = done.result()
+                del self._workers[key]
+            self.app.notify()
+        self._workers[key].add_done_callback(collect)
         return True
 
     def advance(self):
@@ -291,8 +301,10 @@ class RoleLifeRuntime:
             now = self.app.now()
             self.app.role_state.body_clock.resume_due(self.context, observed_at=now)
             for sleeping in self.app.role_state.body_clock.active(self.context, "sleep"):
-                if sleeping.work.due_at <= now:
-                    self.launch("wake:" + sleeping.activity_id, self._wake_shared_due)
+                wake_key = "wake:" + sleeping.activity_id
+                if (sleeping.work.due_at <= now and wake_key not in self._workers
+                        and wake_key not in self.results):
+                    self.launch(wake_key, self._wake_shared_due, timeout_seconds=30)
             records = self.activities()
             for a in records:
                 if a.work.kind == "reading" and a.state is State.ACTIVE and a.activity_id not in self._workers:

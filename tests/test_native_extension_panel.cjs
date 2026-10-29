@@ -38,10 +38,10 @@ before(async () => { browser = await chromium.launch({headless:true,
   ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH ? {executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH} : {})}); });
 after(async () => { await browser?.close(); });
 
-async function harness(name, viewport = {width:1360, height:900}) {
+async function harness(name, viewport = {width:1360, height:900}, panelOptions = {}) {
   const page = await browser.newPage({viewport});
   page.setDefaultTimeout(5000);
-  await page.setContent('<!doctype html><html data-theme="courtyard" data-theme-ready="true" data-room-ready="true"><body><dialog open class="detail-dialog detail-dialog-native-extension"><header class="dialog-head"><h2>内置能力设置</h2></header><div class="dialog-body"><div id="native-root"></div></div></dialog></body></html>');
+  await page.setContent('<!doctype html><html data-theme="courtyard" data-theme-ready="true" data-room-ready="true"><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><dialog open class="detail-dialog detail-dialog-native-extension"><header class="dialog-head"><h2>内置能力设置</h2><button class="icon-button" type="button" aria-label="关闭详情">&times;</button></header><div class="dialog-body"><div id="native-root"></div></div></dialog></body></html>');
   await page.addStyleTag({content:css});
   await page.evaluate(({records, name}) => {
     window.records = structuredClone(records); window.requests = [];
@@ -111,7 +111,9 @@ async function harness(name, viewport = {width:1360, height:900}) {
   }, {records, name});
   await page.addScriptTag({content:managementSource});
   await page.addScriptTag({content:source});
-  await page.evaluate(name => { window.panel = window.CompanionNativeExtensionPanel.mount(document.getElementById("native-root"), {extensionId:name}); }, name);
+  await page.evaluate(({name, panelOptions}) => {
+    window.panel = window.CompanionNativeExtensionPanel.mount(document.getElementById("native-root"), {extensionId:name, ...panelOptions});
+  }, {name, panelOptions});
   await page.locator("[data-native-form]").waitFor();
   return page;
 }
@@ -235,6 +237,46 @@ test("mobile settings stay within the viewport and search reaches hidden groups"
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     const input = await page.getByLabel("OBS WebSocket 地址", {exact:true}).boundingBox();
     assert.ok(input.x >= 0 && input.x + input.width <= 390);
+    await page.getByRole("searchbox", {name:"查找直播与表演设置项"}).fill("");
+    const mobileLayout = await page.evaluate(() => {
+      const dialog = document.querySelector(".detail-dialog-native-extension");
+      const head = dialog.querySelector(".dialog-head");
+      const close = head.querySelector(".icon-button");
+      const nav = document.querySelector(".native-extension-nav");
+      const savebar = document.querySelector(".native-extension-savebar");
+      const field = document.getElementById(window.panel.fields.find(item => item.path.join(".") === "obs_ws_host").id);
+      const rect = node => { const box = node.getBoundingClientRect(); return {width:box.width, height:box.height, top:box.top, bottom:box.bottom}; };
+      return {dialog:rect(dialog), head:rect(head), nav:rect(nav), savebar:rect(savebar), field:rect(field), viewport:{width:innerWidth, height:innerHeight},
+        navOverflow:nav.scrollWidth > nav.clientWidth, closeHeight:rect(close).height,
+        hasDragHandle:getComputedStyle(head, "::before").display !== "none"};
+    });
+    assert.equal(mobileLayout.dialog.width, 390);
+    assert.equal(mobileLayout.dialog.height, 844);
+    assert.ok(mobileLayout.head.height <= 73);
+    assert.ok(mobileLayout.closeHeight >= 44);
+    assert.equal(mobileLayout.hasDragHandle, false);
+    assert.ok(mobileLayout.field.height >= 44);
+    assert.ok(mobileLayout.savebar.bottom <= mobileLayout.viewport.height + 1);
+    assert.equal(mobileLayout.navOverflow, true);
+    const navStick = await page.evaluate(() => {
+      const dialog = document.querySelector(".detail-dialog-native-extension");
+      const nav = dialog.querySelector(".native-extension-nav");
+      dialog.scrollTop += nav.getBoundingClientRect().top - dialog.querySelector(".dialog-head").getBoundingClientRect().bottom;
+      return {navTop:nav.getBoundingClientRect().top, headBottom:dialog.querySelector(".dialog-head").getBoundingClientRect().bottom};
+    });
+    assert.ok(navStick.navTop >= navStick.headBottom - 1);
+    await page.setViewportSize({width:320, height:740});
+    const narrowLayout = await page.evaluate(() => {
+      const dialog = document.querySelector(".detail-dialog-native-extension");
+      const field = document.getElementById(window.panel.fields.find(item => item.path.join(".") === "obs_ws_host").id);
+      const box = field.getBoundingClientRect();
+      return {width:dialog.getBoundingClientRect().width, viewportWidth:innerWidth,
+        documentWidth:document.documentElement.scrollWidth, fieldLeft:box.left, fieldRight:box.right};
+    });
+    assert.equal(narrowLayout.width, 320);
+    assert.equal(narrowLayout.documentWidth, narrowLayout.viewportWidth);
+    assert.ok(narrowLayout.fieldLeft >= 0 && narrowLayout.fieldRight <= 320);
+    await page.setViewportSize({width:390, height:844});
     if (process.env.COMPANION_UI_OUTPUT) {
       fs.mkdirSync(process.env.COMPANION_UI_OUTPUT, {recursive:true});
       await page.screenshot({path:path.join(process.env.COMPANION_UI_OUTPUT, "native-settings-mobile.png")});
@@ -246,7 +288,7 @@ test("mobile settings stay within the viewport and search reaches hidden groups"
 });
 
 test("mobile pairing generates and reveals a token once, while rotation is explicit", async () => {
-  const page = await harness("reality", {width:390, height:844});
+  const page = await harness("reality", {width:390, height:844}, {onlyGroup:"mobile"});
   try {
     assert.equal(await page.getByRole("button", {name:"生成并启用网关", exact:true}).isVisible(), true);
     assert.match(await page.locator("[data-mobile-token-result]").textContent(), /同时启用/);

@@ -89,6 +89,13 @@ GROUP_WAKEUP_LIMITS = {"group_wakeup_question_threshold": (0, 100),
                        "group_wakeup_debounce_pending_penalty": (0, 100),
                        "group_wakeup_short_text_wait_ms": (0, 30000), "group_wakeup_log_limit": (10, 300)}
 
+# One window-level tool manifest, resolved once per admitted turn.  Keeping the
+# list static is what preserves the provider's cached tool prefix: the plugin
+# never adds or removes a tool because one message happens to carry an image,
+# mention or follow-up.
+GROUP_TOOL_PROFILES = frozenset(("lean", "standard", "full"))
+GROUP_TOOL_DEFAULTS = {"group_tool_profile": "full"}
+
 # These switches are deliberately part of the sealed reply snapshot.  The
 # prompt and the outbound policy must agree about the group audience that was
 # authorized when the turn started; reading live persona settings here would
@@ -138,7 +145,7 @@ ROLE_SHARED_FIELDS = (frozenset(asdict(SegmentationPolicy())) | SPACING_FIELDS
     | frozenset(GROUP_SAFETY_DEFAULTS) | frozenset(SILENCE_DEFAULTS) | frozenset(OUTBOUND_DEFAULTS) | frozenset(TEXT_DEFAULTS)
     | frozenset(FORWARD_DEFAULTS) | frozenset(CONTEXT_IMAGE_DEFAULTS)
     | frozenset(IMAGE_NARRATION_DEFAULTS) | frozenset(UNDERSTANDING_DEFAULTS)
-    | frozenset(DIAGNOSTIC_DEFAULTS) | ROLE_PROMPT_FIELDS)
+    | frozenset(DIAGNOSTIC_DEFAULTS) | frozenset(GROUP_TOOL_DEFAULTS) | ROLE_PROMPT_FIELDS)
 
 
 def outbound_settings(values):
@@ -299,10 +306,11 @@ def validate(values):
     understanding = set(UNDERSTANDING_DEFAULTS)
     spacing = set(SPACING_DEFAULTS)
     diagnostics = set(DIAGNOSTIC_DEFAULTS)
+    tool = set(GROUP_TOOL_DEFAULTS)
     optional = set(values) - expected - {"image_position"}
     provided = set(values)
     if (not legacy_required <= provided
-            or optional - voice - air - continuation - private_closing - private_debounce - wakeup - safety - silence - presentation - outbound - forward - captions - image_narration - understanding - spacing - diagnostics
+            or optional - voice - air - continuation - private_closing - private_debounce - wakeup - safety - silence - presentation - outbound - forward - captions - image_narration - understanding - spacing - diagnostics - tool
             or (optional & voice and not (voice - {"voice_conversion_scope"}) <= optional)
             or any(optional & block and not block <= optional for block in (air, continuation, private_closing, private_debounce, presentation))
             or optional & spacing not in (set(), spacing)
@@ -311,6 +319,8 @@ def validate(values):
                                         set(GROUP_WAKEUP_PREVIOUS_FIELDS), set(GROUP_WAKEUP_PROMPT_FIELDS), wakeup)):
         raise ConfigurationError("reply_configuration_invalid", "provide the declared reply settings")
     try:
+        if values.get("group_tool_profile", "full") not in GROUP_TOOL_PROFILES:
+            raise ValueError("invalid group tool profile")
         diagnostic_limit = values.get("reply_diagnostic_limit", DIAGNOSTIC_DEFAULTS["reply_diagnostic_limit"])
         if type(diagnostic_limit) is not int or not 10 <= diagnostic_limit <= 300:
             raise ValueError("invalid reply diagnostic limit")
@@ -396,6 +406,7 @@ def configuration_fields(segmentation, streaming, gap, voice=None):
     defaults.update(IMAGE_NARRATION_DEFAULTS)
     defaults.update(UNDERSTANDING_DEFAULTS)
     defaults.update(DIAGNOSTIC_DEFAULTS)
+    defaults.update(GROUP_TOOL_DEFAULTS)
     validate(defaults)
     limits = {"threshold": (1, 65536), "min_segment_chars": (1, 65536), "max_segments": (1, 64),
               "part_gap_ms": (0, 60000), "voice_cooldown_seconds": (0, 86400),

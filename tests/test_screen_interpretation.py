@@ -75,6 +75,11 @@ class ScreenChainFixture(ContactFixture):
         capabilities.set_settings(extension_id=SCREEN_EXTENSION, scope=SCOPE, proactive_enabled=True,
                                   thought_weight=1.0, expected_revision=0, observed_at=NOW).unwrap()
 
+    def make_core(self):
+        """隐私能力现在只对核心管理员窗口默认可用。"""
+        self.policy.set_tier(self.important.subject, AuthorizationTier.CORE,
+                             expected_revision=self.policy.revision, observed_at=NOW)
+
     # -- fixtures ------------------------------------------------------
 
     def sql(self, statement, parameters=()):
@@ -229,6 +234,8 @@ class ScreenInterpretationTests(ScreenChainFixture, unittest.IsolatedAsyncioTest
         self.assertEqual(self._anchors(), 0)
 
     async def test_authorized_screen_producer_validates_and_rejects_revocation(self):
+        self.make_core()
+
         async def interpret(envelope):
             return answered(INTERPRETATION)
 
@@ -263,6 +270,8 @@ class ScreenInterpretationTests(ScreenChainFixture, unittest.IsolatedAsyncioTest
             events.validate(context, marker, self.clock.now())
 
     async def test_screen_observation_reaches_contact_composition_and_confirmed_delivery(self):
+        self.make_core()
+
         async def respond(envelope):
             if envelope.original.output_format == "screen_interpretation":
                 return answered(INTERPRETATION)
@@ -322,11 +331,6 @@ class ScreenInterpretationTests(ScreenChainFixture, unittest.IsolatedAsyncioTest
 
 
 class ScreenPeekDecisionTests(ScreenChainFixture, unittest.IsolatedAsyncioTestCase):
-    def make_core(self):
-        """主动窥屏现在只服务核心管理员窗口。"""
-        self.policy.set_tier(self.important.subject, AuthorizationTier.CORE,
-                             expected_revision=self.policy.revision, observed_at=NOW)
-
     async def test_goodnight_peek_waits_and_cancels_when_the_user_returns(self):
         self.make_core()
         host = await self.start()

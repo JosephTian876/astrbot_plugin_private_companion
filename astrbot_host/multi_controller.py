@@ -25,7 +25,7 @@ from companion_v2.storage.runtime import StorageRuntime
 from companion_v2.proactive.search_settings import SearchSettingsStore
 from .multi_authority import HOST_ID, MANIFEST, MultiAuthority
 from .multi_session import MultiHostSession, persona_conversation
-from .multi_settings import MultiHostSettings
+from .multi_settings import MultiHostSettings, find_persona_mapping
 from .bootstrap_provider import resolve_bootstrap_provider
 from .group_settings import GroupTarget
 from .native import installed_native_types, native_text_provider
@@ -308,7 +308,7 @@ class AstrBotMultiController:
     def _register_core_binding(self, binding):
         """Seed the first shared target from the Dashboard-confirmed private window."""
         from copy import deepcopy
-        from .identity_derivation import derive_role_id
+        from .identity_derivation import derive_core_target_id, derive_role_id
 
         if binding.persona_id:
             native = self.context.persona_manager.get_persona_v3_by_id(binding.persona_id)
@@ -347,7 +347,7 @@ class AstrBotMultiController:
                        == (binding.platform_id, binding.account_id, binding.participant_id)), None)
         if target is None:
             used_ids = {item.get("target_id") for item in targets if type(item) is dict}
-            base_id = "setup-core-" + binding.account_id
+            base_id = derive_core_target_id(binding.platform_id, binding.account_id, binding.participant_id)
             target_id = base_id
             suffix = 2
             while target_id in used_ids:
@@ -548,8 +548,7 @@ class AstrBotMultiController:
                                                  window.get("participant_id"))
                 if target is None or target.participant_id == "*" or window.get("bot_id") != target.bot_id:
                     continue
-                mapping = next((item for item in settings.personas if item.bot_id == target.bot_id
-                                and item.persona_id == window.get("persona_id")), None)
+                mapping = find_persona_mapping(settings.personas, target.bot_id, window.get("persona_id"))
                 if mapping is None:
                     continue
                 conversations[target.target_id] = {
@@ -717,14 +716,28 @@ class AstrBotMultiController:
     async def initialize_profile(self):
         async with self._lifecycle_lock:
             try:
-                self._idle()
                 self.refresh_settings()
                 manifest, conversations = await self._probe()
+                previous_session = self.session
+                restore_running = bool(previous_session is not None
+                    and previous_session.application.state == "running")
+                if previous_session is not None and previous_session.application.state not in ("new", "stopped"):
+                    self._accepting = False
+                    report = await previous_session.close(grace_seconds=0.5)
+                    if getattr(report, "state", None) != "stopped":
+                        raise TaskError("host_must_stop", "the shared host did not finish stopping before initialization")
+                    async with self._control_lock:
+                        if self.session is previous_session:
+                            self.last_session, self.session = previous_session, None
+                self._idle()
                 async with self._control_lock:
                     if self._terminated:
                         raise TaskError("host_terminated", "the shared host is stopping or terminated")
                     self._idle()
                     receipt = await self._initialize_manifest_locked(manifest, conversations)
+                    session = self.session
+                if restore_running:
+                    await self._start_initialized_session(session)
                 self.last_failure = None
                 return Outcome.success(receipt)
             except Exception as error:
@@ -985,20 +998,23 @@ class AstrBotMultiController:
                     if self.session is None or self.session.application.state != "new":
                         await self._assemble(manifest)
                     session = self.session
-                    task, model = await asyncio.to_thread(self._startup_generations)
-                    task_generation = task["generation"] if task else 0
-                    model_generation = model["generation"] if model else 0
-                result = await session.start(expected_task_generation=task_generation,
-                                             expected_model_generation=model_generation)
-                require(result)
-                async with self._control_lock:
-                    self._settings()
-                    self._accepting, self.last_failure = True, None
-                    targets = len(self.settings.all_targets)
-                return Outcome.success({"state": "running", "targets": targets, "startup": result.unwrap()})
+                return await self._start_initialized_session(session)
             except Exception as error:
                 self._accepting = False
                 return self._failure(error, operation="start")
+
+    async def _start_initialized_session(self, session):
+        task, model = await asyncio.to_thread(self._startup_generations)
+        result = await session.start(expected_task_generation=task["generation"] if task else 0,
+                                     expected_model_generation=model["generation"] if model else 0)
+        require(result)
+        async with self._control_lock:
+            self._settings()
+            if self.session is not session:
+                raise TaskError("host_session_changed", "the initialized host changed before it could resume")
+            self._accepting, self.last_failure = True, None
+            targets = len(self.settings.all_targets)
+        return Outcome.success({"state": "running", "targets": targets, "startup": result.unwrap()})
 
     def _startup_generations(self):
         task = self.runtime.read_one("SELECT generation FROM task_supervisor WHERE singleton = 1", ())
@@ -1071,8 +1087,7 @@ class AstrBotMultiController:
             raise
         if special or type(persona_id) is not str:
             return None
-        return next((mapping for mapping in self.settings.personas
-                     if mapping.bot_id == target.bot_id and mapping.persona_id == persona_id), None)
+        return find_persona_mapping(self.settings.personas, target.bot_id, persona_id)
 
     def claims(self, event):
         from .recalls import is_notice_event

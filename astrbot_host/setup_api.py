@@ -32,6 +32,9 @@ from .display_names import display_names
 
 
 PREFIX = "/astrbot_plugin_private_companion/setup"
+# Profile editors submit the complete edited field set in one request. The
+# per-field limits are larger than the small command-route body cap.
+PROFILE_BODY_LIMIT = 262144
 logger = logging.getLogger(__name__)
 
 PROACTIVE_TEST_SUGGESTIONS = {
@@ -232,9 +235,9 @@ class SetupWebAPI:
         return username
 
     @staticmethod
-    async def _body(expected: set[str], *, optional: set[str] | frozenset[str] = frozenset()) -> dict:
+    async def _body(expected: set[str], *, optional: set[str] | frozenset[str] = frozenset(), limit: int = 4096) -> dict:
         raw = await request.body()
-        if len(raw) > 4096:
+        if len(raw) > limit:
             raise ValueError("request is too large")
 
         def unique(pairs):
@@ -858,7 +861,8 @@ class SetupWebAPI:
     async def save_profile(self):
         try:
             username = self._admin()
-            data = await self._body({"target", "operation_key", "edit_token", "changes"})
+            data = await self._body({"target", "operation_key", "edit_token", "changes"},
+                                    limit=PROFILE_BODY_LIMIT)
             target, changes = data["target"], data["changes"]
             if (target not in ("role_profile", "relationship_profile")
                     or type(data["operation_key"]) is not str or not data["operation_key"].strip()
@@ -1415,9 +1419,8 @@ class SetupWebAPI:
         operator = dashboard_operator(self.controller.runtime, username, at=self.controller.now())
         manager = ContactManagement(app, context)
         current = require(manager.status(operator))
-        # The global switch may still be off while this test's old window
-        # row/grant is on. Always clear the temporary window permission when the
-        # test enabled it; its effective public value cannot prove cleanup.
+        # Restore the public switch independently from the administrator's
+        # temporary grant, so the test can be repeated without hidden reauthorization.
         if not enabled_before:
             data = {
                 "operation_key": "setup-test-restore-" + attempt_id,

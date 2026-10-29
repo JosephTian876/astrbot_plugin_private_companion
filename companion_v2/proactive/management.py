@@ -126,7 +126,7 @@ class ContactManagement:
 
             self._grants(enabled, operation_id)
 
-    def _configure(self, operator, data, *, require_running):
+    def _configure(self, operator, data, *, require_running, sync_grants=True):
         if (type(data) is not dict or set(data) != {"operation_key", "edit_token", "changes"}
                 or type(data["operation_key"]) is not str or not data["operation_key"].strip()
                 or len(data["operation_key"]) > 128 or type(data["edit_token"]) is not str
@@ -138,7 +138,7 @@ class ContactManagement:
             self.app.require_running()
         elif (set(data["changes"]) != {"enabled"}
                 or type(data["changes"]["enabled"]) is not bool or data["changes"]["enabled"]):
-            raise TaskError("contact_configuration_invalid", "stopped contact recovery may only revoke contact permission")
+            raise TaskError("contact_configuration_invalid", "stopped contact recovery may only disable contact settings")
         with self.runtime.transaction():
             self._authorize(operator)
             if require_running:
@@ -151,7 +151,7 @@ class ContactManagement:
                 operation=OperationRef(operation_id, GROUP, self.context.scope, VersionRef(operation_id, 1), operation_id),
                 expected_edit_token=data["edit_token"], changes={GROUP + "." + key: value for key, value in data["changes"].items()},
                 observed_at=self.app.now()))
-            if not receipt.replayed and "enabled" in data["changes"]:
+            if sync_grants and not receipt.replayed and "enabled" in data["changes"]:
                 self._grants(data["changes"]["enabled"], operation_id)
             result = {"operation_id": operation_id, "replayed": receipt.replayed, "status": self._status(operator)}
         self.app.notify()
@@ -163,10 +163,10 @@ class ContactManagement:
 
     @outcome
     def restore_temporary_disable(self, operator, data):
-        """Revoke a temporary setup-test grant without starting host intake."""
+        """Restore the setup switch without revoking the administrator's test grant."""
         if (type(data) is not dict or type(data.get("changes")) is not dict
                 or set(data["changes"]) != {"enabled"}
                 or type(data["changes"].get("enabled")) is not bool
                 or data["changes"]["enabled"]):
             raise TaskError("contact_configuration_invalid", "stopped contact recovery may only revoke contact permission")
-        return self._configure(operator, data, require_running=False)
+        return self._configure(operator, data, require_running=False, sync_grants=False)

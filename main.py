@@ -39,7 +39,7 @@ from .astrbot_host.core_reply import (
     restore_core_reply_event,
     restore_core_reply_prepared,
 )
-from .astrbot_host.core_reply_tools import inject_core_reply_tools
+from .astrbot_host.core_reply_tools import inject_core_reply_tools, inject_core_turn_notes
 from .astrbot_host.core_reply_preparation import measure_core_preparation
 from .astrbot_host.core_reply_decision import prepare_core_reply_decision
 from .astrbot_host.core_reply_closing import prepare_private_closing_decision
@@ -89,6 +89,18 @@ from .astrbot_host.stranger_notice import refuse_stranger
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
 PLUGIN_VERSION = PRODUCT_VERSION
+_ACTIVE_EXTENSION_API = None
+
+
+def get_private_companion_api():
+    """Return this loaded plugin generation's public API while it is active."""
+    api = _ACTIVE_EXTENSION_API
+    controller = getattr(api, "controller", None)
+    if api is None or controller is None or getattr(controller, "_terminated", True):
+        return None
+    return api
+
+
 # 婉拒陌生号里，只有"该发却发不出去"才算预期未回。开关关闭、冷却、当日额度、
 # 权限或文案不可用，都是设计内的安静，连排障台账都不该记。
 STRANGER_NOTICE_FAILURES = frozenset({
@@ -161,6 +173,8 @@ class PrivateCompanionV2StagingPlugin(Star):
             # One public facade exposes the body and its seven internal modules.
             # Independent third-party integrations use their documented APIs.
             self.extension_api = UnifiedCompanionExtensionAPI(self.staging)
+            global _ACTIVE_EXTENSION_API
+            _ACTIVE_EXTENSION_API = self.extension_api
             try:
                 self.staging.register_routes()
             except Exception:
@@ -172,6 +186,9 @@ class PrivateCompanionV2StagingPlugin(Star):
     def _retire_failed_initialization(self) -> None:
         if self._imports_retired:
             return
+        global _ACTIVE_EXTENSION_API
+        if _ACTIVE_EXTENSION_API is getattr(self, "extension_api", None):
+            _ACTIVE_EXTENSION_API = None
         retire_reset_marker = getattr(self, "_retire_context_reset_marker", None)
         if callable(retire_reset_marker):
             try:
@@ -1061,6 +1078,7 @@ class PrivateCompanionV2StagingPlugin(Star):
                 logger.warning("[CompanionV2] V2 工具暂不可用，保留 AstrBot 核心工具 error_type=%s",
                                type(error).__name__)
         prepare_native_host_request(self.staging, event, req)
+        inject_core_turn_notes(event, req)
         inject_functional_command_instruction(
             event, req, channel=str(prepared.get("channel") or ""), own_module=__name__,
             application=application,
@@ -1266,6 +1284,9 @@ class PrivateCompanionV2StagingPlugin(Star):
             logger.info("[CompanionV2] 共享宿主已停止" if self.staging.runtime is None
                         else "[CompanionV2] 共享宿主正在收尾")
         finally:
+            global _ACTIVE_EXTENSION_API
+            if _ACTIVE_EXTENSION_API is getattr(self, "extension_api", None):
+                _ACTIVE_EXTENSION_API = None
             # Preserve the module graph during a deferred drain. Retire this
             # instance's path ownership once, even if an old stop is retried.
             if not getattr(self, "_imports_retired", False):
