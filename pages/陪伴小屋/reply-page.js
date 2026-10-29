@@ -184,7 +184,7 @@ window.CompanionReplyPage = (() => {
       enable_humanized_expression: "勾选后，下面的额外表达提示会与所选风格叠加；自由模式下关闭即可移除这段提示。",
       humanized_expression_prompt: "最多 4000 字。约束模式使用此正文；留空使用内置默认文本。勾选“追加拟人表达提示”后，在自由或引导模式也会额外注入。本对象与群聊各自保存。",
       content_cleanup_enabled: "用于主动消息和普通私聊、群聊的文字回复，默认开启。发送前按所选方式整理文字；关闭时不执行清理。需要调整说法时优先补充上方提示词。",
-      content_cleanup_scope: "按句首、句中、句尾三个位置清理：句首只处理每段开头，句中只处理不贴首尾的匹配，句尾只处理每段末尾。",
+      content_cleanup_scope: "可多选：句首处理每段开头，句中处理不贴首尾的匹配，句尾处理每段末尾；勾选需要的位置即可，支持任意组合。",
       content_cleanup_words: "按所选位置逐字清理词条。例如填入“。”和“，”并选择“句尾”，即可保留句中标点、清理每段末尾；也可添加空格、换行或制表符。",
       content_cleanup_rule: "仅在清理方式选为正则时使用；最多 512 字。",
       content_replacements: "逐项填写原词和替换文本。",
@@ -375,12 +375,17 @@ window.CompanionReplyPage = (() => {
     ],
     segmentedChoices: ["rule_mode", "part_gap_mode", "streaming_mode", "prompt_style_mode"],
     inputs: {
+      content_cleanup_scope: "chips",
       split_words: "word-list", content_cleanup_words: "word-list", recall_forbidden_words: "word-list",
       content_replacements: "replacement-list", component_order: "order-list",
       group_wakeup_direct_words: "word-list", group_wakeup_context_words: "word-list",
       group_wakeup_interest_keywords: "word-list", group_wakeup_primary_member_ids: "word-list",
       group_wakeup_owner_direct_words: "word-list",
       file_understanding_format_groups: "word-list",
+    },
+    chipOptions: {
+      content_cleanup_scope: {mode: "multi", options: ["leading", "middle", "trailing"],
+        labels: {leading: "句首", middle: "句中", trailing: "句尾"}, hideInput: true},
     },
     visibility: {
       streaming_mode: {streaming: true},
@@ -666,9 +671,11 @@ window.CompanionReplyPage = (() => {
     } finally { clearTimeout(timer); }
   }
 
-  /* 旧配置的整段已退役；进入草稿时迁到句中，避免下拉框落空并在保存时被判非法。 */
+  /* 旧版整段清理迁成三项全选；其余单值保持原样，避免无改动也变脏。 */
   function normalizeReplyDraft(draft) {
-    if (draft?.content_cleanup_scope === "all") draft.content_cleanup_scope = "middle";
+    if (draft?.content_cleanup_scope === "all") {
+      draft.content_cleanup_scope = "leading、middle、trailing";
+    }
   }
 
   /* 读取由工作台负责；这里只订阅它的结果，用来渲染预览与保存摘要。 */
@@ -765,6 +772,21 @@ window.CompanionReplyPage = (() => {
       ...remaining.slice(insertion)];
   }
 
+  function previewOrderedKinds(declared, present) {
+    const kinds = [...new Set(present)].filter(Boolean);
+    if (Array.isArray(declared) && declared.length) {
+      const defaults = ["voice", "at", "text", "face", "image"];
+      const rank = [...declared, ...defaults.filter(kind => !declared.includes(kind))];
+      return rank.filter(kind => kinds.includes(kind));
+    }
+    const ordered = kinds.filter(kind => kind !== "at" && kind !== "face");
+    if (kinds.includes("at")) {
+      const textIndex = ordered.indexOf("text");
+      ordered.splice(textIndex >= 0 ? textIndex : 0, 0, "at");
+    }
+    if (kinds.includes("face")) ordered.push("face");
+    return ordered;
+  }
   function previewSummaryMarkup(p, settings) {
     const quote = p.quote || {};
     const quoteEnabled = quote.enabled ?? settings.reply_quote_enabled;
@@ -779,11 +801,18 @@ window.CompanionReplyPage = (() => {
     const voiceLabel = ({before: "文字前", request: "按请求插入", after: "文字后", last: "所有组件后"})
       [state.previewPositions.voice] || "未知位置";
     const session = state.previewSession === "group" ? "群聊" : "私聊";
+    const quotePolicy = !quoteEnabled ? "引用关闭"
+      : session === "group" && quoteGroupEnabled
+        ? `引用：${quoteFirstOnly ? "首段" : "每段"}`
+        : "引用：私聊不发送";
+    const mentionPolicy = !mentionSpeaker ? "不添加 @"
+      : session === "group" ? `@：${positionLabel(state.previewPositions.mention)}` : "@：私聊不发送";
     const componentPolicy = [
+      `预览会话：${session}`,
       `图片：${imageCount ? `${imageCount} 张 · ` : "无样本 · "}${imageTarget}${imageSide}`,
       `语音位置：${p.voice?.enabled ? voiceLabel : `未启用 · ${voiceLabel}`}`,
-      quoteEnabled ? `引用：${quoteGroupEnabled ? `群聊${quoteFirstOnly ? "首段" : "每段"}` : "群聊关闭"}` : "引用关闭",
-      mentionSpeaker ? `@：${session === "group" ? positionLabel(state.previewPositions.mention) : "仅群聊"}` : "不添加 @",
+      quotePolicy,
+      mentionPolicy,
       `平台表情：${positionLabel(state.previewPositions.reaction)}`,
       `表情包/附件：${state.previewPositions.media === "single" ? "独立消息" : positionLabel(state.previewPositions.media)}`,
     ].join(" · ");
@@ -831,24 +860,46 @@ window.CompanionReplyPage = (() => {
         const mediaApplies = mediaMode !== "single" && index === mediaTargetIndex;
         const imageSide = imageMode === "before" ? "文字前" : imageMode === "after" ? "文字后"
           : p.image_position === "before_text" ? "文字前" : "文字后";
-        const voiceApplies = Boolean(p.voice?.enabled && c.speech);
         const voiceLabel = ({before: "文字前", request: "按请求插入", after: "文字后", last: "所有组件后"})
           [state.previewPositions.voice] || "未知位置";
         const protectedUrl = state.previewProtection
           ? (text.match(/https?:\/\/[^\s<>]+/g) || []).find(url => p.parts.some(part => part.includes(url)))
           : "";
-        const placements = [];
-        if (quoteApplies) placements.push(`<span class="reply-preview-position-tag is-quote">${quoteFirstOnly ? "引用 · 固定第一段" : "引用 · 每一段"}</span>`);
-        if (mentionApplies) placements.push(`<span class="reply-preview-position-tag is-mention">@ · ${e(positionLabel(state.previewPositions.mention))}</span>`);
-        if (reactionApplies) placements.push(`<span class="reply-preview-position-tag is-reaction">平台表情 · ${e(positionLabel(state.previewPositions.reaction))}</span>`);
-        if (partImages) placements.push(`<span class="reply-preview-position-tag is-image">${partImages} 张图片 · ${imageSide}</span>`);
-        if (mediaApplies) placements.push(`<span class="reply-preview-position-tag is-media">表情包/附件 · ${e(positionLabel(mediaMode))}</span>`);
-        if (voiceApplies) placements.push(`<span class="reply-preview-position-tag is-voice">语音 · ${e(voiceLabel)}</span>`);
-        if (protectedUrl) placements.push(`<span class="reply-preview-position-tag is-protection">网址保护 · 链接整段保留</span>`);
         const successOrder = previewComponentOrder(c.success_order, {index, p, count: partCount});
         const fallbackOrder = previewComponentOrder(c.fallback_order, {index, p, count: partCount});
-        const placementMarkup = placements.length
-          ? `<div class="reply-preview-placements" aria-label="组件位置">${placements.join("")}</div>` : "";
+        const baseOrder = p.voice?.enabled && c.speech ? successOrder : fallbackOrder;
+        const quoteUnavailable = quoteEnabled && !quoteApplies
+          && (!quoteGroupEnabled || state.previewSession !== "group");
+        const mentionUnavailable = mentionSpeaker && !mentionApplies && state.previewSession !== "group";
+        const voiceUnavailable = !p.voice?.enabled;
+        const present = [...baseOrder];
+        if (partImages && !present.includes("image")) present.push("image");
+        if ((mentionApplies || mentionUnavailable) && !present.includes("at")) present.push("at");
+        if (reactionApplies && !present.includes("face")) present.push("face");
+        if (voiceUnavailable && !present.includes("voice")) {
+          const textIndex = present.indexOf("text");
+          if (state.previewPositions.voice === "before") present.splice(textIndex >= 0 ? textIndex : 0, 0, "voice");
+          else if (state.previewPositions.voice === "after") present.splice(textIndex >= 0 ? textIndex + 1 : present.length, 0, "voice");
+          else present.push("voice");
+        }
+        const orderedKinds = previewOrderedKinds(p.component_order, present);
+        const placementTags = {
+          text: () => `<span class="reply-preview-position-tag is-text">文字</span>`,
+          voice: () => `<span class="reply-preview-position-tag is-voice${voiceUnavailable ? " is-unavailable" : ""}">语音 · ${voiceUnavailable ? "未启用 · " : ""}${e(voiceLabel)}</span>`,
+          image: () => `<span class="reply-preview-position-tag is-image">${partImages} 张图片 · ${imageSide}</span>`,
+          at: () => `<span class="reply-preview-position-tag is-mention${mentionUnavailable ? " is-unavailable" : ""}">@ · ${mentionUnavailable ? "私聊不发送" : e(positionLabel(state.previewPositions.mention))}</span>`,
+          face: () => `<span class="reply-preview-position-tag is-reaction">平台表情 · ${e(positionLabel(state.previewPositions.reaction))}</span>`,
+        };
+        const sequence = [];
+        if (quoteApplies) sequence.push(`<span class="reply-preview-position-tag is-quote">${quoteFirstOnly ? "引用 · 固定第一段" : "引用 · 每一段"}</span>`);
+        else if (quoteUnavailable) sequence.push(`<span class="reply-preview-position-tag is-quote is-unavailable">引用 · ${quoteGroupEnabled ? "私聊不发送" : "群聊关闭"}</span>`);
+        sequence.push(...orderedKinds.map(kind => placementTags[kind]?.()).filter(Boolean));
+        if (mediaApplies) sequence.push(`<span class="reply-preview-position-tag is-media">表情包/附件 · ${e(positionLabel(mediaMode))}</span>`);
+        const sequenceMarkup = sequence.length
+          ? `<div class="reply-preview-placements is-sequence" aria-label="发送顺序">${sequence.join('<span class="reply-preview-position-arrow" aria-hidden="true">→</span>')}</div>` : "";
+        const protectionMarkup = protectedUrl
+          ? `<div class="reply-preview-placements is-protection-note" aria-label="保护提示"><span class="reply-preview-position-tag is-protection">网址保护 · 链接整段保留</span></div>` : "";
+        const placementMarkup = sequenceMarkup + protectionMarkup;
         return `<article class="reply-preview-part">`
           + `<header><strong>第 ${index + 1} 条</strong><span>${Array.from(text).length} 字</span></header>`
           + `<pre>${e(text)}</pre>`
@@ -1259,6 +1310,7 @@ window.CompanionReplyPage = (() => {
       rows: pageSpec.rows,
       segmentedChoices: spec.segmentedChoices,
       inputs: spec.inputs,
+      chipOptions: spec.chipOptions,
       visibility: spec.visibility,
       listFields: spec.listFields,
       order: pageSpec.order,

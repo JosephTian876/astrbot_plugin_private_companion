@@ -279,7 +279,7 @@ test('the settings section reads and saves through the reply route family', asyn
   assert.equal(harnessed.store.size, 0);
 });
 
-test('legacy all cleanup scope migrates to middle before validation', async () => {
+test('legacy all cleanup scope migrates to all three positions before validation', async () => {
   const harnessed = harness();
   harnessed.page.mount(harnessed.root, {view: 'expression'});
   await drains();
@@ -287,20 +287,24 @@ test('legacy all cleanup scope migrates to middle before validation', async () =
   await drains();
   const instance = live(harnessed);
   const field = instance.state.container.fields.content_cleanup_scope;
+  assert.equal(field.input, 'chips');
+  assert.equal(field.chipOptions.mode, 'multi');
+  assert.deepEqual(plain(field.chipOptions.options), ['leading', 'middle', 'trailing']);
+  assert.deepEqual(plain(field.chipOptions.labels), {leading: '句首', middle: '句中', trailing: '句尾'});
   assert.equal(instance.state.base.content_cleanup_scope, 'all');
-  assert.equal(instance.state.draft.content_cleanup_scope, 'middle');
+  assert.equal(instance.state.draft.content_cleanup_scope, 'leading、middle、trailing');
   assert.equal(harnessed.workbench.valid(field, instance.state.draft.content_cleanup_scope), true);
   assert.equal(instance.dirty(), true, 'the legacy value remains as a pending migration');
 
   const saving = instance.save(false);
   await drains();
-  assert.deepEqual(plain(harnessed.requests[1].body.changes), {content_cleanup_scope: 'middle'});
+  assert.deepEqual(plain(harnessed.requests[1].body.changes), {content_cleanup_scope: 'leading、middle、trailing'});
   harnessed.requests[1].resolve({result: {operation_id: 'cleanup-scope', replayed: false},
-    status: status({content_cleanup_scope: 'middle'}, 'b'.repeat(64))});
+    status: status({content_cleanup_scope: 'leading、middle、trailing'}, 'b'.repeat(64))});
   await saving;
   await drains();
-  assert.equal(instance.state.base.content_cleanup_scope, 'middle');
-  assert.equal(instance.state.draft.content_cleanup_scope, 'middle');
+  assert.equal(instance.state.base.content_cleanup_scope, 'leading、middle、trailing');
+  assert.equal(instance.state.draft.content_cleanup_scope, 'leading、middle、trailing');
   harnessed.page.unmount();
 });
 

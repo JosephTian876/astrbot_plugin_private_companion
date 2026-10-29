@@ -14,6 +14,7 @@ import time
 from companion_v2.conversation.foreground import ContextContribution, ContributionState
 from companion_v2.conversation.awareness_context import INSTRUCTION as CROSS_WINDOW_INSTRUCTION
 from companion_v2.conversation.growth_context import ROLE_GROWTH_INSTRUCTION
+from companion_v2.conversation.health_context import HEALTH_INSTRUCTION
 from companion_v2.conversation.life_context import LIFE_INSTRUCTION
 from companion_v2.conversation.messages import KNOWLEDGE_INSTRUCTION
 from companion_v2.conversation.open_items_context import INSTRUCTION as OPEN_ITEMS_INSTRUCTION
@@ -25,6 +26,7 @@ from companion_v2.delivery.history import CONTEXT_INSTRUCTION as SENT_MESSAGE_IN
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.knowledge.members import MEMBER_CLUE_INSTRUCTION
 from companion_v2.role_work.state.service import INSTRUCTION as STATE_INSTRUCTION
+from .core_reply_health import health_perception_snapshot
 
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,11 @@ GROUP_INSTRUCTION = (
     "当前是群聊，回复面向本群。当前发言者只代表本人，群公共记忆中的旧话保留各自账号和时间，"
     "不当作当前成员的新发言或全群共识。熟人卡、已归属的成员资料和近期互动可帮助延续本群的相处方式，"
     "互动边不证明现实关系、私聊关系或权限；私人关系资料不用于替代当前发言者的明确表达。"
+    "current_group_speaker 只代表本轮发言者，不是群历史里所有消息的说话人；不同 speaker_id 就是不同的人，"
+    "不能把上一位的称呼、昵称、话头或情绪安到当前发言者身上。"
+    "群内 @ 归因只认本轮文本里的 [提及机器人]；[提及账号 X] 是其他成员。人格名、角色名、群名片别名、"
+    "known_names 和旧记忆里的昵称都不是“在叫我”的证据：即使与别人提到或 @ 的名字相同，也不要接成"
+    "“在叫我/你刚才叫我/是在叫我吗”；第三人称谈论同名角色不等于直接呼唤。"
 )
 CURRENT_TIME_INSTRUCTION = """current_local_time 是系统时钟按当前窗口配置时区投影出的本轮时间，用于理解现在、今天和问候时段。历史消息与摘要保留各自日期，不能充当当前时间。
 感知本轮 current_local_time 与最近历史消息时间戳的跨度：同一对话流内直接自然接话；隔了半天、隔夜或隔了几天再聊时，自然体现重逢或时隔感，不把几天前的话头当成上一秒刚说完直接硬接。
@@ -224,7 +231,7 @@ def _input_received_at(native_input, fallback):
     return getattr(native_input, "at", None) or getattr(native_input, "received_at", None) or fallback
 
 
-def build_core_reply_prompt(application, context, native_input, *, at, keyword_materials=()):
+def build_core_reply_prompt(application, context, native_input, *, at, keyword_materials=(), health_material=None):
     """Build optional background independently; no failed section blocks reply."""
     blocks, stable_blocks, sections, expression_signal_ids = [], [], [], []
     measured, started = [], time.monotonic()
@@ -356,6 +363,18 @@ def build_core_reply_prompt(application, context, native_input, *, at, keyword_m
             instructions.append(CALENDAR_INSTRUCTION)
             if settings["almanac_enabled"]:
                 instructions.append(ALMANAC_INSTRUCTION)
+        # Health material is private by construction: mobile telemetry is keyed
+        # to the current recipient and the Reality consent is checked again in
+        # the host adapter before any reading reaches this prompt.  This is the
+        # single health on/off switch; saving it also prepares the source and
+        # the current private-window consent.
+        if context.scope.kind is ScopeKind.PRIVATE and settings.get("health_enabled") is True:
+            health = health_material
+            if health is None:
+                health = health_perception_snapshot(application, context, at)
+            if health:
+                perception_data["health_context"] = health
+                instructions.append(HEALTH_INSTRUCTION)
         # Personal birthdays are explicit profile data, so they remain available
         # even when generic calendar labels are disabled. User data is included
         # only for the identified private recipient; role data is safe to share

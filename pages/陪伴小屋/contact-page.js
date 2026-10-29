@@ -1362,6 +1362,11 @@ window.CompanionContactPage = (() => {
     accepted:"平台已接收请求，但尚无最终投递回执", pending:"等待平台投递回执",
     dispatched:"已提交平台，等待投递回执",
   };
+  const TEST_MEDIA_STATES = {
+    reaction: {attached:"已附表情图", pending_review:"待人格复核后附表情图", not_selected:"未选表情图"},
+    voice: {sealed:"已封装语音", not_selected:"未选语音"},
+    poke: {sealed:"已封装戳一戳", not_selected:"未选戳一戳"},
+  };
   function testStageMarkup(result) {
     const stages = Array.isArray(result.stages) ? result.stages.filter(item =>
       item && typeof item.stage === "string" && typeof item.state === "string") : [];
@@ -1386,6 +1391,12 @@ window.CompanionContactPage = (() => {
     }
     if (delivery && Number.isFinite(Number(delivery.expected_parts))) {
       stageLines.push(`本轮投递：${Number(delivery.delivered_parts || 0)} / ${Number(delivery.expected_parts)} 段已确认 · ${Number(delivery.unresolved_parts || 0)} 段待确认 · ${Number(delivery.failed_parts || 0)} 段失败`);
+    }
+    const media = metrics?.media;
+    if (media && typeof media === "object") {
+      const mediaText = Object.entries(TEST_MEDIA_STATES).map(([key, labels]) =>
+        labels[media[key]] ? `${labels[media[key]]}` : "").filter(Boolean);
+      if (mediaText.length) stageLines.push(`本轮表达：${mediaText.join(" · ")}`);
     }
     const summary = result.usage_summary;
     const sessionDecision = summary?.decisions?.session;

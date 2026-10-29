@@ -12,8 +12,14 @@ window.CompanionOutputPage=(()=>{
     staging_session_still_stopping:"V2 当前会话仍在停止，请稍等片刻后再重连。",
     staging_host_terminated:"V2 执行器已停止，请重新启动插件后再重连。",
     staging_configuration_invalid:"V2 配置未通过校验，请检查宿主管理中的运行配置。",
-    staging_native_reconnect_failed:"V2 执行器重连失败，请查看 AstrBot 日志中的 CompanionV2 错误后再试。"};
+    staging_native_reconnect_failed:"V2 执行器重连失败，请查看 AstrBot 日志中的 CompanionV2 错误后再试。",
+    generated_album_selection_invalid:"请选择 1–24 张不重复的产出图片。",
+    generated_album_export_too_large:"选中的图片总大小超过导出上限，请少选几张。",
+    generated_album_folder_unavailable:"V2 数据目录当前不可用。",
+    generated_album_open_failed:"无法打开 V2 数据目录，请检查运行环境权限。",
+    generated_image_missing:"选中的图片已经不在图库中，请刷新后重试。"};
   let root=null,abort=null,ticket=0,scope="",base=null,draft=null,revision="",busy="",notice="",bad=false,hostRegistered=false,expanded=new Set(),tests=new Map(),testKeys=new Map(),observation=null,observationBusy=false,observationError="",sceneEditorOpen=false,sceneDraft=null,sceneError="",sceneSaving=false;
+  let albumItems=[],albumCursor=null,albumLoaded=false,albumLoading=false,albumError="",albumSelected=-1,albumSelectedIds=new Set(),albumNotice="",albumBusy="";
   const product=()=>window.CompanionProduct;
   const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const endpointLabel=item=>String(item?.name||"").trim()||String(item?.model||"").trim()||"未命名模型";
@@ -23,6 +29,11 @@ window.CompanionOutputPage=(()=>{
   const dirty=()=>!!draft&&JSON.stringify(draft)!==JSON.stringify(base);
   const endpoint=()=>product().relative(product().role().model_api)+"/image/output";
   const observationEndpoint=()=>product().relative(product().role().model_api)+"/image/observability";
+  const albumEndpoint=()=>{
+    const endpoint=product()?.role?.()?.image_material_api;
+    if(typeof endpoint!=="string"||!endpoint)throw Object.assign(new Error("当前角色尚无可读取的图片相册"),{code:"image_material_unavailable"});
+    return product().relative(endpoint)+"/album";
+  };
   const options=(values,current)=>Object.entries(values).map(([key,label])=>`<option value="${esc(key)}"${key===current?" selected":""}>${esc(label)}</option>`).join("");
   function updateMarkup(node,html){
     if(node.outputMarkup===html)return;
@@ -36,6 +47,129 @@ window.CompanionOutputPage=(()=>{
     if(!value)return "—";
     const time=new Date(value);
     return Number.isNaN(time.getTime())?"—":new Intl.DateTimeFormat("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}).format(time);
+  }
+  function updatePreviewFromAlbum(){
+    const image=root?.querySelector("[data-output-preview-image]");
+    const frame=root?.querySelector(".output-image-frame");
+    const status=root?.querySelector(".output-image-status span");
+    if(!image||!frame||!status)return;
+    const latest=albumItems[0];
+    if(!latest?.thumbnail){image.hidden=true;image.removeAttribute("src");status.textContent="还没有生成图片";frame.dataset.imageState="unavailable";return;}
+    image.alt=`${latest.width||""} × ${latest.height||""} 最近生成图片`;
+    image.hidden=false;image.src=latest.thumbnail;
+    status.textContent="最近生成的图片暂不可用";
+  }
+  function albumMeta(item){
+    const size=[item.width,item.height].filter(value=>value!=null&&value!=="").join(" × ");
+    return [size,formatTime(item.created_at)].filter(Boolean).join(" · ");
+  }
+  function albumCard(item,index){
+    const meta=[item.width&&item.height?item.width+' × '+item.height:'',item.action||''].filter(Boolean).join(' · ')||'生成图片';
+    const checked=albumSelectedIds.has(item.image_id);
+    return '<article class="output-album-card'+(checked?' is-selected':'')+'"><label class="output-album-select"><input type="checkbox" data-output-album-select="'+esc(item.image_id)+'"'+(checked?' checked':'')+' aria-label="选择产出图片 '+(index+1)+'"></label><button type="button" class="output-album-open" data-output-native-action="album-open" data-output-image-index="'+index+'" aria-label="查看产出图片 '+(index+1)+'"><img src="'+esc(item.thumbnail)+'" alt="'+esc(item.action||'生成图片')+'" loading="lazy" decoding="async"><span class="output-album-card-meta"><strong>'+esc(formatTime(item.created_at))+'</strong><small>'+esc(meta)+'</small></span></button></article>';
+  }
+  function renderAlbum(){
+    const host=root?.querySelector("#outputAlbumWorkspace");
+    if(!host)return;
+    let body="";
+    if(albumLoading&&!albumItems.length)body='<div class="output-album-state is-loading"><strong>正在读取产出图库</strong><span>只展示当前角色已经生成并保存的图片。</span></div>';
+    else if(albumError&&!albumItems.length)body=`<div class="output-album-state is-error"><strong>产出图库暂不可读</strong><span>${esc(albumError)}</span><button type="button" class="button small" data-output-native-action="album-refresh">重新读取</button></div>`;
+    else if(!albumLoaded&&!albumItems.length)body='<div class="output-album-state"><strong>等待读取产出图库</strong><span>点击刷新图库读取当前角色的生成记录。</span></div>';
+    else if(!albumItems.length)body='<div class="output-album-state"><strong>还没有生成图片</strong><span>完成一次图像生成后，图片会自动出现在这里。</span></div>';
+    else body='<div class="output-album-summary"><span>'+albumItems.length+' 张已加载</span><span>'+(albumCursor?'还有更早的产出':'已到最早')+'</span></div>';
+    if(albumItems.length){
+      const selected=albumSelectedIds.size;
+      const all=albumItems.every(item=>albumSelectedIds.has(item.image_id));
+      body+='<div class="output-album-toolbar"><label class="output-album-check"><input type="checkbox" data-output-album-select-all'+(all?' checked':'')+' aria-label="全选产出图片">全选</label><span class="output-album-selected">已选 <b>'+selected+'</b> 张</span><div class="output-album-actions"><button type="button" class="button small primary" data-output-native-action="album-export"'+(selected&&!albumBusy?'':' disabled')+'>'+(albumBusy==='export'?'正在导出…':'导出选中')+'</button><button type="button" class="button small danger" data-output-native-action="album-hide"'+(selected&&!albumBusy?'':' disabled')+'>'+(albumBusy==='hide'?'正在删除…':'删除选中')+'</button><button type="button" class="button small" data-output-native-action="album-open-folder"'+(albumBusy?' disabled':'')+'>'+(albumBusy==='folder'?'正在打开…':'打开数据目录')+'</button><button type="button" class="button small" data-output-native-action="album-refresh"'+(albumBusy?' disabled':'')+'>刷新图库</button></div></div>';
+    }
+    if(albumNotice)body+='<div class="output-album-notice'+(albumError?' is-error':'')+'" role="status">'+esc(albumNotice)+'</div>';
+    if(albumItems.length)body+='<div class="output-album-grid">'+albumItems.map(albumCard).join('')+'</div>';
+    if(albumCursor)body+='<div class="output-album-more"><button type="button" class="button small" data-output-native-action="album-more"'+(albumLoading?' disabled':'')+'>'+(albumLoading?'正在读取…':'读取更早的产出')+'</button></div>';
+    host.innerHTML=body;
+    renderAlbumLightbox();
+    window.lucide?.createIcons?.({attrs:{'aria-hidden':'true'}});
+  }
+  async function loadAlbum(append=false){
+    if(albumLoading||(append&&!albumCursor))return;
+    const id=ticket;
+    albumLoading=true;
+    if(!append){albumError="";albumNotice="";}
+    renderAlbum();
+    try{
+      const data=await product().request("GET",albumEndpoint(),append?{cursor:albumCursor}:undefined);
+      if(!live(id))return;
+      if(!Array.isArray(data?.items))throw new Error("产出图库返回格式不完整");
+      const incoming=data.items.filter(item=>item&&item.image_id&&item.thumbnail);
+      if(append){const known=new Set(albumItems.map(item=>item.image_id));albumItems.push(...incoming.filter(item=>!known.has(item.image_id)));}
+      else{albumItems=incoming;albumSelectedIds=new Set([...albumSelectedIds].filter(id=>albumItems.some(item=>item.image_id===id)));updatePreviewFromAlbum();}
+      albumCursor=typeof data.next_cursor==="string"&&data.next_cursor?data.next_cursor:null;
+      albumLoaded=true;albumError="";
+      if(albumSelected>=albumItems.length)albumSelected=-1;
+    }catch(error){
+      if(!live(id))return;
+      albumError=ERRORS[error?.code]||ERRORS[error?.message]||error?.message||"产出图库暂不可读";
+    }finally{if(live(id)){albumLoading=false;renderAlbum();}}
+  }
+  function renderAlbumLightbox(){
+    const host=root?.querySelector("#outputAlbumLightbox");
+    if(!host)return;
+    const item=albumItems[albumSelected];
+    if(!item){host.hidden=true;host.innerHTML="";return;}
+    host.hidden=false;
+    host.innerHTML='<button type="button" class="output-album-lightbox-mask" data-output-native-action="album-close" aria-label="关闭"></button><section class="output-album-lightbox-card"><header><div><strong>产出图片</strong><small>'+esc(albumMeta(item))+'</small></div><button type="button" class="output-icon-button" data-output-native-action="album-close" aria-label="关闭">'+icon('x')+'</button></header><div class="output-album-lightbox-stage"><button type="button" class="output-album-nav prev" data-output-native-action="album-prev" aria-label="上一张"'+(albumSelected<=0?' disabled':'')+'>'+icon('chevron-left')+'</button><img src="'+esc(item.thumbnail)+'" alt="'+esc(item.action||'生成图片')+'"><button type="button" class="output-album-nav next" data-output-native-action="album-next" aria-label="下一张"'+(albumSelected>=albumItems.length-1?' disabled':'')+'>'+icon('chevron-right')+'</button></div><footer><span>'+(albumSelected+1)+' / '+albumItems.length+'</span><span>'+esc(item.action||'generated')+'</span></footer></section>';
+    window.lucide?.createIcons?.({attrs:{"aria-hidden":"true"}});
+  }
+  function openAlbum(index){if(!Number.isInteger(index)||index<0||index>=albumItems.length)return;albumSelected=index;renderAlbumLightbox();}
+  function stepAlbum(delta){if(!albumItems.length)return;albumSelected=Math.max(0,Math.min(albumItems.length-1,albumSelected+delta));renderAlbumLightbox();}
+  function downloadDataUrl(dataUrl,filename){
+    const link=document.createElement("a");
+    link.href=dataUrl;link.download=filename||"companion-album.zip";link.rel="noopener";
+    document.body.appendChild(link);link.click();link.remove();
+  }
+  function toggleAlbumSelection(imageId,checked){
+    if(checked)albumSelectedIds.add(imageId);else albumSelectedIds.delete(imageId);
+    renderAlbum();
+  }
+  function selectAllAlbums(checked){
+    albumSelectedIds=new Set(checked?albumItems.map(item=>item.image_id):[]);
+    renderAlbum();
+  }
+  async function exportAlbum(){
+    if(albumBusy||!albumSelectedIds.size)return;
+    const id=ticket,ids=[...albumSelectedIds];
+    albumBusy="export";albumNotice="正在打包选中的图片…";albumError="";renderAlbum();
+    try{
+      const data=await product().request("POST",albumEndpoint()+"/export",{image_ids:ids});
+      if(!live(id))return;
+      if(typeof data?.data_url!=="string"||typeof data.filename!=="string")throw new Error("导出文件格式不完整");
+      downloadDataUrl(data.data_url,data.filename);
+      albumNotice=`已导出 ${Number(data.count)||ids.length} 张图片`;
+    }catch(error){if(live(id)){albumError=ERRORS[error?.code]||ERRORS[error?.message]||error?.message||"导出失败";albumNotice=albumError;}}
+    finally{if(live(id)){albumBusy="";renderAlbum();}}
+  }
+  async function hideAlbum(){
+    if(albumBusy||!albumSelectedIds.size)return;
+    const ids=[...albumSelectedIds];
+    if(typeof window.confirm==="function"&&!window.confirm(`确定从图库删除选中的 ${ids.length} 张图片？图片会从当前角色图库中移除，不会删除原始来源记录。`))return;
+    const id=ticket;albumBusy="hide";albumNotice="正在从图库删除…";albumError="";renderAlbum();
+    try{
+      const data=await product().request("POST",albumEndpoint()+"/hide",{image_ids:ids});
+      if(!live(id))return;
+      const removed=new Set(ids);albumItems=albumItems.filter(item=>!removed.has(item.image_id));
+      albumSelectedIds=new Set();albumSelected=-1;albumNotice=`已从图库删除 ${Number(data?.hidden)||ids.length} 张图片`;
+      updatePreviewFromAlbum();
+    }catch(error){if(live(id)){albumError=ERRORS[error?.code]||ERRORS[error?.message]||error?.message||"删除失败";albumNotice=albumError;}}
+    finally{if(live(id)){albumBusy="";renderAlbum();}}
+  }
+  async function openAlbumFolder(){
+    if(albumBusy)return;
+    const id=ticket;albumBusy="folder";albumNotice="正在打开数据目录…";albumError="";renderAlbum();
+    try{
+      const data=await product().request("POST",albumEndpoint()+"/open-folder",{});
+      if(!live(id))return;
+      albumNotice=`已打开数据目录：${data?.path||"当前运行数据目录"}`;
+    }catch(error){if(live(id)){albumError=ERRORS[error?.code]||ERRORS[error?.message]||error?.message||"无法打开数据目录";albumNotice=albumError;}}
+    finally{if(live(id)){albumBusy="";renderAlbum();}}
   }
   function renderScenePresets(){
     const host=root?.querySelector("#outputScenePresetList");
@@ -172,26 +306,9 @@ window.CompanionOutputPage=(()=>{
     if(localHost)localHost.innerHTML=local();
     root.querySelectorAll("[data-output-native-notice]").forEach(host=>{host.textContent=notice;host.hidden=!notice;host.classList.toggle("is-error",bad);});
     renderScenePresets();
+    renderAlbum();
     renderObservation();
     window.lucide?.createIcons?.({attrs:{"aria-hidden":"true"}});
-  }
-  async function refreshPreview(){
-    const id=ticket,image=root?.querySelector("[data-output-preview-image]"),frame=root?.querySelector(".output-image-frame"),status=root?.querySelector(".output-image-status span");
-    if(!image||!frame||!status)return;
-    const role=product()?.role?.();
-    if(!role?.image_material_api){image.hidden=true;image.removeAttribute("src");status.textContent="当前角色尚无可读取的图片相册";frame.dataset.imageState="unavailable";return;}
-    try{
-      const data=await product().request("GET",product().relative(role.image_material_api)+"/album");
-      if(!live(id))return;
-      const latest=data?.items?.[0];
-      if(!latest?.thumbnail){image.hidden=true;image.removeAttribute("src");status.textContent="还没有生成图片";frame.dataset.imageState="unavailable";return;}
-      image.alt=`${latest.width||""} × ${latest.height||""} 最近生成图片`;
-      image.hidden=false;image.src=latest.thumbnail;
-      status.textContent="最近生成的图片暂不可用";
-    }catch{
-      if(!live(id))return;
-      image.hidden=true;image.removeAttribute("src");status.textContent="图片相册暂不可用";frame.dataset.imageState="unavailable";
-    }
   }
   async function refreshObservability(){
     if(observationBusy)return;
@@ -271,6 +388,8 @@ window.CompanionOutputPage=(()=>{
   }
   function input(event){
     const target=event.target;
+    if(target.matches("[data-output-album-select-all]")){selectAllAlbums(target.checked);return;}
+    if(target.matches("[data-output-album-select]")){toggleAlbumSelection(target.dataset.outputAlbumSelect,target.checked);return;}
     if(target.matches("[data-output-scene-index][data-output-scene-field]")&&Array.isArray(sceneDraft)){
       const index=Number(target.dataset.outputSceneIndex);
       if(sceneDraft[index])sceneDraft[index][target.dataset.outputSceneField]=target.value;
@@ -330,6 +449,15 @@ window.CompanionOutputPage=(()=>{
       void saveScenePresets();
       return;
     }
+    if(action==="album-refresh"){void loadAlbum(false);return;}
+    if(action==="album-export"){void exportAlbum();return;}
+    if(action==="album-hide"){void hideAlbum();return;}
+    if(action==="album-open-folder"){void openAlbumFolder();return;}
+    if(action==="album-more"){void loadAlbum(true);return;}
+    if(action==="album-open"){openAlbum(Number(target.dataset.outputImageIndex));return;}
+    if(action==="album-close"){albumSelected=-1;renderAlbumLightbox();return;}
+    if(action==="album-prev"){stepAlbum(-1);return;}
+    if(action==="album-next"){stepAlbum(1);return;}
     if(!draft)return;
     const index=draft.endpoints.findIndex(item=>item.id===identifier);
     if(action==="expand"){expanded.has(identifier)?expanded.delete(identifier):expanded.add(identifier);}
@@ -343,7 +471,7 @@ window.CompanionOutputPage=(()=>{
     if(action==="remove"&&index>=0){draft.endpoints.splice(index,1);for(const operation of ["generate","edit"])if(Array.isArray(draft.operation_routes?.[operation]))draft.operation_routes[operation]=draft.operation_routes[operation].filter(route=>route!==`online:${identifier}`);}
     render();
   }
-  function unmount(){ticket++;abort?.abort();abort=null;root=null;draft=base=null;busy="";scope="";observation=null;observationBusy=false;sceneEditorOpen=false;sceneDraft=null;sceneSaving=false;}
+  function unmount(){ticket++;abort?.abort();abort=null;root=null;draft=base=null;busy="";scope="";observation=null;observationBusy=false;sceneEditorOpen=false;sceneDraft=null;sceneSaving=false;albumItems=[];albumCursor=null;albumLoaded=false;albumLoading=false;albumError="";albumSelected=-1;albumSelectedIds=new Set();albumNotice="";albumBusy="";}
   function mount(node){
     unmount();root=node;scope=product()?.scopeKey?.()||"";expanded=new Set();tests=new Map();testKeys=new Map();notice="";bad=false;observation=null;observationError="";sceneError="";
     if(!root)return;
@@ -352,7 +480,7 @@ window.CompanionOutputPage=(()=>{
     root.addEventListener("change",input,{signal:abort.signal});
     root.addEventListener("click",click,{signal:abort.signal});
     refresh();
-    refreshPreview();
+    loadAlbum(false);
     refreshObservability();
   }
   return {mount,unmount,refresh,refreshObservability,configUpdated:renderScenePresets};

@@ -5,7 +5,12 @@ from __future__ import annotations
 import base64
 from hashlib import sha256
 from io import BytesIO
+import json
+import os
+import subprocess
+import sys
 import warnings
+import zipfile
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PIL import Image, ImageOps
@@ -46,6 +51,9 @@ from companion_v2.storage.runtime import StorageRuntime
 MANAGEMENT_SCOPE = "page.management"
 MANAGEMENT_ACTION = "memory.manage"
 ALBUM_LIMIT = 16
+ALBUM_SELECTION_LIMIT = 24
+ALBUM_EXPORT_BYTES = 32 * 1024 * 1024
+ALBUM_HIDDEN_KEY_PREFIX = "image.album.hidden.v1:"
 THUMBNAIL_BYTES = 160 * 1024
 REFERENCE_THUMBNAIL_BYTES = 64 * 1024
 UPLOAD_MAX_BYTES = 12 * 1024 * 1024
@@ -261,12 +269,96 @@ class ReferenceMaterialManagement:
             owner, expected_asset_ids=expected_asset_ids, asset_ids=asset_ids)
         return {"asset_ids": list(ordered)}
 
+    @staticmethod
+    def _album_selection(image_ids):
+        if (type(image_ids) is not list or not 1 <= len(image_ids) <= ALBUM_SELECTION_LIMIT
+                or any(type(item) is not str or not item or len(item) > 180 for item in image_ids)
+                or len(set(image_ids)) != len(image_ids)):
+            raise TaskError("generated_album_selection_invalid", "select between 1 and 24 unique album images")
+        return list(image_ids)
+
+    def _hidden_album_ids(self, context):
+        key = ALBUM_HIDDEN_KEY_PREFIX + context.key
+        row = self.runtime.read_one("SELECT value FROM runtime_metadata WHERE key=?", (key,))
+        if row is None:
+            return set()
+        try:
+            values = json.loads(row["value"])
+        except (TypeError, ValueError):
+            return set()
+        return {item for item in values if type(item) is str and item} if isinstance(values, list) else set()
+
+    def _hide_album_ids(self, context, image_ids):
+        key = ALBUM_HIDDEN_KEY_PREFIX + context.key
+        with self.runtime.transaction() as connection:
+            row = connection.execute("SELECT value FROM runtime_metadata WHERE key=?", (key,)).fetchone()
+            try:
+                hidden = set(json.loads(row["value"])) if row is not None else set()
+            except (TypeError, ValueError):
+                hidden = set()
+            hidden.update(image_ids)
+            payload = json.dumps(sorted(hidden), ensure_ascii=True, separators=(",", ":"))
+            connection.execute(
+                "INSERT INTO runtime_metadata(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, payload))
+        return hidden
+
+    def export_album(self, operator, context, *, at, image_ids):
+        identifiers = self._album_selection(image_ids)
+        self._admit(operator, context, at)
+        archive = BytesIO()
+        total = 0
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+            for index, image_id in enumerate(identifiers, 1):
+                item = self.application.messages.generated_images.album_image(context, at, image_id)
+                total += len(item.content)
+                if total > ALBUM_EXPORT_BYTES:
+                    raise TaskError("generated_album_export_too_large",
+                                    "the selected album export exceeds the size limit")
+                extension = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(
+                    getattr(item.descriptor, "mime_type", ""), "bin")
+                stem = str(item.created_at).replace(":", "").replace("-", "").replace("+", "")[:18]
+                bundle.writestr(f"album-{index:02d}-{stem}.{extension}", item.content)
+        data = archive.getvalue()
+        return {"filename": "companion-album-" + at.strftime("%Y%m%d-%H%M%S") + ".zip",
+                "mime_type": "application/zip",
+                "data_url": "data:application/zip;base64," + base64.b64encode(data).decode("ascii"),
+                "count": len(identifiers)}
+
+    def hide_album_images(self, operator, context, *, at, image_ids):
+        identifiers = self._album_selection(image_ids)
+        self._admit(operator, context, at)
+        for image_id in identifiers:
+            self.application.messages.generated_images.album_image(context, at, image_id)
+        hidden = self._hide_album_ids(context, identifiers)
+        return {"hidden": len(identifiers), "hidden_total": len(hidden)}
+
+    def open_album_folder(self, operator, context, *, at):
+        self._admit(operator, context, at)
+        from pathlib import Path
+        root = Path(self.runtime.data_root).resolve()
+        if not root.is_dir():
+            raise TaskError("generated_album_folder_unavailable", "the V2 data folder is unavailable")
+        try:
+            if os.name == "nt":
+                os.startfile(str(root))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(root)])
+            else:
+                subprocess.Popen(["xdg-open", str(root)])
+        except (OSError, AttributeError, ValueError) as error:
+            raise TaskError("generated_album_open_failed", "the V2 data folder could not be opened") from error
+        return {"path": str(root), "opened": True}
+
     def album(self, operator, context, *, at, cursor=None):
         self._admit(operator, context, at)
         page = self.application.messages.generated_images.album_page(
             context, at, limit=ALBUM_LIMIT, cursor=cursor)
+        hidden = self._hidden_album_ids(context)
         items = []
         for item in page["items"]:
+            if item.image_id in hidden:
+                continue
             with Image.open(BytesIO(item.content)) as source:
                 source.load()
                 source.thumbnail((480, 480), Image.Resampling.LANCZOS)

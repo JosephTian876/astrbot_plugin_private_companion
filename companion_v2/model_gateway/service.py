@@ -87,7 +87,12 @@ class LocalModelGateway:
         if run.task.spec.kind not in TASK_ROLE_REFERENCE_KINDS:
             return request
         reference = self.role_reference.instruction(run.task.spec.context, self.tasks.now())
-        return replace(request, role_instruction=reference) if reference else request
+        if not reference:
+            return request
+        # The model role layer becomes the self page, but the native role guard
+        # must keep checking the captured AstrBot persona behind the window.
+        guard = request.role_guard_instruction if request.role_guard_instruction is not None else request.role_instruction
+        return replace(request, role_instruction=reference, role_guard_instruction=guard)
 
     def open_session(self, run: TaskRun, request: PromptRequest, *, tools: tuple[ToolSpec, ...] = (),
                      tool_filters: tuple[dict, ...] = ()):
@@ -358,6 +363,7 @@ class ModelSession:
                 ("audios", (request.audios, original.audios)), ("videos", (request.videos, original.videos)),
                 ("native_video_input", (request.native_video_input, original.native_video_input)),
                 ("role_instruction", (request.role_instruction, original.role_instruction)),
+                ("host_role_instruction", (request.host_role_instruction, original.host_role_instruction)),
                 ("context.deferred", (request.context.deferred, original.context.deferred)),
                 ("context.unavailable", (request.context.unavailable, original.context.unavailable)),
                 ("output_format", (request.output_format, original.output_format)),

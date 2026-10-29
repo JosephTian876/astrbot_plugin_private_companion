@@ -198,6 +198,72 @@ class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         await self.start(host, task_generation=1, model_generation=1)
         self.assertEqual(self.uses(), 1)
 
+    async def test_judged_contact_attaches_reaction_after_judge_approves(self):
+        from companion_v2.configuration.registry import FieldRegistry
+        from companion_v2.model_gateway.routing import configuration_fields as model_fields
+        from companion_v2.proactive.service import persona_judge_profile
+
+        self.sender = replace(self.sender, supports_images=True)
+        self.profiles += (persona_judge_profile("primary", max_output_tokens=100),)
+        self.registry = FieldRegistry(version="contact-test.v1", fields=model_fields(self.profiles))
+        host = self.host()
+        self.semantic = host.application.attach_semantics(SemanticPort())
+        await self.start(host)
+        app = host.application
+        self.settings(app, {"enabled": True, "enable_llm_proactive_persona_judge": True,
+                            "proactive_persona_judge_threshold": 60}).unwrap()
+        self.semantic.store.configure({"reactions_proactive_enabled": True,
+                                       "reactions_trigger_probability": 1.0,
+                                       "reactions_cooldown_seconds": 0}, 0)
+        from companion_v2.conversation.media.output_settings import GROUP as IMAGE_OUTPUT_GROUP
+        context = self.contact_context()
+        target = ConfigTarget(context.scope.installation_id, ConfigLayer.ROLE,
+                              context.role_binding.role, bot_id=context.scope.bot_id)
+        snapshot = app.configuration.read(self.core, target=target, group_id=IMAGE_OUTPUT_GROUP,
+                                          observed_at=self.clock.now()).unwrap()
+        app.configuration.patch(self.core, target=target, group_id=IMAGE_OUTPUT_GROUP,
+            expected_edit_token=snapshot.edit_token,
+            changes={IMAGE_OUTPUT_GROUP + ".proactive_probability": 1.0,
+                     IMAGE_OUTPUT_GROUP + ".proactive_max_daily": 2},
+            operation=self.operation(target.authorization_scope, owner=IMAGE_OUTPUT_GROUP),
+            observed_at=self.clock.now()).unwrap()
+        original = picture()
+        item = self.import_reaction(original, label="安慰")
+
+        async def respond(envelope):
+            if "主动消息复核" in envelope.task_prompt or "点评一条已写好的主动消息" in envelope.task_prompt or "score" in envelope.original.instruction:
+                return answered('{"decision":"send","score":92,"reason":"语气自然"}')
+            return answered(json.dumps({"decision": "send", "text": "我在这里陪你。",
+                                        "reaction_intent": "安慰"}, ensure_ascii=False))
+        self.model_behavior = respond
+
+        opportunity = self.opportunity("judged-reaction")
+        source = self.source(app, "judged-reaction-source")
+        intent = self.intent(opportunity, purpose="chat", sources=(source,))
+        diagnostic_origin = {"_diagnostic": {"route_id": "conversation_scheduler", "purpose": "chat",
+            "batch_id": "judged-batch", "event_key": "judged-event", "event_hash": "event-hash",
+            "role_hash": "role-hash"}}
+        app.contact_schedule.validate_diagnostic_origin = Mock()
+        app.contact_schedule._origin = Mock(return_value=(None, {"role_instruction": "原角色"}, None))
+        task = (await app.proactive.contact(context, opportunity, (intent,),
+            role_instruction="原角色", selection_seed="judged-reaction",
+            administrator_test=True, diagnostic_source_backed=True,
+            diagnostic_origin=diagnostic_origin)).unwrap().task
+        row = await self.delivery_state(app, task.task_id, "delivered")
+        await self.until(lambda: self.uses() == 1)
+        envelope = self.sent[0]
+        self.assertIsInstance(envelope, ImageDeliveryEnvelope)
+        self.assertEqual(envelope.images[0].descriptor.content_hash, item["id"])
+        contact = self.runtime.read_one("SELECT * FROM proactive_contacts WHERE task_id=?", (task.task_id,))
+        record = json.loads(contact["record_json"])
+        self.assertEqual(record["judge"]["decision"], "send")
+        self.assertNotIn("pending_reaction_intent", record)
+        self.assertEqual(record["reaction"]["manifest"], image_manifest(envelope.images[0]))
+        self.assertEqual(contact["payload_hash"], row["payload_hash"])
+        observation = app.proactive.observe(context, task.task_id).unwrap()
+        self.assertEqual(observation["stage_metrics"]["media"]["reaction"], "attached")
+        self.assertEqual(observation["stage_metrics"]["media"]["voice"], "not_selected")
+
 
 if __name__ == "__main__":
     unittest.main()

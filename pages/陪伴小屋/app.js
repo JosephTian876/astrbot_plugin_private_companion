@@ -358,6 +358,8 @@ function navigate(next,tab,subtab='',{replace=false,scroll=true}={}){
   if(same){commit();return true;}
   return afterPageLeave(ticket,commit);
 }
+/* Cross-page modules and workspace iframes use this public entry point. */
+window.navigate = navigate;
 function navigateToReplySection(next,tab,subtab,section){
   const navigation=navigate(next,tab,subtab);
   if(navigation&&typeof navigation.then==='function'){
@@ -593,8 +595,19 @@ function mountStage(){
       onSelect:openVoxelStation,
       onResidentSelect:()=>showDetail('profile'),
       onTourChange:updateVoxelTour,
-      onEditorChange:updateRoomEditor,
-      onError:message=>{if(arrangementDraft)finishRoomEditor(false);showVoxelFallback(mount);toast(message);},
+      /* app.js now runs before the larger page modules. room-editor.js is
+         loaded later, so referencing its top-level declarations while mounting
+         would throw during every first paint and replace the loading scene with
+         the failure view. Both callbacks are only used after the user interacts,
+         so resolve them lazily when the module is actually present. */
+      onEditorChange:editor=>{
+        if(typeof updateRoomEditor==='function')updateRoomEditor(editor);
+      },
+      onError:message=>{
+        if(typeof arrangementDraft!=='undefined'&&arrangementDraft
+           &&typeof finishRoomEditor==='function')finishRoomEditor(false);
+        showVoxelFallback(mount);toast(message);
+      },
     });
     syncFurnitureScene();
     voxelController.setAtmosphere({condition:state.weather});
@@ -987,6 +1000,9 @@ function mountPanelWorkspaces(){
   if($('#nativeEnvironmentWorkspace'))guarded('原生感知',()=>window.CompanionNativePerceptionPage?.mount({
     environment:$('#nativeEnvironmentWorkspace'),calendar:$('#nativeCalendarWorkspace'),
     model:$('#nativeModelWorkspace'),news:$('#nativeNewsWorkspace')}));
+  guarded('华为运动健康',()=>$('#huaweiHealthWorkspace')
+    ?window.CompanionHuaweiHealthPage?.mount($('#huaweiHealthWorkspace'))
+    :window.CompanionHuaweiHealthPage?.unmount());
   const weatherSourceHost=$('#perceptionWeatherSourceWorkspace');
   guarded('天气数据源',()=>weatherSourceHost
     ?window.CompanionWeatherSourcePage?.mount(weatherSourceHost)
@@ -999,6 +1015,10 @@ function mountPanelWorkspaces(){
   guarded('最近主动识屏',()=>screenObservationHost
     ?window.CompanionScreenObservation?.mount(screenObservationHost)
     :window.CompanionScreenObservation?.unmount());
+  const realityAccessHost=document.querySelector('[data-reality-access]');
+  guarded('现实触及授权',()=>realityAccessHost
+    ?window.CompanionRealityAccess?.mount(realityAccessHost)
+    :window.CompanionRealityAccess?.unmount());
   /* 外观与设置。它没有后端端点，读的写的是 :root 上的 data-* 与 localStorage，
      但"容器在就挂、不在就卸"这条照样要走：不卸的话，主题切换的叠化回调
      会继续操作已经丢弃的节点。 */
@@ -1268,8 +1288,10 @@ function render(){
   window.CompanionPerceptionPage?.unmount();
   window.CompanionPerceptionOverviewPage?.unmount();
   window.CompanionNativePerceptionPage?.unmount();
+  window.CompanionHuaweiHealthPage?.unmount();
   window.CompanionWeatherSourcePage?.unmount();
   window.CompanionScreenAccess?.unmount();
+  window.CompanionRealityAccess?.unmount();
   window.CompanionScreenObservation?.unmount();
   window.CompanionModelsPage?.unmount();
   window.CompanionExpressionLearningPage?.unmount();
@@ -1875,20 +1897,46 @@ const perceptionToc=[
   ['config-models','messages-square','上下文与模型'],
   ['config-news','newspaper','外部资讯与检索'],
   ['config-screen','monitor-dot','设备与授权'],
+  ['config-health','heart-pulse','健康感知'],
   ['config-balance','wallet-cards','余额感知'],
   ['config-recall','message-square-quote','撤回记录'],
   ['config-injection','layers-3','其他注入'],
 ];
-function activatePerceptionTab(destination,{focus=false,scroll=false,modelTab=''}={}){
+function restorePerceptionSingleDetails(){
+  (document.querySelectorAll?.('[data-perception-single-hidden]') || []).forEach(node=>{
+    node.hidden=node.dataset.perceptionSingleHidden==='1';
+    delete node.dataset.perceptionSingleHidden;
+  });
+}
+function closePerceptionSingle(){
+  const workspace=document.getElementById('perceptionConfigWorkspace');
+  const head=document.getElementById('perceptionSingleItemHead');
+  restorePerceptionSingleDetails();
+  if(head)head.hidden=true;
+  if(workspace){workspace.classList?.toggle?.('is-single-item',false);workspace.hidden=true;}
+  window.CompanionRealityAccess?.focus?.('');
+  window.CompanionPerceptionOverviewPage?.preview?.('');
+  const previewHost=document.getElementById('perceptionSingleItemPreview');
+  if(previewHost){previewHost.hidden=true;previewHost.innerHTML='';}
+  const empty=document.getElementById('perceptionConfigEmpty');
+  if(empty)empty.hidden=false;
+  window.CompanionPerceptionOverviewPage?.select?.('',{modelTab:'',itemId:''});
+  const overview=document.getElementById('perceptionOverviewWorkspace');
+  const reduced=state.reduceMotion||window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    ||['low','off'].includes(document.documentElement.dataset.motion);
+  overview?.scrollIntoView?.({behavior:reduced?'instant':'smooth',block:'start'});
+}
+function activatePerceptionTab(destination,{focus=false,scroll=false,modelTab='',single=false,itemId='',itemTitle=''}={}){
   const [id,subpanelId='']=String(destination).split(':',2);
   const tabs=$$('.perception-config-nav [data-perception-tab]');
   const panel=document.getElementById(id);
   const page=panel?.closest?.('[data-perception-page]');
   const target=tabs.find(tab=>tab.dataset.perceptionTab===page?.dataset.perceptionPage);
   if(!panel||!page||target?.hidden)return;
+  restorePerceptionSingleDetails();
   const entering=page.hidden;
   const workspace=document.getElementById('perceptionConfigWorkspace');
-  if(workspace)workspace.hidden=false;
+  if(workspace){workspace.hidden=false;workspace.classList?.toggle?.('is-single-item',single===true);}
   $$('[data-perception-page]').forEach(item=>{item.hidden=item!==page;});
   const subpanel=subpanelId?document.getElementById(subpanelId):null;
   const availableSubpanels=[...panel.querySelectorAll('details.perception-subpanel')].filter(item=>!item.hidden);
@@ -1898,6 +1946,43 @@ function activatePerceptionTab(destination,{focus=false,scroll=false,modelTab=''
   /* 深链接指向某个折叠块时，先把包含它的竖列分组切出来，否则块虽展开却停在隐藏面板里。 */
   const realityPane=selectedSubpanel?.closest?.('[data-reality-panel]');
   if(realityPane)selectRealitySection(realityPane.dataset.realityPanel);
+  if(single===true){
+    /* 功能板条目只显示这一项的详情，不把同一分类的其他折叠块一起摊开。 */
+    const details=[...panel.querySelectorAll('details.perception-subpanel')];
+    for(const detail of details){
+      detail.dataset.perceptionSingleHidden=detail.hidden?'1':'0';
+      detail.hidden=detail!==selectedSubpanel;
+      if(detail===selectedSubpanel)detail.open=true;
+    }
+    /* 页面可能由多个 config-zone 组成（外部与记录就有资讯、余额、撤回三块）。
+       单项模式必须按整个页面收掉同级分区，不能只在当前 panel 内部找。 */
+    const activeZone=selectedSubpanel?.closest?.('.perception-config-zone')||panel;
+    for(const zone of page.querySelectorAll?.('.perception-config-zone') || []){
+      zone.dataset.perceptionSingleHidden=zone.hidden?'1':'0';
+      zone.hidden=zone!==activeZone;
+    }
+    const head=document.getElementById('perceptionSingleItemHead');
+    if(head){
+      head.hidden=false;
+      const title=document.getElementById('perceptionSingleItemTitle');
+      if(title)title.textContent=itemTitle||selectedSubpanel?.querySelector?.('summary strong')?.textContent||'单项配置';
+    }
+    const realityKind=itemId==='device-location'||itemId==='device-phone'?'mobile'
+      :itemId==='device-camera'?'camera':'';
+    window.CompanionRealityAccess?.focus?.(realityKind);
+    const previewHost=document.getElementById('perceptionSingleItemPreview');
+    if(previewHost){
+      const markup=window.CompanionPerceptionOverviewPage?.preview?.(itemId)||'';
+      previewHost.hidden=!markup;
+    }
+  }else{
+    const head=document.getElementById('perceptionSingleItemHead');
+    if(head)head.hidden=true;
+    window.CompanionRealityAccess?.focus?.('');
+    const previewHost=document.getElementById('perceptionSingleItemPreview');
+    if(previewHost){previewHost.hidden=true;previewHost.innerHTML='';}
+    window.CompanionPerceptionOverviewPage?.preview?.('');
+  }
   const anchor=selectedSubpanel||panel;
   tabs.forEach(tab=>{
     const active=tab===target;
@@ -1908,7 +1993,7 @@ function activatePerceptionTab(destination,{focus=false,scroll=false,modelTab=''
   if(id==='config-models'&&selectedSubpanel?.id==='perception-detail-model-route'&&['fn','voice','image'].includes(modelTab)){
     panel.querySelector(`#modelWorkspace [data-model-tab="${modelTab}"]`)?.click();
   }
-  window.CompanionPerceptionOverviewPage?.select?.(`${id}${selectedSubpanel?':'+selectedSubpanel.id:''}`,{modelTab});
+  window.CompanionPerceptionOverviewPage?.select?.(`${id}${selectedSubpanel?':'+selectedSubpanel.id:''}`,{modelTab,itemId});
   if(focus){
     const focusTarget=subpanelId?anchor.querySelector?.('summary')||target:target||anchor;
     focusTarget?.focus?.({preventScroll:true});
@@ -1926,7 +2011,7 @@ function activatePerceptionTab(destination,{focus=false,scroll=false,modelTab=''
 }
 /* 仪表盘与其他页面入口共用配置定位；模型、TTS 与生图也在下方的同一工作区编辑。 */
 /* 地址栏用的公开名是 openPerceptionTab；activate 留着兼容现有调用。 */
-window.CompanionPerceptionTabs={activate:activatePerceptionTab,openPerceptionTab:activatePerceptionTab};
+window.CompanionPerceptionTabs={activate:activatePerceptionTab,openPerceptionTab:activatePerceptionTab,closeSingle:closePerceptionSingle};
 /* 现实触及页的竖列导航：左侧一条分组栏，右侧只显示当前分组。
    分组用的是页面内已有的挂载点，切换只改可见性，不动各自的读写通道。 */
 function selectRealitySection(section){
@@ -1952,13 +2037,22 @@ function renderPerceptionOriginal(){
   if (guide) return `<div class="perception-page">${guide}</div>`;
   return `<div class="perception-page">
     <div id="perceptionOverviewWorkspace" class="perception-overview-workspace">${consoleLoading('正在读取此刻可用的上下文…')}</div>
+    <div id="perceptionConfigEmpty" class="perception-config-empty">
+      ${I('mouse-pointer-click')}<span><strong>点击上方任意条目</strong>，在下方单独展开这一项的配置；不会展开整个分类。</span>
+    </div>
     <div id="perceptionConfigWorkspace" class="perception-config-workspace" hidden>
       <nav class="perception-config-nav" role="tablist" aria-label="感知设置">
         <button id="perception-tab-environment" type="button" role="tab" aria-selected="false" aria-controls="perception-page-environment" data-perception-tab="config-environment">${I('calendar-clock')}时空与环境</button>
         <button id="perception-tab-models" type="button" role="tab" aria-selected="false" aria-controls="perception-page-models" data-perception-tab="config-models">${I('cpu')}模型能力</button>
         <button id="perception-tab-reality" type="button" role="tab" aria-selected="false" aria-controls="perception-page-reality" data-perception-tab="config-screen">${I('scan-eye')}现实触及</button>
+        <button id="perception-tab-health" type="button" role="tab" aria-selected="false" aria-controls="perception-page-health" data-perception-tab="config-health">${I('heart-pulse')}健康感知</button>
         <button id="perception-tab-external" type="button" role="tab" aria-selected="false" aria-controls="perception-page-external" data-perception-tab="config-news">${I('layers-3')}外部与记录</button>
       </nav>
+      <div id="perceptionSingleItemHead" class="perception-single-item-head" hidden>
+        <button type="button" class="perception-single-back" onclick="window.CompanionPerceptionTabs?.closeSingle?.()">${I('arrow-left')}返回功能板</button>
+        <div><small>单项配置</small><strong id="perceptionSingleItemTitle"></strong></div>
+      </div>
+      <div id="perceptionSingleItemPreview" class="perception-single-preview" hidden></div>
     <div class="perception-config-panels">
       <section class="perception-config-page" id="perception-page-environment" role="tabpanel" aria-labelledby="perception-tab-environment" data-perception-page="config-environment" hidden>
         <header class="perception-config-page-heading"><span>01</span><h2>时空与环境</h2></header>
@@ -1989,7 +2083,7 @@ function renderPerceptionOriginal(){
         <div class="perception-config-grid perception-config-grid-models">
           <section class="perception-config-zone" id="config-models" tabindex="0">
             <details class="perception-subpanel" id="perception-detail-context" open>
-              <summary><span><strong>来源标识与表达偏好</strong></span>${I('chevron-down')}</summary>
+              <summary><span><strong>对话感知与表达偏好</strong></span>${I('chevron-down')}</summary>
               <div class="perception-subpanel-body"><div id="nativeModelWorkspace" class="perception-scope">${consoleLoading('正在读取对话感知设置…')}</div>
                 <button type="button" class="button small" data-go="manage" data-manage="understanding" data-understanding-tab-target="image">图片理解设置 ${I('arrow-up-right')}</button>
               </div>
@@ -2019,10 +2113,15 @@ function renderPerceptionOriginal(){
           <div class="reality-config-panes">
             <section class="reality-config-pane" id="reality-panel-access" role="tabpanel" aria-labelledby="reality-tab-access" data-reality-panel="access">
               <details class="perception-subpanel" id="perception-detail-device-access" open>
-                <summary><span><strong>对话能力授权</strong></span>${I('chevron-down')}</summary>
+                <summary><span><strong>屏幕读取权限</strong></span>${I('chevron-down')}</summary>
                 <div class="perception-subpanel-body">
                   <div data-screen-access class="reality-consent-workspace"></div>
                   <div data-screen-observation></div>
+                </div>
+              </details>
+              <details class="perception-subpanel" id="perception-detail-reality-access" open>
+                <summary><span><strong>手机读取与摄像头授权</strong></span>${I('chevron-down')}</summary>
+                <div class="perception-subpanel-body">
                   <div data-reality-access class="reality-consent-workspace"></div>
                 </div>
               </details>
@@ -2051,8 +2150,19 @@ function renderPerceptionOriginal(){
           </div>
         </div>
       </section>
+      <section class="perception-config-page" id="perception-page-health" role="tabpanel" aria-labelledby="perception-tab-health" data-perception-page="config-health" hidden>
+        <header class="perception-config-page-heading"><span>04</span><h2>健康感知</h2></header>
+        <div class="perception-config-grid perception-config-grid-models">
+          <section class="perception-config-zone perception-config-zone-wide" id="config-health" tabindex="0">
+            <details class="perception-subpanel" id="perception-detail-health" open>
+              <summary><span><strong>运动健康与健康摘要</strong></span>${I('chevron-down')}</summary>
+              <div class="perception-subpanel-body"><div id="huaweiHealthWorkspace" class="perception-scope">${consoleLoading('正在读取运动健康绑定…')}</div></div>
+            </details>
+          </section>
+        </div>
+      </section>
       <section class="perception-config-page" id="perception-page-external" role="tabpanel" aria-labelledby="perception-tab-external" data-perception-page="config-news" hidden>
-        <header class="perception-config-page-heading"><span>04</span><h2>外部与记录</h2></header>
+        <header class="perception-config-page-heading"><span>05</span><h2>外部与记录</h2></header>
         <div class="perception-config-grid perception-config-grid-external">
           <section class="perception-config-zone" id="config-news" tabindex="0">
             <details class="perception-subpanel" id="perception-detail-external" open>
@@ -3340,7 +3450,7 @@ function renderOutputOriginal(){
                 <figcaption class="output-image-status" role="status">${I('image-off')}<span>正在读取最近产出…</span></figcaption>
                 <span class="output-image-tag">角色视觉</span>
               </figure>
-              <div class="output-preview-caption output-preview-copy"><h2>图像生成</h2><button type="button" class="output-preview-action" data-output-open="visual">生图设置 ${I('arrow-up-right')}</button></div>
+              <div class="output-preview-caption output-preview-copy"><h2>图像生成</h2><div class="output-preview-actions"><button type="button" class="output-preview-action" data-output-open="visual">生图设置 ${I('arrow-up-right')}</button><button type="button" class="output-preview-action" data-output-open="gallery">产出图库 ${I('arrow-up-right')}</button></div></div>
             </section>
             <section class="output-preview-view output-preview-view--story" id="output-preview-story" role="tabpanel" aria-labelledby="output-mode-story" tabindex="0" data-output-view hidden>
               <article class="output-manuscript">
@@ -3364,9 +3474,10 @@ function renderOutputOriginal(){
       <section class="output-config" id="output-config" aria-label="产出配置">
         <div class="output-config-tabs" role="tablist" aria-label="产出配置分区">
           ${configTab('visual','生图与审核','image',0)}
-          ${configTab('materials','参考素材','images',1)}
-          ${configTab('creation','创作与作品','notebook-pen',2)}
-          ${configTab('capabilities','生图能力与提示词','sparkles',3,' output-config-tab--capabilities')}
+          ${configTab('gallery','产出图库','images',1)}
+          ${configTab('materials','参考素材','images',2)}
+          ${configTab('creation','创作与作品','notebook-pen',3)}
+          ${configTab('capabilities','生图能力与提示词','sparkles',4,' output-config-tab--capabilities')}
         </div>
         <div class="output-config-panels">
           <section class="output-config-panel" id="output-panel-visual" role="tabpanel" aria-labelledby="output-tab-visual" tabindex="0" data-output-panel>
@@ -3378,6 +3489,13 @@ function renderOutputOriginal(){
             </section>
             <div class="output-workbench-block" id="imageControlWorkspace" data-output-config aria-label="生图额度与审核配置">${consoleLoading('正在读取生图额度与审核设置…')}</div>
             <div class="output-provider-strip"><header><h2>生成能力</h2><button type="button" class="output-inline-link" data-output-open="capabilities">模型路线 ${I('arrow-up-right')}</button></header>${outputProviderLine('image','图像生成')}</div>
+          </section>
+          <section class="output-config-panel" id="output-panel-gallery" role="tabpanel" aria-labelledby="output-tab-gallery" tabindex="0" data-output-panel hidden>
+            <section class="output-gallery-panel" aria-labelledby="output-gallery-heading">
+              <header class="output-panel-heading output-gallery-heading"><div><h2 id="output-gallery-heading">产出图库</h2><p>当前角色已经生成并保存的图片。可多选导出；删除只从图库移除，不删除原始来源记录。</p></div><button type="button" class="button small output-gallery-refresh" data-output-native-action="album-refresh">刷新图库</button></header>
+              <div id="outputAlbumWorkspace" class="output-album-workspace" role="status" aria-live="polite"></div>
+            </section>
+            <div id="outputAlbumLightbox" class="output-album-lightbox" role="dialog" aria-modal="true" aria-label="产出图片预览" hidden></div>
           </section>
           <section class="output-config-panel" id="output-panel-materials" role="tabpanel" aria-labelledby="output-tab-materials" tabindex="0" data-output-panel hidden>
             <div id="materialControlWorkspace" class="output-workbench-block output-material-settings" data-output-config aria-label="参考图与衣柜配置">${consoleLoading('正在读取参考图与衣柜设置…')}</div>
@@ -3695,7 +3813,8 @@ function renderMobileConnection(){
           <ol>
             <li>在「网关与访问」中填写监听地址与端口；同一局域网填本机内网地址。</li>
             <li>在「配对与身份」中设置配对令牌，并把「绑定的 AstrBot 用户 ID」填成要接收消息的用户。</li>
-            <li>手机端填同一组地址与令牌完成配对；位置、屏幕共享与身体数据再按各自分区开启。</li>
+            <li>手机端填同一组地址与令牌完成配对；位置与屏幕共享再按各自分区开启。</li>
+            <li>健康摘要统一在「感知 → 模型能力 → 对话感知与表达偏好」的「健康感知」开关管理；打开时会一并准备手机健康接收与当前私聊授权。</li>
           </ol>
           <p>令牌只在保存时写入，页面不回显；换令牌后手机端需要重新配对。</p>
         </div>

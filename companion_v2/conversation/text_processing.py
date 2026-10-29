@@ -507,6 +507,35 @@ class InternalExpressionProtocolFilter:
         return pending[match.start():] if match is not None else ""
 
 
+_CLEANUP_SCOPE_ALIASES = {
+    "all": "all", "entire": "all", "整段": "all", "全部": "all", "完整": "all",
+    "leading": "leading", "句首": "leading", "开头": "leading", "段首": "leading",
+    "middle": "middle", "句中": "middle", "中间": "middle", "段中": "middle",
+    "trailing": "trailing", "句尾": "trailing", "结尾": "trailing", "段尾": "trailing",
+}
+_CLEANUP_SCOPE_ORDER = ("leading", "middle", "trailing")
+_CLEANUP_SCOPE_SPLIT = re.compile(r"[、,，;；/\s]+")
+
+
+def _cleanup_scopes(value):
+    """Parse the legacy enum or a user-ordered, multi-select scope string."""
+    if type(value) is not str:
+        raise ValueError("presentation cleanup mode or scope is invalid")
+    tokens = [token for token in _CLEANUP_SCOPE_SPLIT.split(value.strip()) if token]
+    selected = []
+    for token in tokens:
+        canonical = _CLEANUP_SCOPE_ALIASES.get(token.casefold(), _CLEANUP_SCOPE_ALIASES.get(token))
+        if canonical is None:
+            raise ValueError("presentation cleanup mode or scope is invalid")
+        if canonical == "all":
+            return frozenset(_CLEANUP_SCOPE_ORDER)
+        if canonical not in selected:
+            selected.append(canonical)
+    if not selected:
+        raise ValueError("presentation cleanup mode or scope is invalid")
+    return frozenset(selected)
+
+
 @dataclass(frozen=True)
 class ReplyTextPolicy:
     # New windows inherit the presentation cleanup rules.  A stored False
@@ -546,8 +575,7 @@ class ReplyTextPolicy:
             raise ValueError(str(error)) from error
         if self.content_cleanup_mode not in ("words", "regex"):
             raise ValueError("presentation cleanup mode or scope is invalid")
-        if self.content_cleanup_scope not in ("all", "leading", "middle", "trailing"):
-            raise ValueError("presentation cleanup mode or scope is invalid")
+        _cleanup_scopes(self.content_cleanup_scope)
         if type(self.content_cleanup_rule) is not str or len(self.content_cleanup_rule) > 512:
             raise ValueError("presentation cleanup pattern must be bounded text")
         try:
@@ -557,6 +585,10 @@ class ReplyTextPolicy:
         self.words()
         self.replacements()
         self.forbidden_words()
+
+    @property
+    def cleanup_scopes(self):
+        return _cleanup_scopes(self.content_cleanup_scope)
 
     def forbidden_words(self):
         result = tuple(_decode(word) for word in _list(self.recall_forbidden_words))
@@ -675,6 +707,7 @@ class ReplyTextPolicy:
         if len(original) > MAX_TEXT:
             raise ValueError("presentation needs bounded text")
         ranges = literal_ranges(original, statements)
+        scopes = self.cleanup_scopes
         deadline = monotonic() + REGEX_SECONDS
         result, cursor = [], 0
         for part in parts:
@@ -691,41 +724,47 @@ class ReplyTextPolicy:
                 offset += len(chunk)
                 if protected:
                     continue
-                if self.content_cleanup_scope == "leading" and (index != first or not left_edge):
-                    continue
-                if self.content_cleanup_scope == "trailing" and (index != last or not right_edge):
-                    continue
-                chunks[index] = (self._clean(chunk, deadline, left_edge=left_edge,
-                                             right_edge=right_edge), False)
+                chunks[index] = (self._clean_scoped(
+                    chunk, deadline, scopes,
+                    left_edge=left_edge, right_edge=right_edge,
+                    allow_leading=index == first and left_edge,
+                    allow_trailing=index == last and right_edge,
+                ), False)
             result.append("".join(chunk for chunk, _ in chunks))
             cursor = end
         return tuple(result)
 
-    def _clean(self, text, deadline, *, left_edge=True, right_edge=True):
-        scope = self.content_cleanup_scope
-        if self.content_cleanup_mode == "words":
-            words = self.words()
-            if scope == "all":
-                for word in words:
+    def _clean_scoped(self, text, deadline, scopes, *, left_edge=True, right_edge=True,
+                      allow_leading=True, allow_trailing=True):
+        if "all" in scopes:
+            if self.content_cleanup_mode == "words":
+                for word in self.words():
                     text = text.replace(word, "")
                 return text
-            if scope == "leading":
+            pattern = _pattern(self.content_cleanup_rule)
+            try:
+                if monotonic() >= deadline:
+                    raise TimeoutError
+                return pattern.sub("", text, timeout=deadline - monotonic())
+            except TimeoutError as error:
+                raise ValueError("presentation cleanup pattern exceeded its execution budget") from error
+        if self.content_cleanup_mode == "words":
+            words = sorted(set(self.words()), key=len, reverse=True)
+            if "leading" in scopes and allow_leading:
                 text = text.lstrip()
-                ordered = sorted(set(words), key=len, reverse=True)
                 while text:
-                    word = next((word for word in ordered if text.startswith(word)), None)
+                    word = next((word for word in words if text.startswith(word)), None)
                     if word is None:
                         break
                     text = text[len(word):].lstrip()
-                return text
-            if scope == "trailing":
-                words = sorted(set(words), key=len, reverse=True)
+            if "trailing" in scopes and allow_trailing:
                 text = text.rstrip()
                 while text:
                     word = next((word for word in words if text.endswith(word)), None)
                     if word is None:
                         break
                     text = text[:-len(word)].rstrip()
+            if "middle" not in scopes:
                 return text
             pattern = _word_pattern(tuple(words))
             if pattern is None:
@@ -740,39 +779,35 @@ class ReplyTextPolicy:
             return "".join(result)
         pattern = _pattern(self.content_cleanup_rule)
         try:
-            if monotonic() >= deadline:
-                raise TimeoutError
-            if scope == "all":
-                return pattern.sub("", text, timeout=deadline - monotonic())
-            if scope == "leading":
+            if "leading" in scopes and allow_leading:
                 text = text.lstrip()
                 while text:
                     match = pattern.match(text, timeout=max(0.000001, deadline - monotonic()))
                     if match is None or match.end() == 0:
                         break
                     text = text[match.end():].lstrip()
+            if "trailing" in scopes and allow_trailing:
+                text = text.rstrip()
+                while text:
+                    match = None
+                    for candidate in pattern.finditer(text, timeout=max(0.000001, deadline - monotonic())):
+                        if candidate.end() == len(text) and candidate.start() < candidate.end():
+                            match = candidate
+                    if match is None:
+                        break
+                    text = text[:match.start()].rstrip()
+                    if monotonic() >= deadline:
+                        raise TimeoutError
+            if "middle" not in scopes:
                 return text
-            if scope == "middle":
-                result, cursor = [], 0
-                for match in pattern.finditer(text, timeout=max(0.000001, deadline - monotonic())):
-                    if (left_edge and match.start() == 0) or (right_edge and match.end() == len(text)):
-                        continue
-                    result.append(text[cursor:match.start()])
-                    cursor = match.end()
-                result.append(text[cursor:])
-                return "".join(result)
-            text = text.rstrip()
-            while text:
-                match = None
-                for candidate in pattern.finditer(text, timeout=max(0.000001, deadline - monotonic())):
-                    if candidate.end() == len(text) and candidate.start() < candidate.end():
-                        match = candidate
-                if match is None:
-                    break
-                text = text[:match.start()].rstrip()
-                if monotonic() >= deadline:
-                    raise TimeoutError
-            return text
+            result, cursor = [], 0
+            for match in pattern.finditer(text, timeout=max(0.000001, deadline - monotonic())):
+                if (left_edge and match.start() == 0) or (right_edge and match.end() == len(text)):
+                    continue
+                result.append(text[cursor:match.start()])
+                cursor = match.end()
+            result.append(text[cursor:])
+            return "".join(result)
         except TimeoutError as error:
             raise ValueError("presentation cleanup pattern exceeded its execution budget") from error
 

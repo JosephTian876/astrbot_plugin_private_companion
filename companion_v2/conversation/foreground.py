@@ -305,10 +305,20 @@ class PromptRequest:
     streaming: bool | None = None
     perception_options: tuple[bool, bool, bool] = (True, True, True)
     streaming_mode: str = "buffered"
+    # The captured host persona survives a task-role reference substitution so
+    # the native role guard still compares the host window, not the self page.
+    role_guard_instruction: str | None = None
+
+    @property
+    def host_role_instruction(self) -> str:
+        return self.role_guard_instruction if self.role_guard_instruction is not None else self.role_instruction
 
     def __post_init__(self) -> None:
         if self.streaming_mode not in ("buffered", "incremental"):
             raise ReferenceValidationError("stream delivery requires a declared mode")
+        if self.role_guard_instruction is not None and (
+                type(self.role_guard_instruction) is not str or len(self.role_guard_instruction) > 65536):
+            raise ReferenceValidationError("host role guard instruction must be bounded text")
         if (type(self.perception_options) is not tuple or len(self.perception_options) != 3
                 or any(type(value) is not bool for value in self.perception_options)):
             raise ReferenceValidationError("perception options must be captured booleans")

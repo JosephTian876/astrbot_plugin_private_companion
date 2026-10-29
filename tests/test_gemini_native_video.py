@@ -21,7 +21,9 @@ class NativeVideoTransportTests(VideoFixture, unittest.IsolatedAsyncioTestCase):
         host = await self.quiet_host()
         batch = host.receive(await self.capture(self.video_event())).unwrap()
         request = self.request(host.application, batch)
-        request = replace(request, native_video_input=True)
+        request = replace(request, native_video_input=True,
+                          role_instruction="銆愯鑹茬ǔ瀹氭。妗堛€慭n- 濮撳悕锛氭矆鐭ュ",
+                          role_guard_instruction="AstrBot 浜烘牸鍘熸枃")
         tool = ToolSpec("memo.list", "Read memos", '{"type":"object","properties":{},"additionalProperties":false}')
         envelope = ModelEnvelope(request, "fixture", 128, "fixture", tools=(tool,),
                                  before_dispatch=lambda: None)
@@ -72,7 +74,8 @@ class NativeVideoTransportTests(VideoFixture, unittest.IsolatedAsyncioTestCase):
 
         native = FakeGemini()
         context = NS(get_provider_by_id=lambda provider_id: native if provider_id == "gemini-native" else None)
-        bridge = NS(verify_role=lambda *args: _ok())
+        verified = []
+        bridge = NS(verify_role=lambda *args: verified.append(args) or _ok())
         native_types = NS(video_provider_type=FakeGemini, version="4.28.1",
             function_tool=lambda **kwargs: NS(**kwargs),
             tool_set=lambda **kwargs: NS(**kwargs))
@@ -87,6 +90,9 @@ class NativeVideoTransportTests(VideoFixture, unittest.IsolatedAsyncioTestCase):
             before_dispatch=lambda: None)
         result = await adapter.generate(continuation)
         self.assertEqual(result.status, "generated")
+        self.assertTrue(verified)
+        self.assertTrue(all(call[2] == "AstrBot 浜烘牸鍘熸枃" for call in verified),
+                        "Gemini must verify the captured host persona, not the task role")
         self.assertEqual(result.draft.text, "视频中有连续变化的画面。")
         sent_part = native.calls[0]["contents"][0].parts[-1]
         self.assertEqual(sent_part.inline_data.mime_type, "video/mp4")
@@ -146,15 +152,22 @@ class NativeGeminiConversationTests(ModelFixture, unittest.IsolatedAsyncioTestCa
         native_types = NS(video_provider_type=FakeGemini, version="4.27.2",
                           function_tool=lambda **kwargs: NS(**kwargs),
                           tool_set=lambda **kwargs: NS(**kwargs))
-        adapter = GeminiNativeVideoProvider(context, NS(verify_role=lambda *args: _ok()),
+        verified = []
+        adapter = GeminiNativeVideoProvider(context,
+            NS(verify_role=lambda *args: verified.append(args) or _ok()),
             native_types, native, settings=TextProviderSettings("gemini-native", UsageTariff(1, 1, 1),
                 maximum_output_tokens=128, maximum_input_estimate=131072))
-        request = self.request()
+        request = replace(self.request(),
+                          role_instruction="銆愯鑹茬ǔ瀹氭。妗堛€慭n- 濮撳悕锛氭矆鐭ュ",
+                          role_guard_instruction="AstrBot 浜烘牸鍘熸枃")
         envelope = ModelEnvelope(request, "fixture", 128, "fixture", tools=(tool,),
                                  before_dispatch=lambda: None)
 
         first = await adapter.generate(envelope)
         self.assertEqual(first.status, "generated")
+        self.assertTrue(verified)
+        self.assertTrue(all(call[2] == "AstrBot 浜烘牸鍘熸枃" for call in verified),
+                        "Gemini must verify the captured host persona, not the task role")
         self.assertEqual(first.tool_calls[0].action, "memo.list")
         self.assertTrue(all(part.inline_data is None
                             for part in native.calls[0]["contents"][0].parts))

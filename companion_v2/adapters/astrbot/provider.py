@@ -324,7 +324,7 @@ class AstrBotTextProvider:
                          _developer_content(wire.tools))
             self._estimate(envelope, wire)
             await self.bridge.verify_role(envelope.original.event.scope, envelope.original.role_binding,
-                                          envelope.original.role_instruction)
+                                          envelope.original.host_role_instruction)
             self._current()
             native = copy(self.native)
             native.provider_config = deepcopy(self.config)
@@ -348,7 +348,7 @@ class AstrBotTextProvider:
                         if draft is not None and (envelope.reply_prefix_ready is None or envelope.reply_prefix_ready(draft)):
                             self._current()
                             await self.bridge.verify_role(envelope.original.event.scope, envelope.original.role_binding,
-                                                          envelope.original.role_instruction)
+                                                          envelope.original.host_role_instruction)
                             await envelope.on_reply_prefix(draft)
                 transcript = StreamTranscript(native.client, on_content)
             tools = self.tool_set_type(tools=[self.function_tool_type(**t, handler=None) for t in wire.tools]) if wire.tools else None
@@ -451,7 +451,7 @@ class AstrBotTextProvider:
             self._current()
             failure = ModelFailure.ROLE_RECHECK
             await self.bridge.verify_role(envelope.original.event.scope, envelope.original.role_binding,
-                                          envelope.original.role_instruction)
+                                          envelope.original.host_role_instruction)
             failure = ModelFailure.WIRE_DECODE
             if wire.output_format == "memory_reflection":
                 logger.debug("[CompanionV2][开发者追踪] 模型正文处理 provider=%s stage=captured body=%s",
@@ -478,7 +478,7 @@ class AstrBotTextProvider:
                 try:
                     self._current()
                     await self.bridge.verify_role(envelope.original.event.scope, envelope.original.role_binding,
-                                                  envelope.original.role_instruction)
+                                                  envelope.original.host_role_instruction)
                 except Exception:
                     failure = ModelFailure.ROLE_RECHECK
                 else:
@@ -489,7 +489,7 @@ class AstrBotTextProvider:
                 try:
                     self._current()
                     await self.bridge.verify_role(envelope.original.event.scope, envelope.original.role_binding,
-                                                  envelope.original.role_instruction)
+                                                  envelope.original.host_role_instruction)
                 except Exception:
                     failure = ModelFailure.ROLE_RECHECK
                 else:

@@ -49,6 +49,9 @@ routes = {(path.removeprefix("/astrbot_plugin_private_companion/image-materials"
 assert ("/references/upload", ("POST",)) in routes
 assert ("/references/update", ("POST",)) in routes
 assert ("/references/order", ("POST",)) in routes
+assert ("/album/export", ("POST",)) in routes
+assert ("/album/hide", ("POST",)) in routes
+assert ("/album/open-folder", ("POST",)) in routes
 print("upload route contract passed")
 '''
         result = subprocess.run([sys.executable, "-c", source], cwd=self.repository_root,

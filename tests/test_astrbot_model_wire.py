@@ -18,6 +18,20 @@ REPORTED_USAGE = Amount(40, 90, input_tokens=30, cached_input_tokens=10, output_
 
 
 class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_task_profile_prompt_preserves_the_original_host_persona_guard(self):
+        envelope = await self.envelope()
+        request = replace(envelope.original, role_instruction="角色稳定档案：温和、细心。",
+                          role_guard_instruction=envelope.original.role_instruction)
+        response = await self.native_model.generate(replace(envelope, original=request))
+        self.assertEqual(response.status, "generated")
+        calls = self.native.provider.client.state.calls
+        self.assertTrue(calls[-1][0]["messages"][0]["content"].startswith(request.role_instruction))
+        before = len(calls)
+        changed = replace(request, role_guard_instruction="另一个未授权的人格")
+        refused = await self.native_model.generate(replace(envelope, original=changed))
+        self.assertNotEqual(refused.status, "generated")
+        self.assertEqual(len(calls), before)
+
     async def test_probe_does_not_pass_stream_to_native_query(self):
         await self.native_model.probe()
         payload, _ = self.native.provider.client.state.calls[-1]

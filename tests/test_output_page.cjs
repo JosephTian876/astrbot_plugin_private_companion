@@ -20,6 +20,13 @@ const selectors = [
 function fixture() {
   const nodes = new Map(selectors.map(selector => [selector, [{textContent: "初始值", hidden: false,
     classList: {toggle() {}}}]]));
+  const single = new Map([
+    ["#outputAlbumWorkspace", {innerHTML: "", hidden: false}],
+    ["#outputAlbumLightbox", {innerHTML: "", hidden: true}],
+    ["[data-output-preview-image]", {hidden: true, src: "", alt: "", removeAttribute() {}}],
+    [".output-image-frame", {dataset: {}}],
+    [".output-image-status span", {textContent: ""}],
+  ]);
   const requests = [];
   let observabilityFailure = false;
   let reconnectFailureCode = "";
@@ -44,29 +51,50 @@ function fixture() {
           return {reconnected: true, host_registered: true};
         }
         if (endpoint === "model/image/review/providers") return {providers: []};
-        if (endpoint === "image-materials/album") return {items: []};
+        if (endpoint === "image-materials/album") return {items: [{image_id: "img-1",
+          thumbnail: "data:image/png;base64,AAA", width: 512, height: 512,
+          created_at: "2026-10-12T04:05:00Z", action: "image.generate"}], next_cursor: null};
+        if (endpoint === "image-materials/album/export") return {filename: "album.zip",
+          data_url: "data:application/zip;base64,AAA", count: 1};
+        if (endpoint === "image-materials/album/hide") return {hidden: 1, hidden_total: 1};
+        if (endpoint === "image-materials/album/open-folder") return {path: "C:\\data", opened: true};
         throw new Error(`unexpected request: ${method} ${endpoint}`);
       },
     },
     dispatchEvent() {},
+    document: {createElement: () => ({click() {}, remove() {}}), body: {appendChild() {}}},
   };
   const root = {
     isConnected: true,
     addEventListener(type, listener) {listeners.set(type, listener);},
     removeEventListener() {},
     contains() {return true;},
-    querySelector() {return null;},
+    querySelector(selector) {return single.get(selector) || null;},
     querySelectorAll(selector) {return nodes.get(selector) || [];},
   };
   const context = {window, console, AbortController, Event, setTimeout, clearTimeout, Promise, Math, Date, JSON,
     Object, String, Array, Map, Set, Error};
   vm.runInNewContext(source, context, {filename: "output-page.js"});
-  return {page: window.CompanionOutputPage, nodes, requests, root,
+  return {page: window.CompanionOutputPage, nodes, single, requests, root,
     failObservability(value) {observabilityFailure = value;},
     failReconnect(code) {reconnectFailureCode = code;},
     clickReconnect() {
       const target = {disabled: false, dataset: {outputNativeAction: "reconnect"}};
       listeners.get("click")?.({target: {closest: () => target}});
+    },
+    clickAlbum(index) {
+      const target = {disabled: false, dataset: {outputNativeAction: "album-open",
+        outputImageIndex: String(index)}};
+      listeners.get("click")?.({target: {closest: () => target}});
+    },
+    clickAction(action, dataset = {}) {
+      const target = {disabled: false, dataset: {outputNativeAction: action, ...dataset}};
+      listeners.get("click")?.({target: {closest: () => target}});
+    },
+    toggleAlbum(imageId, checked = true) {
+      const target = {matches: selector => selector === "[data-output-album-select]",
+        dataset: {outputAlbumSelect: imageId}, checked};
+      listeners.get("change")?.({target});
     }};
 }
 
@@ -99,5 +127,54 @@ test("Reconnect failures show a specific V2 session recovery hint", async () => 
 
   assert.equal(state.nodes.get("[data-output-native-notice]")[0].textContent,
     "V2 当前会话仍在停止，请稍等片刻后再重连。");
+  state.page.unmount();
+});
+
+test("output page renders the generated image gallery and opens a preview", async () => {
+  const state = fixture();
+  state.page.mount(state.root);
+  await new Promise(resolve => setImmediate(resolve));
+
+  const gallery = state.single.get("#outputAlbumWorkspace");
+  assert.match(gallery.innerHTML, /output-album-card/);
+  assert.match(gallery.innerHTML, /data-output-native-action="album-open"/);
+  assert.match(gallery.innerHTML, /data:image\/png;base64,AAA/);
+
+  state.clickAlbum(0);
+  const lightbox = state.single.get("#outputAlbumLightbox");
+  assert.equal(lightbox.hidden, false);
+  assert.match(lightbox.innerHTML, /output-album-lightbox-card/);
+  assert.match(lightbox.innerHTML, /1 \/ 1/);
+  state.page.unmount();
+});
+
+test("gallery supports selection, export, delete and open-folder actions", async () => {
+  const state = fixture();
+  state.page.mount(state.root);
+  await new Promise(resolve => setImmediate(resolve));
+
+  const gallery = state.single.get("#outputAlbumWorkspace");
+  assert.match(gallery.innerHTML, /导出选中/);
+  assert.match(gallery.innerHTML, /删除选中/);
+  assert.match(gallery.innerHTML, /打开数据目录/);
+
+  state.toggleAlbum("img-1", true);
+  assert.match(gallery.innerHTML, /已选 <b>1<\/b> 张/);
+
+  state.clickAction("album-export");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(state.requests.some(request => request.method === "POST" &&
+    request.endpoint === "image-materials/album/export"));
+
+  state.clickAction("album-hide");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(state.requests.some(request => request.method === "POST" &&
+    request.endpoint === "image-materials/album/hide"));
+  assert.doesNotMatch(gallery.innerHTML, /output-album-card/);
+
+  state.clickAction("album-open-folder");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(state.requests.some(request => request.method === "POST" &&
+    request.endpoint === "image-materials/album/open-folder"));
   state.page.unmount();
 });

@@ -103,7 +103,7 @@ class OutboundDelivery:
         self.operations = OperationRepository(runtime)
         self.registrations = tuple(TaskRegistration(TaskDefinition(o.kind, "delivery", o.action,
             Lane.BACKGROUND, side_effect=SideEffect.MESSAGE_DELIVERY, binding=sender.binding,
-            timeout_seconds=30, max_attempts=1, concurrency=concurrency), self.validate) for o in owners)
+            timeout_seconds=60, max_attempts=1, concurrency=concurrency), self.validate) for o in owners)
 
     def attach(self, tasks):
         if self.tasks is not None or tasks.runtime is not self.runtime:

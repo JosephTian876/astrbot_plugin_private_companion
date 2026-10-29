@@ -71,6 +71,23 @@ class ReplyTextProcessingTests(unittest.TestCase):
         self.assertEqual(presentation.clean_parts(("甲，乙。丙。， \n", "丁，戊，")),
                          ("甲，乙。丙", "丁，戊"))
 
+    def test_cleanup_scope_accepts_multiple_positions_and_chinese_aliases(self):
+        presentation = ReplyTextPolicy(content_cleanup_enabled=True,
+                                       content_cleanup_scope="句首、句尾",
+                                       content_cleanup_words=json.dumps(["。"], ensure_ascii=False))
+        self.assertEqual(presentation.cleanup_scopes, frozenset({"leading", "trailing"}))
+        self.assertEqual(presentation.clean_parts(("。开头。中间。结尾。",)),
+                         ("开头。中间。结尾",))
+        both_edges_and_middle = ReplyTextPolicy(
+            content_cleanup_enabled=True, content_cleanup_scope="leading, middle, trailing",
+            content_cleanup_words=json.dumps(["。", "，"], ensure_ascii=False))
+        self.assertEqual(both_edges_and_middle.cleanup_scopes,
+                         frozenset({"leading", "middle", "trailing"}))
+        self.assertEqual(both_edges_and_middle.clean_parts(("。开头，中间。结尾。",)),
+                         ("开头中间结尾",))
+        with self.assertRaises(ValueError):
+            ReplyTextPolicy(content_cleanup_enabled=True, content_cleanup_scope="句首、未知")
+
     def test_internal_reaction_expression_metadata_is_removed_before_segmentation(self):
         metadata = ('<pc_reaction_expression>{"purpose":"轻吐槽","emotion":"无奈",'
                     '"intensity":2}</pc_reaction_expression>')

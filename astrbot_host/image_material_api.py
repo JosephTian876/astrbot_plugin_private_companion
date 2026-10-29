@@ -32,6 +32,9 @@ class ImageMaterialsWebAPI:
         return [
             (PREFIX, self.inventory, ["GET"], "Read one role's native image materials"),
             (PREFIX + "/album", self.album, ["GET"], "Read the role-scoped generated image album"),
+            (PREFIX + "/album/export", self.export_album, ["POST"], "Export selected generated images as a ZIP archive"),
+            (PREFIX + "/album/hide", self.hide_album, ["POST"], "Remove selected generated images from the album"),
+            (PREFIX + "/album/open-folder", self.open_album_folder, ["POST"], "Open the V2 data folder"),
             (PREFIX + "/references/upload", self.upload_reference, ["POST"], "Upload one role-owned reference image"),
             (PREFIX + "/references", self.register_reference, ["POST"], "Register one explicit album image reference"),
             (PREFIX + "/references/update", self.update_reference, ["POST"], "Update one role image reference"),
@@ -100,6 +103,12 @@ class ImageMaterialsWebAPI:
                     value = manager.inventory(operator, context, at=at)
                 elif action == "album":
                     value = manager.album(operator, context, at=at, cursor=query.get("cursor"))
+                elif action == "export_album":
+                    value = manager.export_album(operator, context, at=at, image_ids=body["image_ids"])
+                elif action == "hide_album":
+                    value = manager.hide_album_images(operator, context, at=at, image_ids=body["image_ids"])
+                elif action == "open_album_folder":
+                    value = manager.open_album_folder(operator, context, at=at)
                 elif action == "register_reference":
                     value = manager.register_from_album(operator, context, at=at, **body)
                 elif action == "upload_reference":
@@ -188,6 +197,15 @@ class ImageMaterialsWebAPI:
         except (ValueError, TypeError, UnicodeError, RecursionError):
             return outcome_response(Outcome.failed("image_material_request_invalid", "invalid UTF-8 image material request"))
         return await self._run(action, body=body)
+
+    async def export_album(self):
+        return await self._post("export_album", {"image_ids"})
+
+    async def hide_album(self):
+        return await self._post("hide_album", {"image_ids"})
+
+    async def open_album_folder(self):
+        return await self._post("open_album_folder", set())
 
     async def register_reference(self):
         return await self._post("register_reference", {"image_id", "label", "roles", "operation_key"})

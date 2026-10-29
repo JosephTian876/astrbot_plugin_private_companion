@@ -243,7 +243,7 @@ class CoreReplyPipelineTests(unittest.IsolatedAsyncioTestCase):
         plugin.staging.receive_claimed.assert_not_awaited()
 
     async def test_v2_japanese_voice_survives_native_regex_and_early_stream_selection(self):
-        policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja", foreign_text_mode="translation")
+        policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja", foreign_text_mode="translation", segment_mode="each")
         plugin, event, agent = await self.run_pipeline(streaming=True, segmented=True,
             companion_segmenting=True, voice_policy=policy,
             response_text="<pc_tts>こんにちは。</pc_tts>你好呀！\n\n<pc_tts>もう一度。</pc_tts>再来一次吧！")
@@ -258,7 +258,7 @@ class CoreReplyPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<pc_tts>", agent.requests[0].system_prompt)
 
     async def test_v2_tagged_original_speech_is_not_lost_when_native_regex_splits_the_span(self):
-        policy = VoiceReplyPolicy(generation_mode="model_tag")
+        policy = VoiceReplyPolicy(generation_mode="model_tag", segment_mode="each")
         plugin, event, _ = await self.run_pipeline(segmented=True, companion_segmenting=True,
             voice_policy=policy, response_text="<pc_tts>你好呀！\n再来一次吧！</pc_tts>")
         self.assertEqual([call.args[1] for call in plugin.staging.session.voice.await_args_list],
@@ -267,7 +267,7 @@ class CoreReplyPipelineTests(unittest.IsolatedAsyncioTestCase):
                          ["你好呀！", "再来一次吧！"])
 
     async def test_translation_replacement_keeps_the_authored_foreign_voice(self):
-        policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja", foreign_text_mode="translation")
+        policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja", foreign_text_mode="translation", segment_mode="each")
         for native in (False, True):
             plugin, event, _ = await self.run_pipeline(segmented=native, companion_segmenting=True,
                 voice_policy=policy, response_text="<pc_tts>こんにちは。</pc_tts>你好呀！\n\n<pc_tts>もう一度。</pc_tts>再来一次吧！",
@@ -277,6 +277,22 @@ class CoreReplyPipelineTests(unittest.IsolatedAsyncioTestCase):
                              ["こんにちは。", "もう一度。"])
             self.assertEqual([c.text for chain in event.sent for c in chain if isinstance(c, Plain)],
                              ["哈喽！", "再摸摸！"])
+
+    async def test_default_whole_voice_follows_all_text_segments_and_keeps_foreign_speech(self):
+        policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja", foreign_text_mode="translation")
+        for native in (False, True):
+            with self.subTest(native_segmentation=native):
+                plugin, event, _ = await self.run_pipeline(segmented=native, companion_segmenting=True,
+                    voice_policy=policy,
+                    response_text="<pc_tts>こんにちは。</pc_tts>你好呀！\n\n<pc_tts>もう一度。</pc_tts>再来一次吧！")
+                self.assertEqual([call.args[1] for call in plugin.staging.session.voice.await_args_list],
+                                 ["こんにちは。\nもう一度。"])
+                components = [part for chain in event.sent for part in chain]
+                self.assertEqual([part.text for part in components if isinstance(part, Plain)],
+                                 ["你好呀！", "再来一次吧！"])
+                self.assertEqual(sum(isinstance(part, Record) for part in components), 1)
+                voice_index = next(i for i, part in enumerate(components) if isinstance(part, Record))
+                self.assertGreater(voice_index, max(i for i, part in enumerate(components) if isinstance(part, Plain)))
 
 
 if __name__ == "__main__":

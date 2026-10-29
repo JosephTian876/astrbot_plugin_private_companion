@@ -104,7 +104,8 @@ window.CompanionNativePerceptionPage = (() => {
         || typeof value.environment.sources.weather_provider === "string")
       && typeof value[section].edit_token === "string"
       && fields[section].every(([name, , type]) =>
-        typeof value[section].settings[name] === (type === "bool" ? "boolean" : type === "number" ? "number" : "string")));
+        ((name === "health_enabled" || name === "health_proactive_enabled") && value[section].settings[name] === undefined)
+        || typeof value[section].settings[name] === (type === "bool" ? "boolean" : type === "number" ? "number" : "string")));
   }
   function publicSnapshot() {
     if (!status) return {ready:false, loading:!notices.load, error:notices.load || ""};
@@ -120,6 +121,7 @@ window.CompanionNativePerceptionPage = (() => {
         weatherEnabled:environment.planning_weather_enabled === true,
         timezone:environment.planning_timezone || ""},
       model:{calendarEnabled:model.calendar_enabled === true, timezone:model.calendar_timezone || "",
+        healthEnabled:model.health_enabled === true,
         lunarEnabled:model.lunar_enabled === true, solarTermsEnabled:model.automatic_solar_terms_enabled === true,
         almanacEnabled:model.almanac_enabled === true, platformEnabled:model.platform_enabled === true,
         routeEnabled:model.model_route_enabled === true, modalitiesEnabled:model.configured_modalities_enabled === true},
@@ -158,6 +160,10 @@ window.CompanionNativePerceptionPage = (() => {
   function values(_section, data) { return {...data.settings}; }
   function merge(next, force = "") {
     if (!checked(next)) throw error("invalid_response");
+    if (next.model?.settings && typeof next.model.settings.health_enabled !== "boolean")
+      next.model.settings.health_enabled = false;
+    if (next.model?.settings && typeof next.model.settings.health_proactive_enabled !== "boolean")
+      next.model.settings.health_proactive_enabled = false;
     status = next;
     for (const section of Object.keys(fields)) {
       const current = drafts[section], entry = next[section], latest = values(section, entry);
@@ -330,7 +336,10 @@ window.CompanionNativePerceptionPage = (() => {
       if (!active(ticket)) return;
       if (!response.status || !checked(response.status)) throw error("invalid_response");
       merge(response.status, section);
-      notices[section] = "已保存。";
+      const setup = response.result?.health_setup;
+      notices[section] = setup?.state === "warning"
+        ? "已保存；" + (setup.message || "健康感知尚未完全就绪。")
+        : setup?.enabled === true ? "已保存，健康感知已开启。" : "已保存。";
     } catch (failure) {
       if (!active(ticket)) return;
       if (failure.confirmed) {

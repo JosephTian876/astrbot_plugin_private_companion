@@ -110,7 +110,7 @@ class GroupReplyAdmission:
             direct.append(wakeup["group_wakeup_bot_name"] or persona_name)
         if context.actor.principal.native_account_id in wakeup["group_wakeup_primary_member_ids"]:
             direct.extend(wakeup["group_wakeup_owner_direct_words"])
-        if (wakeup["group_wakeup_enabled"]
+        if (wakeup["group_wakeup_enabled"] and not mentions_others
                 and any(word and word.casefold() in compact.casefold() for word in direct)):
             return "direct_word"
         continuation = continuation if continuation is not None else self.continuation_status(

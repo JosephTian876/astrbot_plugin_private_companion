@@ -57,6 +57,22 @@ def _speech_record(turns, visible, *, at, policy, timezone_name):
     return record
 
 
+def speaker_history_instruction(items, current_speaker):
+    """Render a short, account-attributed history so names cannot move between speakers."""
+    lines = []
+    for item in tuple(items or ())[-8:]:
+        speaker = str(item.get("speaker_id") or "").strip()
+        text = " ".join(str(item.get("text") or "").split())
+        if not speaker or not text:
+            continue
+        lines.append(f"[speaker_id={speaker}] {text[:160]}")
+    if not lines:
+        return ""
+    return ("\n群聊近期原文按账号归属，speaker_id 不同就是不同的人，不能把上一位的称呼、"
+            "昵称、话头或情绪安到当前发言者身上。\n" + "\n".join(lines)
+            + f"\n本轮 current_group_speaker={current_speaker}；只代表本轮，不代表上面每一个人。")
+
+
 def native_participation_turn(participation, context, native_input, settings):
     """Read effective references; the model remains responsible for participation."""
     values = group_participation_settings(participation.runtime, context)
@@ -73,7 +89,8 @@ def native_participation_turn(participation, context, native_input, settings):
                   for turn in turns)
     request = SimpleNamespace(event=SimpleNamespace(received_at=at), images=getattr(native_input, "images", ()),
                               context=SimpleNamespace(materials=()))
-    hints = group_hints(request, context, settings, recent, {}, native=True)
+    hints = group_hints(request, context, settings, recent, {}, native=True,
+                        current_text=native_input.text)
     observation = observe(participation.records, owner=owner_key(context), settings=values,
         items=(*recent_visible, current), at=at, current_speaker=context.actor.principal.native_account_id)
     hints += observation_instruction(values, observation["facts"], group_safety_settings(settings))
@@ -91,5 +108,6 @@ def native_participation_turn(participation, context, native_input, settings):
     hints += participation.behavior.instruction(context, native_input)
     act = INTERJECTION if facts["enabled"] and facts["initiative"] else ""
     return {"instruction": INSTRUCTION + hints
+                + speaker_history_instruction(recent_visible, context.actor.principal.native_account_id)
                 + "\n这里的发送记录只证明 AstrBot 发送调用正常返回，不等于平台确认送达；缺失记录不能证明此前无人发言。",
             "act": act, "signature": ""}

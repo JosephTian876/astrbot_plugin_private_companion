@@ -312,14 +312,15 @@ class GroupParticipation:
             + ",".join("?" for _ in parts) + ")", parts)} if parts else {}
         if set(batches) != set(parts):
             raise TaskError("group_participation_history", "confirmed reply history lost its original batch")
-        hints = group_hints(request, context, settings, recent, batches)
+        texts = [clean_group_text(material.payload) for material in request.context.materials
+                 if material.purpose == "current_source" or material.purpose.startswith("merged_input:")]
+        current = " ".join(texts)
+        hints = group_hints(request, context, settings, recent, batches, current_text=current)
         values = group_participation_settings(self.runtime, context)
         interjection = self._interjection_policy(values, settings)
         repeat_policy = self._repeat_policy(values)
         owner = owner_key(context)
         speaker = context.actor.principal.native_account_id
-        texts = [clean_group_text(material.payload) for material in request.context.materials
-                 if material.purpose == "current_source" or material.purpose.startswith("merged_input:")]
         visible = (*history_items(recent),
                    *({"kind": "member", "speaker_id": speaker, "received_at": at.isoformat(), "text": text}
                      for text in texts))
@@ -330,7 +331,6 @@ class GroupParticipation:
         resolved = self.speech.resolve(self.speech.load(owner), at=at, day=day_key(at, self.messages.timezone_name),
                                        policy=interjection, items=visible, origin_key=context.key,
                                        timezone_name=self.messages.timezone_name)
-        current = " ".join(texts)
         mood = (observation["facts"].get("mood") or {}).get("top_mood", "")
         facts = interjection_state(interjection, resolved["record"], at=at,
                                    initiative=bool(current) and not addresses_role(current, self._address_words(settings)),

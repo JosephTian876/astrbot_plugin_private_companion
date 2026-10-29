@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import is_dataclass
 from inspect import isawaitable
+import json
 from typing import Any
 
-from companion_v2.execution.models import TaskError, require
+from companion_v2.execution.models import TaskContext, TaskError, encode, require
 from companion_v2.foundation.outcome import Outcome
 
 
@@ -19,6 +21,30 @@ OnDenied = Callable[[Any, BaseException], Awaitable[Any] | Any]
 OnSent = Callable[[Any, str], Any]
 OnDelivery = Callable[[str], Any]
 PrepareSend = Callable[[Any, Any, Callable[..., Awaitable[Any]], int, int], Awaitable[Any] | Any]
+
+
+def _require_authorization_result(result: Any) -> None:
+    if not isinstance(result, Outcome):
+        raise TypeError("core reply authorization must return an Outcome")
+    require(result)
+
+
+def restore_core_reply_prepared(prepared: Mapping) -> Mapping:
+    """Reconstruct captured values after reload without choosing new settings."""
+    from companion_v2.conversation.voice_reply import VoiceReplyPolicy
+
+    restored = {}
+    context = prepared.get("context")
+    if is_dataclass(context) and not isinstance(context, TaskContext):
+        current = TaskContext.restore(json.loads(encode(context)))
+        if current.key != context.key:
+            raise TaskError("core_reply_context_changed", "reload changed the captured reply context")
+        restored["context"] = current
+    for name in ("voice_reply_policy", "configured_voice_reply_policy"):
+        policy = prepared.get(name)
+        if is_dataclass(policy) and not isinstance(policy, VoiceReplyPolicy):
+            restored[name] = VoiceReplyPolicy(**json.loads(encode(policy)))
+    return {**prepared, **restored} if restored else prepared
 
 
 def is_core_sendable_message(message: Any) -> bool:
@@ -102,9 +128,10 @@ def prepare_core_reply_event(
         async def authorize_delivery() -> None:
             try:
                 result = await state["authorize"](state["prepared"])
-                if not isinstance(result, Outcome):
-                    raise TypeError("core reply authorization must return an Outcome")
-                require(result)
+                # Retained wrappers outlive their module during hot reload.
+                # Check the current owner's Outcome class, just as we call
+                # that owner's authorization callback through this state.
+                state["_require_authorization_result"](result)
             except BaseException as error:
                 callback = state.get("on_denied")
                 if not state.get("denial_notified"):
@@ -329,6 +356,7 @@ def prepare_core_reply_event(
     state.update(
         prepared=prepared,
         authorize=authorize,
+        _require_authorization_result=_require_authorization_result,
         on_denied=on_denied,
         on_sent=on_sent,
         on_delivery=on_delivery,
@@ -396,6 +424,7 @@ def adopt_core_reply_event(
         return False
     changed_owner = state.get("owner") is not owner
     if changed_owner:
+        prepared = restore_core_reply_prepared(prepared)
         old_task, old_callback = state.pop("_presence_owner_task", None), state.pop("_presence_task_done", None)
         if old_task is not None and old_callback is not None:
             old_task.remove_done_callback(old_callback)
@@ -411,6 +440,7 @@ def adopt_core_reply_event(
         prepared=prepared,
         owner=owner,
         authorize=authorize,
+        _require_authorization_result=_require_authorization_result,
         on_denied=on_denied,
         on_sent=on_sent,
         on_delivery=on_delivery,

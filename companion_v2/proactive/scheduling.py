@@ -26,6 +26,8 @@ from .calendar_events import CalendarContactEvents
 from .date_events import DateContactEvents
 from .events import ActivityContactEvents
 from .greetings import GreetingContactEvents
+from .health_events import HealthContactEvents
+from .sleep_context import from_health_source
 from .growth_events import GrowthContactEvents
 from .journal_events import JournalContactEvents
 from .meal_events import MealContactEvents
@@ -84,7 +86,7 @@ class ContactSchedule:
     def __init__(self, contacts, messages, *, notify, role_life=None, role_growth=None, role_journal=None,
                  calendar=None, relationships=None, role_state=None, weather_port=None,
                  weather_alert_port=None, balance_port=None, news_port=None, screen_peek=None,
-                 wake_port=None):
+                 wake_port=None, health_source=None, health_settings=None):
         self.contacts, self.messages, self.notify = contacts, messages, notify
         self.tasks, self.runtime = contacts.tasks, contacts.runtime
         self.screen_peek = screen_peek
@@ -104,7 +106,9 @@ class ContactSchedule:
         self.reminiscence_events = (ReminiscenceContactEvents(contacts, relationships)
                                     if relationships is not None else None)
         self.date_events = DateContactEvents(contacts, messages)
-        self.greeting_events = GreetingContactEvents(contacts, role_state)
+        self.greeting_events = GreetingContactEvents(contacts, role_state, health_source)
+        self.health_source = health_source
+        self.health_events = HealthContactEvents(contacts, health_source, health_settings)
         self.meal_events = MealContactEvents(contacts)
         self.weather_events = WeatherContactEvents(contacts, role_state, weather_port) if role_state is not None else None
         self.weather_change_events = WeatherChangeContactEvents(
@@ -354,7 +358,8 @@ class ContactSchedule:
                          "reminiscence_event", "date_event",
                          "meal_event", "weather_event", "weather_change_event", "official_alert_event",
                          "balance_event", "news_event", "screen_event", "greeting_event", "burst_event",
-                         "relationship_event", "followup_event", "open_loop_event", "morning_event"}
+                         "relationship_event", "followup_event", "open_loop_event", "morning_event",
+                         "health_event"}
         rhythm_event_markers = event_markers - {"relationship_event"}
         if current.get("reanchored"):
             # The latest completed conversation took over. Keep the original
@@ -421,6 +426,8 @@ class ContactSchedule:
             if self.official_alert_events is None:
                 raise TaskError("contact_official_alert_unavailable", "official alert needs its original producer")
             self.official_alert_events.validate(context, origin["official_alert_event"], at)
+        if "health_event" in origin:
+            self.health_events.validate(context, origin["health_event"], at)
         if "balance_event" in origin:
             self.balance_events.validate(context, origin["balance_event"], at)
         if "news_event" in origin:
@@ -451,6 +458,11 @@ class ContactSchedule:
         self.contacts._adopt(context, preferences)
         if not preferences.values["automatic_enabled"]:
             self._note_window(context, row, at, "settings", "skipped", "automatic_contact_disabled")
+            return None
+        sleep = from_health_source(self.health_source, at)
+        if sleep is not None and sleep.quiet_until > at:
+            self._note_window(context, row, at, "sleep", "skipped", "sleep_wake_grace",
+                              next_at=sleep.morning_opened_at)
             return None
         origin, batch, event = self._origin(context, row["batch_id"], at)
         first = max(event.received_at, datetime.fromisoformat(batch["created_at"])) + timedelta(
@@ -514,12 +526,27 @@ class ContactSchedule:
                     reason_code += ":" + str(diagnostic["confidence"])
                 self._note_window(context, row, at, "morning", "skipped", reason_code[:96],
                                   purpose="greeting", next_at=diagnostic.get("next_at"))
+        if (hour_allowed and sleep is not None
+                and sleep.morning_opened_at <= at < sleep.morning_expires_at):
+            candidate = self.health_events.select(context, preferences, at)
+            if candidate is not None:
+                opportunity, intents, marker = candidate
+                intents = tuple(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
+                    context.scope, at, (event.source, *intent.thought.evidence.sources)))) for intent in intents)
+                return context, opportunity, intents, batch["role_instruction"], {**origin, "health_event": marker}
         candidate = self.greeting_events.select(context, preferences, at, interaction=interaction)
         if candidate is not None:
             opportunity, intents, marker = candidate
             intents = tuple(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
                 context.scope, at, (event.source,)))) for intent in intents)
             return context, opportunity, intents, batch["role_instruction"], {**origin, "greeting_event": marker}
+        if hour_allowed:
+            candidate = self.health_events.select(context, preferences, at)
+            if candidate is not None:
+                opportunity, intents, marker = candidate
+                intents = tuple(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
+                    context.scope, at, (event.source, *intent.thought.evidence.sources)))) for intent in intents)
+                return context, opportunity, intents, batch["role_instruction"], {**origin, "health_event": marker}
         if hour_allowed and self.events is not None:
             candidate, more = self.events.select(context, preferences, at)
             candidate = self._share_candidate(context, preferences, candidate)
@@ -1583,6 +1610,12 @@ class ContactSchedule:
         return tuple("automatic-contact-" + key for key in self._workers) + tuple(
             "contact-judge-" + key for key in self._judges)
 
+    def bind_health_source(self, source):
+        self.health_source = source
+        self.health_events.update_source(source)
+        if getattr(self, "greeting_events", None) is not None:
+            self.greeting_events.health_source = source
+
     def _close_sources(self):
         if self.events is not None:
             self.events.close()
@@ -1600,6 +1633,8 @@ class ContactSchedule:
             self.weather_change_events.close()
         if self.official_alert_events is not None:
             self.official_alert_events.close()
+        if getattr(self, "health_events", None) is not None:
+            self.health_events.close()
         self.balance_events.close()
         self.news_events.close()
         self.screen_events.close()

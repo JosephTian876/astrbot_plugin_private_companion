@@ -46,10 +46,16 @@ def _minutes(wall):
 class GreetingContactEvents:
     """Morning/noon/evening anchors plus the bounded insomnia night slot."""
 
-    def __init__(self, contacts, role_state=None):
+    def __init__(self, contacts, role_state=None, health_source=None):
         if role_state is not None and contacts.runtime is not role_state.runtime:
             raise ValueError("greeting contacts must share the original role runtime")
         self.contacts, self.role_state, self.runtime = contacts, role_state, contacts.runtime
+        self.health_source = health_source
+
+    def _user_sleep_hint(self, context, at):
+        from .sleep_context import from_health_source
+        sleep = from_health_source(self.health_source, at)
+        return sleep.morning_hint() if sleep is not None else ""
 
     # ---- shared helpers --------------------------------------------------
     @staticmethod
@@ -217,9 +223,11 @@ class GreetingContactEvents:
         else:
             why, topic = ANCHOR_MEANING[marker["anchor"]]
             state_hint = self._state_hint(context, at)
+            user_sleep = self._user_sleep_hint(context, at) if marker["anchor"] == "morning_greeting" else ""
             summary = (f"按已配置时区，现在的本地日期是{marker['local_date']}，这是「{topic}」的问候窗口：{why}。"
                        "窗口只提供一个可以自然碰面的时机，不代表对方刚醒、刚吃完饭或已经空闲；没有合适的具体话头就跳过。"
-                       + ("（角色当前自身状态参考：" + state_hint + "）" if state_hint else ""))
+                       + ("（角色当前自身状态参考：" + state_hint + "）" if state_hint else "")
+                       + ("（用户最近睡眠参考：" + user_sleep + "）" if user_sleep else ""))
             purpose = ANCHOR_PURPOSE
         thought = Thought("greeting-event-" + digest(marker), opportunity, ThoughtKind.CONVERSATION,
                           summary, EvidenceSnapshot(context.scope, at), 1.0)

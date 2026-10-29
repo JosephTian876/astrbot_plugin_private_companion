@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 import unittest
 
+from companion_v2.conversation.foreground import PromptRequest
 from companion_v2.model_gateway.service import LocalModelGateway, TASK_ROLE_REFERENCE_KINDS
 
 
@@ -13,6 +14,11 @@ class TaskRoleReferenceTests(unittest.TestCase):
     class Request:
         role_instruction: str
         instruction: str = "本轮任务"
+        role_guard_instruction: str | None = None
+
+        @property
+        def host_role_instruction(self):
+            return self.role_guard_instruction if self.role_guard_instruction is not None else self.role_instruction
 
     def request(self):
         return self.Request(role_instruction="AstrBot 人格原文")
@@ -31,11 +37,15 @@ class TaskRoleReferenceTests(unittest.TestCase):
         request = gateway._task_role_request(self.make_run("role.journal.diary"), self.request())
         self.assertEqual(request.role_instruction, "【角色稳定档案】\n- 姓名：沈知夏")
         self.assertNotIn("AstrBot 人格原文", request.role_instruction)
+        self.assertEqual(request.role_guard_instruction, "AstrBot 人格原文")
+        self.assertEqual(request.host_role_instruction, "AstrBot 人格原文")
 
     def test_empty_self_page_falls_back_to_captured_persona(self):
         gateway = self.gateway("")
         request = gateway._task_role_request(self.make_run("calendar.plan"), self.request())
         self.assertEqual(request.role_instruction, "AstrBot 人格原文")
+        self.assertIsNone(request.role_guard_instruction)
+        self.assertEqual(request.host_role_instruction, "AstrBot 人格原文")
 
     def test_conversation_and_image_safety_keep_their_original_instruction(self):
         gateway = self.gateway("【角色稳定档案】")
@@ -43,6 +53,17 @@ class TaskRoleReferenceTests(unittest.TestCase):
             with self.subTest(kind=kind):
                 request = gateway._task_role_request(self.make_run(kind), self.request())
                 self.assertEqual(request.role_instruction, "AstrBot 人格原文")
+                self.assertIsNone(request.role_guard_instruction)
+                self.assertEqual(request.host_role_instruction, "AstrBot 人格原文")
+
+    def test_prompt_request_keeps_the_native_guard_separate_from_the_task_role(self):
+        request = object.__new__(PromptRequest)
+        object.__setattr__(request, "role_instruction", "【角色稳定档案】")
+        object.__setattr__(request, "role_guard_instruction", "AstrBot 人格原文")
+        self.assertEqual(request.role_instruction, "【角色稳定档案】")
+        self.assertEqual(request.host_role_instruction, "AstrBot 人格原文")
+        object.__setattr__(request, "role_guard_instruction", None)
+        self.assertEqual(request.host_role_instruction, "【角色稳定档案】")
 
     def test_background_allowlist_does_not_include_conversation(self):
         self.assertIn("conversation.poke_reply", TASK_ROLE_REFERENCE_KINDS)

@@ -257,6 +257,7 @@ class NativePerceptionWebAPI:
                          "age_seconds": number(activity.get("age_seconds")),
                          "stale": activity.get("stale") is True},
             "health": {"available": telemetry.get("available") is True,
+                       "reason": text(telemetry.get("reason"), 64),
                        "measurements": measurements,
                        "activity": text(telemetry_activity.get("label") or telemetry_activity.get("state"), 80),
                        "captured_at": number(telemetry.get("captured_at")),

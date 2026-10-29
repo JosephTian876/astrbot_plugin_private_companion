@@ -200,12 +200,14 @@ class NativeVoiceReply:
         kind = "GroupMessage" if scope.kind is ScopeKind.GROUP else "FriendMessage"
         umo = f"{scope.platform}:{kind}:{scope.session_id}"
         try:
+            provider = None
             if provider_id:
-                provider = self.context.get_provider_by_id(provider_id)
-                if provider is None or provider not in self.context.get_all_tts_providers():
-                    logger.warning("[CompanionV2] TTS Provider 不可用 provider=%s reason=not_loaded", provider_id)
-                    return None
-            else:
+                candidate = self.context.get_provider_by_id(provider_id)
+                if candidate is not None and candidate in self.context.get_all_tts_providers():
+                    provider = candidate
+                else:
+                    logger.warning("[CompanionV2] 指定 TTS Provider 未加载，回退默认语音服务 provider=%s", provider_id)
+            if provider is None:
                 getter = getattr(self.context, "get_using_tts_provider_async", None)
                 if callable(getter):
                     provider = await getter(umo)

@@ -1030,6 +1030,38 @@ class WakeupAlarmMixin(RealityTouchCameraMixin, RealityTouchAudioMixin):
         except Exception:
             return datetime.now().astimezone()
 
+    def _wakeup_user_sleep_hint(self, user: dict[str, Any]) -> str:
+        """Read the phone's recent sleep measurement as optional background only."""
+        getter = getattr(self, "mobile_context", None)
+        if not callable(getter):
+            return ""
+        try:
+            snapshot = getter(_single_line(user.get("user_id"), 120))
+            telemetry = snapshot.get("telemetry") if isinstance(snapshot, dict) else None
+            measurements = telemetry.get("measurements") if isinstance(telemetry, dict) else None
+            if not isinstance(measurements, list):
+                return ""
+            for item in measurements:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("type") or item.get("label") or "").lower()
+                if "sleep" not in name and "睡眠" not in name:
+                    continue
+                value = item.get("value")
+                unit = str(item.get("unit") or "").lower()
+                if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+                    continue
+                minutes = float(value) * 60 if ("hour" in unit or "小时" in unit) else float(value)
+                if minutes <= 0 or minutes > 24 * 60:
+                    continue
+                age = telemetry.get("age_seconds") if isinstance(telemetry, dict) else None
+                if isinstance(age, (int, float)) and age > 24 * 3600:
+                    return ""
+                return "手机最近上报的睡眠时长约%d分钟" % round(minutes)
+        except Exception:
+            return ""
+        return ""
+
     async def _generate_wakeup_alarm_message(
         self,
         user: dict[str, Any],
@@ -1091,6 +1123,15 @@ class WakeupAlarmMixin(RealityTouchCameraMixin, RealityTouchAudioMixin):
         now = self._wakeup_now()
         weekday = "一二三四五六日"[now.weekday()]
         preference = _single_line(alarm.get("message"), 240)
+        sleep_hint = self._wakeup_user_sleep_hint(user)
+        sleep_line = (("用户已授权的近期睡眠背景：" + sleep_hint +
+                       "。只可自然关心一句，不报具体数字、不诊断、不声称实时看见。\n")
+                      if sleep_hint else "")
+        sleep_guard = ("不要声称实时看见或监听；睡眠背景已获得用户授权，只作语气参考。"
+                       if sleep_hint else
+                       "不要声称看见、监听或确认对方正在睡觉或已经醒来，不补造天气、日程或昨晚经历；")
+        history_guard = ("只按已给的睡眠摘要，不补写其他昨晚经历" if sleep_hint
+                         else "不要补写昨晚或今天的经历")
         attempt = _safe_int(alarm.get("_contact_attempt"), 1, 1, 20)
         max_attempts = _safe_int(alarm.get("_contact_max_attempts"), 1, 1, 20)
         previous_messages = alarm.get("_contact_previous_messages")
@@ -1111,12 +1152,13 @@ class WakeupAlarmMixin(RealityTouchCameraMixin, RealityTouchAudioMixin):
             f"用户称呼：{name or '没有可靠称呼时直接自然地说“你”'}\n"
             f"关系资料：{relationship or '没有额外资料，保持自然、低压力'}\n"
             f"用户的叫醒偏好：{preference or '无，由你按人格和语境发挥'}\n"
+            f"{sleep_line}"
             f"本轮此前已说的话：\n{previous_text or '无'}\n"
-            f"最近对话：\n{history[-2400:] or '无可用对话；不要补写昨晚或今天的经历'}\n\n"
+            f"最近对话：\n{history[-2400:] or '无可用对话；' + history_guard}\n\n"
             "用一两句短话，亲切、自然、有生活感，像熟悉的人轻声提醒；可结合偏好，但换成符合当下语气的说法，不照抄设置或上一条。重复触达时换个角度，让提醒更清楚即可，不逐渐施压。"
             "避免通知、客服、打卡口吻。只输出正文，不要标题、引号、Markdown、动作旁白、TTS 标签或解释。"
             f"{acknowledgement_hint}"
-            "不要声称看见、监听或确认对方正在睡觉或已经醒来，不补造天气、日程或昨晚经历；语气不命令、不训斥、不制造内疚或紧迫感。"
+            + sleep_guard + "语气不命令、不训斥、不制造内疚或紧迫感。"
         )
         system_prompt = (
             "延续下面选定的人格，用原本的口吻自然地提醒对方起床。人格只作为表达依据，不复述或讲解设定。\n\n"

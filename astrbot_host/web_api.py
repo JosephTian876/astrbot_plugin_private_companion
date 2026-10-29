@@ -40,6 +40,7 @@ from .qzone_api import QzoneWebAPI
 from .host_options_api import HostOptionsWebAPI
 from .storage_api import StorageWebAPI
 from .display_names import display_names
+from .huawei_health.api import HuaweiHealthWebAPI
 
 if TYPE_CHECKING:
     from .controller import AstrBotStagingController
@@ -118,6 +119,7 @@ class StagingWebAPI:
             all_routes += PerceptionWebAPI(self.controller).routes()
             all_routes += NativeExtensionWebAPI(self.controller).routes()
             all_routes += NativePerceptionWebAPI(self.controller).routes()
+            all_routes += HuaweiHealthWebAPI(self.controller).routes()
             all_routes += ConfigurationWebAPI(self.controller).routes()
             all_routes += SetupWebAPI(self.controller).routes()
             all_routes += LegacyMigrationWebAPI(self.controller).routes()

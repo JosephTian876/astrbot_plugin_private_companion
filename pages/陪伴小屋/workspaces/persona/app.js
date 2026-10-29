@@ -1,6 +1,7 @@
 "use strict";
 (() => {
   const $ = id => document.getElementById(id);
+  const LONG_MODEL_TIMEOUT = {timeoutMs: 180000};
   const sectionRows = [
     ["identity", "基本信息", "<Role_Profile>", "姓名、身份、经历、职业"],
     ["appearance", "外貌特征", "<Role_Profile>", "外貌、衣着与标志特征"],
@@ -82,7 +83,7 @@
     return result;
   }
   function errorText(error) { return errors[error && error.code] || errors[error && error.message] || (error && error.message) || "这一操作没有完成，请刷新后重试。"; }
-  function post(path, body) { return bridge.apiPost(path, body).then(unwrap); }
+  function post(path, body, options) { return bridge.apiPost(path, body, options).then(unwrap); }
   function get(path, body) { return bridge.apiGet(path, body).then(unwrap); }
   function workspaceKey() { return "companion.persona-workshop.v2." + encodeURIComponent(sourceId || "current"); }
   function persist() {
@@ -553,7 +554,7 @@
     try {
       const body = {persona_id: sourceId, answers, strength, source_mode: sourceMode, reference_material: $("reference-material").value};
       if (sourceMode === "paste") body.source_text = original;
-      const result = await post("persona/standardize", body), draft = result.draft || {};
+      const result = await post("persona/standardize", body, LONG_MODEL_TIMEOUT), draft = result.draft || {};
       if (draft.sections) rightSections = cleanRecord(draft.sections, sectionRows.map(item => item.key), 10000, emptySections());
       else {
         const parsed = extractCanonical(draft.text || "");
@@ -575,7 +576,7 @@
     const variation = Math.min(100, tryoutBatch);
     setBusy(true); notice("正在生成情景试答…");
     try {
-      const result = await post("persona/tryouts", {persona_id: sourceId, draft_text: rightText(), variation});
+      const result = await post("persona/tryouts", {persona_id: sourceId, draft_text: rightText(), variation}, LONG_MODEL_TIMEOUT);
       tryoutRows = result.scenarios || [];
       tryoutIndex = 0;
       tryoutBatch = (result.variation === undefined ? variation : result.variation) + 1;
@@ -599,7 +600,7 @@
         persona_id: sourceId, draft_text: rightText(), selections: selectedReplies(),
         reference_material: $("reference-material").value, speech_preference: $("speech-preference").value,
         constraint_preference: $("constraint-preference").value,
-      });
+      }, LONG_MODEL_TIMEOUT);
       rightStyle = result.style && result.style.text || ""; rightExamples = result.style && result.style.examples || "";
       $("style-text").value = rightStyle; $("style-examples").value = rightExamples; $("style-result").hidden = false;
       paintReview(); paintCompareRows(); unlockedStep = 5; paintFlow(); persist(); notice("风格规则已生成，可以继续编辑。");

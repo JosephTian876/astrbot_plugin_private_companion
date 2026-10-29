@@ -396,6 +396,12 @@ window.CompanionWorkbench = (() => {
       if (policy.numericIds && words.some(word => !/^[0-9]+$/.test(word) || word.startsWith("0"))) return false;
       return true;
     }
+    if (item.input === "chips" && item.chipOptions?.mode === "multi") {
+      const options = item.chipOptions.options || [];
+      const parts = parseTagList(value);
+      return parts.length > 0 && parts.every(part => options.includes(part))
+        && new Set(parts).size === parts.length;
+    }
     if (item.input === "replacement-list") {
       const pairs = parseReplacementList(value);
       const policy = item.listPolicy || {};
@@ -468,7 +474,7 @@ window.CompanionWorkbench = (() => {
       return "<div class=\"wb-segmented\" role=\"radiogroup\" aria-label=\""
         + e(item.label || item.name) + "\">" + choices + "</div>";
     }
-    if (item.choices) {
+    if (item.choices && item.input !== "chips") {
       /* 枚举：空值是合法的「跟随上级」，所以不自动补一个选中项。
          草稿可能是数字（整数档位字段），选项键一定是字符串，比较前先归一。 */
       const selected = choiceKey(item, value);
@@ -699,17 +705,20 @@ window.CompanionWorkbench = (() => {
     if (item.kind === "text" && item.input === "chips") {
       const options = item.chipOptions?.options || [];
       const multi = item.chipOptions?.mode === "multi";
+      const labels = item.chipOptions?.labels || {};
       const current = String(value ?? "").trim();
       const parts = parseTagList(current);
       const chips = options.map(option => {
         const on = multi ? parts.includes(option) : current === option;
         return `<button type="button" class="wb-chip-opt${on ? " is-on" : ""}"`
-          + ` data-wb-chip="${e(item.name)}" data-wb-chip-value="${e(option)}"${dis}>${e(option)}</button>`;
+          + ` data-wb-chip="${e(item.name)}" data-wb-chip-value="${e(option)}"${dis}>${e(labels[option] || option)}</button>`;
       }).join("");
+      const field = item.chipOptions?.hideInput
+        ? `<input type="hidden" data-wb-field="${e(item.name)}" value="${e(value)}">`
+        : `<input type="text" data-wb-field="${e(item.name)}" value="${e(value)}"`
+          + ` aria-label="${e(item.label || item.name)}" placeholder="${e(item.chipOptions?.placeholder || "自定义…")}"${dis}>`;
       return `<div class="wb-chipset" data-wb-chipset="${e(item.name)}">`
-        + (chips ? `<div class="wb-chip-opts">${chips}</div>` : "")
-        + `<input type="text" data-wb-field="${e(item.name)}" value="${e(value)}"`
-        + ` aria-label="${e(item.label || item.name)}" placeholder="${e(item.chipOptions?.placeholder || "自定义…")}"${dis}></div>`;
+        + (chips ? `<div class="wb-chip-opts">${chips}</div>` : "") + field + `</div>`;
     }
     /* 词条小片：从顿号清单里逐项增删（爱好、标志性表达这类自由清单）。 */
     if (item.kind === "text" && item.input === "tags") {
