@@ -119,8 +119,15 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             declarations = registry.declarations()
             self.assertEqual({item.descriptor.package.extension_id for item in declarations},
                 {"content", "image", "companion.screen.native", "reality", "together", "game", "live"})
-            self.assertTrue(all(item.descriptor.package.package_version == PRODUCT_VERSION
-                                for item in declarations))
+            for item in declarations:
+                package = item.descriptor.package
+                base, separator, build = package.package_version.partition("+")
+                self.assertEqual(base, PRODUCT_VERSION, package.extension_id)
+                if separator:
+                    # Image transports are rebuilt within one release; their package
+                    # version carries a content hash, while the release base must match.
+                    self.assertEqual(package.extension_id, "image", package.package_version)
+                    self.assertRegex(build, r"^image\.[0-9a-f]{64}$")
             value = IntegrationRegistry(context).snapshot(native_extensions=registry)
             bundled = value["extensions"]
             self.assertEqual({item["capability_id"] for item in bundled},
@@ -128,7 +135,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
             for item in bundled:
                 self.assertEqual(item["kind"], "native_extension")
                 self.assertEqual(item["owner"], "companion_v2")
-                self.assertEqual(item["version"], PRODUCT_VERSION)
+                base, separator, build = item["version"].partition("+")
+                self.assertEqual(base, PRODUCT_VERSION, item["capability_id"])
+                if separator:
+                    self.assertEqual(item["capability_id"], "image", item["version"])
+                    self.assertRegex(build, r"^image\.[0-9a-f]{64}$")
                 self.assertTrue(item["status_connected"])
                 self.assertFalse(item["assembled"])
                 self.assertFalse(item["runtime_ready"])
@@ -165,7 +176,6 @@ class MultiIntegrationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         result = await self.request(path)
         self.assertEqual(result["status"], "ok", result)
         self.assertEqual(result["data"]["product"]["version"], PRODUCT_VERSION)
-        self.assertEqual(PRODUCT_VERSION, "2.1.1")
         self.assertIsNone(self.controller.runtime)
         self.assertEqual((await self.request(path,query="target_id=other"))["data"]["code"], "integration_request_invalid")
         await self.controller.terminate()
