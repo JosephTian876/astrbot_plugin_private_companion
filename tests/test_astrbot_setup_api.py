@@ -100,6 +100,11 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         self.fail(f"proactive test did not reach a terminal receipt: {self.api.progress.read()['proactive_test']}")
 
+    async def skip_optional_setup_sections(self):
+        for step in ("proactive", "life", "group"):
+            result = await self.call("complete", {"step": step, "skipped": True})
+            self.assertEqual(result["status"], "ok", result)
+
     def test_proactive_authorization_diagnostics_distinguish_login_and_core_permission(self):
         cases = {
             "dashboard_identity_required": "Dashboard 登录身份不可用",
@@ -759,6 +764,7 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("complete", {"step": "model", "skipped": False}))["status"], "ok")
         self.assertEqual((await self.call("complete", {"step": "knowledge", "skipped": True}))["status"], "ok")
         self.assertEqual((await self.call("complete", {"step": "relationships", "skipped": True}))["status"], "ok")
+        await self.skip_optional_setup_sections()
         await self.prepare_trusted_conversation_source()
 
         generated_text = "想起你说过的航行计划。"
@@ -790,6 +796,7 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.call("complete", {"step": "model", "skipped": False})
         await self.call("complete", {"step": "knowledge", "skipped": True})
         await self.call("complete", {"step": "relationships", "skipped": True})
+        await self.skip_optional_setup_sections()
         await self.prepare_trusted_conversation_source()
         self.prepare_contact_model()
         reverse_api = self.native.platform.client._api._wsr_api
@@ -838,6 +845,7 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("complete", {"step": "model", "skipped": False}))["status"], "ok")
         self.assertEqual((await self.call("complete", {"step": "knowledge", "skipped": True}))["status"], "ok")
         self.assertEqual((await self.call("complete", {"step": "relationships", "skipped": True}))["status"], "ok")
+        await self.skip_optional_setup_sections()
         await self.prepare_trusted_conversation_source()
         self.prepare_contact_model()
         self.assertEqual((await self.call("proactive_test", {"enable_proactive": True}))["data"]["state"], "started")
@@ -859,6 +867,7 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("complete", {"step": "model", "skipped": False}))["status"], "ok")
         self.assertEqual((await self.call("complete", {"step": "knowledge", "skipped": True}))["status"], "ok")
         self.assertEqual((await self.call("complete", {"step": "relationships", "skipped": True}))["status"], "ok")
+        await self.skip_optional_setup_sections()
 
         started = await self.controller.start()
         self.assertIsNone(started.failure, started.failure)
@@ -926,6 +935,7 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("complete", {"step": "model", "skipped": False}))["status"], "ok")
         self.assertEqual((await self.call("complete", {"step": "knowledge", "skipped": True}))["status"], "ok")
         self.assertEqual((await self.call("complete", {"step": "relationships", "skipped": True}))["status"], "ok")
+        await self.skip_optional_setup_sections()
         await self.prepare_trusted_conversation_source()
         self.prepare_contact_model()
         self.assertEqual((await self.call("proactive_test", {"enable_proactive": True}))["data"]["state"], "started")

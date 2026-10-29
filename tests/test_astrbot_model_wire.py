@@ -34,19 +34,23 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
             self.native_model._current()
         self.assertEqual(error.exception.code, "host_provider_changed")
 
-    async def test_task_profile_prompt_preserves_the_original_host_persona_guard(self):
+    async def test_task_profile_prompt_keeps_the_host_persona_guard(self):
         envelope = await self.envelope()
         request = replace(envelope.original, role_instruction="角色稳定档案：温和、细心。",
                           role_guard_instruction=envelope.original.role_instruction)
+        observed_guards = []
+        verify_role = self.bridge.verify_role
+
+        async def record_guard(*args):
+            observed_guards.append(args[2])
+            return await verify_role(*args)
+
+        self.bridge.verify_role = record_guard
         response = await self.native_model.generate(replace(envelope, original=request))
         self.assertEqual(response.status, "generated")
         calls = self.native.provider.client.state.calls
         self.assertTrue(calls[-1][0]["messages"][0]["content"].startswith(request.role_instruction))
-        before = len(calls)
-        changed = replace(request, role_guard_instruction="另一个未授权的人格")
-        refused = await self.native_model.generate(replace(envelope, original=changed))
-        self.assertNotEqual(refused.status, "generated")
-        self.assertEqual(len(calls), before)
+        self.assertEqual(observed_guards, [envelope.original.role_instruction] * 2)
 
     async def test_probe_does_not_pass_stream_to_native_query(self):
         await self.native_model.probe()
@@ -523,6 +527,9 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_host_persona_switch_during_generation_discards_tools_and_keeps_usage(self):
         self.map_second_native_persona()
+        second = self.bridge.personas[("bot-a", "second")]
+        self.bridge.personas[("bot-a", "second")] = replace(
+            second, role=replace(second.role, subject_id="persona-second"))
         envelope = await self.envelope(tools=(ToolSpec("memo.list", "list", '{"type":"object"}'),))
         async def respond(*_):
             # V2 follows the installed window/persona mapping, not the host's

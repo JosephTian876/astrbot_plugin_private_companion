@@ -393,8 +393,14 @@ class ModelSession:
                 ("streaming_mode", (request.streaming_mode, original.streaming_mode)),
                 ("response_schema_json", (request.response_schema_json, original.response_schema_json)))
                 if pair[0] != pair[1]]
+        style_instruction_removed = False
         if not request.instruction.startswith(original.instruction):
-            reasons.append("instruction")
+            from companion_v2.conversation.style_context import EXPRESSION_STYLE_INSTRUCTION
+            style_suffix = "\n" + EXPRESSION_STYLE_INSTRUCTION
+            style_instruction_removed = (style_suffix in original.instruction
+                and request.instruction == original.instruction.replace(style_suffix, "", 1))
+            if not style_instruction_removed:
+                reasons.append("instruction")
         if reasons:
             self._context_mismatch(*reasons)
         if (request.images != original.images or request.reply_images != original.reply_images):
@@ -409,6 +415,8 @@ class ModelSession:
             changed.append("context.materials")
         if history[:len(self.history)] != self.history:
             changed.append("tool_history")
+        if request.instruction != original.instruction and not style_instruction_removed:
+            changed.append("instruction")
         if changed and (owner_refresh is None or not owner_refresh(original, request, self.history, history)):
             self._context_mismatch(*changed)
         self.busy = True

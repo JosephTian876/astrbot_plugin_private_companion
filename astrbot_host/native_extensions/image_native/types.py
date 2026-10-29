@@ -12,9 +12,28 @@ from PIL import Image, ImageChops
 
 
 class NativeImageError(ValueError):
-    def __init__(self, code: str):
+    """A failed image attempt plus what is safe to do with it.
+
+    ``unconfirmed`` is the retry-safety flag.  It defaults to ``True`` and only
+    a caller holding *positive* evidence that the provider never executed the
+    request (a definitive 4xx refusal, a local validation failure, an authority
+    revocation) may pass ``False``.  The owner turns a confirmed refusal into
+    ``failed`` (safe to retry, nothing was billed) and keeps everything else
+    ``unknown`` (never retried, may already be billed).  Flipping the default
+    would quietly turn a possibly-billed attempt into a retry, so the default
+    stays conservative.
+
+    ``diagnostics`` carries per-endpoint, already-redacted evidence:
+    ``{"endpoint_id", "status", "reason", "detail"}``.  It is stored on the
+    failed/unknown operation receipt for operators and the dashboard test API;
+    it never enters the model-facing receipt contract.
+    """
+
+    def __init__(self, code: str, *, diagnostics=(), unconfirmed: bool = True):
         super().__init__(code)
         self.code = code
+        self.diagnostics = tuple(dict(item) for item in diagnostics)
+        self.unconfirmed = bool(unconfirmed)
 
 
 def document(value: Any) -> str:

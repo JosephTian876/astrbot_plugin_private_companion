@@ -335,7 +335,8 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r["text"] for r in history], ["我在这里。"])
         self.assertTrue(app.runtime.read_one("SELECT platform_ref FROM conversation_parts", ())["platform_ref"].endswith(":456"))
         self.assertEqual(self.native.provider.client.max_retries, 2)
-        self.assertEqual(self.native.provider.client.state.calls[0][0]["messages"][0]["content"], snapshot.instruction)
+        self.assertTrue(self.native.provider.client.state.calls[0][0]["messages"][0]["content"].startswith(
+            snapshot.instruction))
 
     async def test_media_group_session_client_and_unmapped_account_are_explicit_failures(self):
         mutations = (

@@ -66,6 +66,33 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.config = multi_config(delivery_mode="onebot_private")
         self.controller = self.make_controller(self.config)
 
+    def observe_native_send(self, mutation):
+        """Run one live mutation immediately before the final dispatch check.
+
+        The older fixtures synchronized through
+        ``persona_manager.resolve_selected_persona``; Companion V2 no longer calls
+        it (the window persona comes from the verified session-topology snapshot
+        and the injected selection lookup), so that hook can never fire.
+        ``_final_dispatch_check`` is the product's real pre-dispatch seam: the
+        reply images are already sealed and the voice plan rendered, and the
+        check re-reads persona, connection and authority immediately before the
+        native API call. The mutation therefore races exactly the boundary these
+        tests describe. Returns the list of part ids the mutation ran for.
+        """
+        from companion_v2.adapters.astrbot.onebot import OneBotTextSender
+        original, ran = OneBotTextSender._final_dispatch_check, []
+
+        async def check(sender, envelope, scope, context):
+            if not ran:
+                ran.append(envelope.part_id)
+                await mutation(envelope)
+            return await original(sender, envelope, scope, context)
+
+        patcher = patch.object(OneBotTextSender, "_final_dispatch_check", check)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return ran
+
     def event_for(self, target="first", identifier="451", *, components=None):
         configured = self.controller.settings.target(target)
         platform = self.native.platforms[configured.platform_id]
@@ -171,11 +198,17 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(report["sent"])
                 self.assertEqual([part["state"] for part in report["parts"]], ["delivered", "delivered"])
                 messages = [frame["params"]["message"] for frame in self.sends(target)]
+                # QQ voice is delivered as its own best-effort request so a mixed
+                # payload can never lose the required text (see OneBotTextSender).
                 self.assertEqual([[segment["type"] for segment in message] for message in messages],
-                    [["text", "record"], ["text", "image", "record"]])
-                self.assertEqual([message[0]["data"]["text"] for message in messages],
-                    ["先看看这张图。", "再补一句。"])
-                self.assertEqual([message[-1]["data"]["file"] for message in messages],
+                    [["text"], ["record"], ["text", "image"], ["record"]])
+                self.assertEqual([[segment["data"]["text"] for segment in message
+                                   if segment["type"] == "text"] for message in messages],
+                    [["先看看这张图。"], [], ["再补一句。"], []])
+                self.assertEqual([sum(1 for segment in message if segment["type"] == "image")
+                                  for message in messages], [0, 0, 1, 0])
+                self.assertEqual([message[-1]["data"]["file"] for message in messages
+                                  if message[-1]["type"] == "record"],
                     ["base64://" + base64.b64encode(audio_file.read_bytes()).decode("ascii")] * 2)
         self.assertEqual(selected, ["qq-main:FriendMessage:200"] * 2 + ["qq-second:FriendMessage:200"] * 2)
         self.assertEqual([text for _, text in spoken], ["先看看这张图。", "再补一句。"] * 2)
@@ -226,9 +259,13 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                           for row in plans], [(1, "Hello there.", "english-tts", "before_text"),
                                              (2, "See you.", "english-tts", "before_text")])
         messages = [frame["params"]["message"] for frame in self.sends()]
+        # ``position=before_text`` keeps the leading voice first as its own request.
         self.assertEqual([[part["type"] for part in message] for message in messages],
-                         [["record", "text"], ["record", "text", "image"]])
-        self.assertEqual([message[1]["data"]["text"] for message in messages], ["你好。", "再见。"])
+                         [["record"], ["text"], ["record"], ["text", "image"]])
+        self.assertEqual([[segment["data"]["text"] for segment in message if segment["type"] == "text"]
+                          for message in messages], [[], ["你好。"], [], ["再见。"]])
+        self.assertEqual([sum(1 for segment in message if segment["type"] == "image")
+                          for message in messages], [0, 0, 0, 1])
         self.assertEqual(spoken, ["Hello there.", "See you."])
         self.assertEqual(ResultStore._futures, {})
 
@@ -275,8 +312,12 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             report = await self.reply(identifier="854")
         self.assertFalse(report["sent"])
         self.assertEqual([part["state"] for part in report["parts"]], ["unknown", "pending"])
+        # The required text owns the first ACK, so an unknown outcome here must
+        # never fall through to a voice-only or image request on the wire.
         self.assertEqual([[segment["type"] for segment in frame["params"]["message"]]
-                          for frame in self.sends()], [["text", "record"]])
+                          for frame in self.sends()], [["text"]])
+        self.assertFalse(any(segment["type"] in ("record", "image")
+                             for frame in self.sends() for segment in frame["params"]["message"]))
         self.assertEqual(spoken, ["第一段。"])
 
     async def test_native_forward_and_reply_images_reuse_pinned_history_then_send(self):
@@ -334,30 +375,42 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
     async def test_role_switch_while_preparing_images_cannot_send_as_another_persona(self):
         app = await self.start_host()
         (await self.controller.authorize_delivery("first")).unwrap()
-        switched = False
-        async def change(_):
-            nonlocal switched
-            if not switched and app.runtime.read_one("SELECT 1 FROM sources WHERE owner = ?", (OWNER,)):
-                switched = True
-                self.native.selections["qq-main"] = "second"
-        self.native.before_resolve = change
+        switched = []
+
+        async def change(_envelope):
+            # The image selection is already sealed when the first native send
+            # starts; switching the window persona here must not reach the wire.
+            self.assertTrue(app.runtime.read_one("SELECT 1 FROM sources WHERE owner = ?", (OWNER,)))
+            configured = self.controller.settings.target("first")
+            self.controller.session_topology.update_persona_selection_snapshot(
+                f"{configured.platform_id}:FriendMessage:{configured.participant_id}",
+                configured.account_id, configured.bot_id, "second", "role-b",
+                self.native.conversations[configured.platform_id])
+            switched.append("second")
+
+        ran = self.observe_native_send(change)
         report = await self.reply()
-        self.assertTrue(switched)
+        self.assertEqual(len(ran), 1)
+        self.assertEqual(switched, ["second"])
         self.assertFalse(report["sent"])
+        self.assertEqual([part["state"] for part in report["parts"]], ["failed"])
         self.assertEqual(self.sends(), [])
+        self.assertEqual(self.sends("second"), [])
 
     async def test_legacy_delivery_revocation_does_not_disable_configured_private_target(self):
         app = await self.start_host()
         (await self.controller.authorize_delivery("first")).unwrap()
-        revoked = False
-        async def change(_):
-            nonlocal revoked
-            if not revoked and app.runtime.read_one("SELECT 1 FROM sources WHERE owner = ?", (OWNER,)):
-                revoked = True
-                (await self.controller.revoke_delivery("first")).unwrap()
-        self.native.before_resolve = change
+        revoked = []
+
+        async def change(_envelope):
+            self.assertTrue(app.runtime.read_one("SELECT 1 FROM sources WHERE owner = ?", (OWNER,)))
+            (await self.controller.revoke_delivery("first")).unwrap()
+            revoked.append("first")
+
+        ran = self.observe_native_send(change)
         report = await self.reply()
-        self.assertTrue(revoked)
+        self.assertEqual(len(ran), 1)
+        self.assertEqual(revoked, ["first"])
         self.assertTrue(report["sent"])
         self.assertEqual(len(self.sends("first")), 1)
         self.assertEqual(self.sends("second"), [])
@@ -365,16 +418,19 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
     async def test_disconnected_original_account_never_uses_another_socket_for_images(self):
         app = await self.start_host()
         (await self.controller.authorize_delivery("first")).unwrap()
-        disconnected = False
-        async def change(_):
-            nonlocal disconnected
-            if not disconnected and app.runtime.read_one("SELECT 1 FROM sources WHERE owner = ?", (OWNER,)):
-                disconnected = True
-                self.native.platforms["qq-main"].client._wsr_api_clients.pop("100")
-        self.native.before_resolve = change
+        disconnected = []
+
+        async def change(_envelope):
+            self.assertTrue(app.runtime.read_one("SELECT 1 FROM sources WHERE owner = ?", (OWNER,)))
+            self.native.platforms["qq-main"].client._wsr_api_clients.pop("100")
+            disconnected.append("100")
+
+        ran = self.observe_native_send(change)
         report = await self.reply()
-        self.assertTrue(disconnected)
+        self.assertEqual(len(ran), 1)
+        self.assertEqual(disconnected, ["100"])
         self.assertFalse(report["sent"])
+        self.assertEqual([part["state"] for part in report["parts"]], ["failed"])
         self.assertTrue(all(not socket.frames for clients in self.sockets.values() for socket in clients.values()))
 
     async def test_private_delivery_retains_image_receipt_metadata_across_restart(self):

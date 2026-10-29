@@ -18,14 +18,15 @@ def definitely_not_sent(error):
     return False
 
 
-_HTTP_REJECTION_STATUSES = frozenset({400, 401, 403, 404, 405, 415, 422, 429})
+_HTTP_REJECTION_STATUSES = frozenset({400, 401, 403, 404, 405, 415, 422})
 
 
 def rejected_before_generation(error):
     """Return true for HTTP responses that reject a request before generation.
 
     These are typed client-side rejections (bad request, auth, unsupported
-    media, rate limit), not transport timeouts. No completion was produced, so
+    media), not transport timeouts. Rate-limit responses can be ambiguous about
+    whether provider processing began. No completion was produced, so
     the caller may safely mark the model call as not started and avoid leaving
     a reflection batch permanently ``running``.
     """

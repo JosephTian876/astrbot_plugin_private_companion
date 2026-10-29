@@ -90,18 +90,30 @@ class NativeImageOwner:
             self._interrupted(invocation.scope_key, operation["id"], "execution_interrupted")
             raise
         except Exception as exc:
-            # A transport exception after dispatch can mean the server accepted it.
-            return self._interrupted(invocation.scope_key, operation["id"],
-                                     exc.code if isinstance(exc, NativeImageError) else "backend_result_unconfirmed")
+            # The dispatch fence is crossed immediately before the remote mutation,
+            # so ``dispatching`` means "may have been sent", not "was billed".
+            # Only a failure carrying positive proof that nothing executed may be
+            # turned into a retryable ``failed``; everything else stays ``unknown``.
+            if isinstance(exc, NativeImageError):
+                return self._interrupted(invocation.scope_key, operation["id"], exc.code,
+                                         unconfirmed=exc.unconfirmed, diagnostics=exc.diagnostics)
+            return self._interrupted(invocation.scope_key, operation["id"], "backend_result_unconfirmed")
         finally:
             self._tasks.discard(task)
 
-    def _interrupted(self, scope: str, operation_id: str, error: str) -> dict:
+    def _interrupted(self, scope: str, operation_id: str, error: str, *, unconfirmed: bool = True,
+                     diagnostics=()) -> dict:
         operation = self.store.get(scope, operation_id)
         if operation["state"] not in {"prepared", "dispatching", "pending"}:
             return operation
-        state = "failed" if operation["state"] == "prepared" else "unknown"
-        return self.store.state(scope, operation_id, state, error=error)
+        # ``prepared`` never crossed the fence; a definitive refusal crossed it but
+        # is known to have been rejected. Both are safe to retry, so they are
+        # ``failed``. Everything else may already be billed and stays ``unknown``.
+        state = "failed" if operation["state"] == "prepared" or not unconfirmed else "unknown"
+        receipt = dict(operation["receipt"])
+        if diagnostics:
+            receipt["diagnostics"] = [dict(item) for item in diagnostics]
+        return self.store.state(scope, operation_id, state, error=error, receipt=receipt or None)
 
     def _accept(self, operation: dict, result: BackendResult) -> dict:
         if not isinstance(result, BackendResult):
