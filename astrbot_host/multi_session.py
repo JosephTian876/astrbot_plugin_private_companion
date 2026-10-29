@@ -46,7 +46,7 @@ from .settings import HostControlError
 from .huawei_health.service import get_huawei_health_service_for_root
 from companion_v2.conversation.voice_reply import VoiceReplyDelivery
 from companion_v2.execution.models import Lane, ProviderBinding, TaskContext, TaskError, digest, require, stamp
-from companion_v2.foundation.outcome import Outcome
+from companion_v2.foundation.outcome import Failure, Outcome
 from companion_v2.foundation.refs import AudienceRef, ScopeKind, ScopeRef
 from companion_v2.identity_policy.models import AuthenticatedHostPrincipal, AuthorizationTier
 from companion_v2.identity_policy.personas import ConversationRoute
@@ -103,8 +103,6 @@ class MultiPrivateBridge(NativePrivateBridge):
     def __init__(self, *args, settings, authority, group_quote_loader=None, group_forward_loader=None,
                  group_component_reader=None, **kwargs):
         self.settings, self.authority = settings, authority
-        # 上一次"因为没有对话权限而被拒"的对象；控制器据此在事务之外回一句。
-        self.last_refusal = None
         self.targets = {target.route_key: target for target in settings.targets}
         super().__init__(*args, **kwargs)
         group_options = {**kwargs, "quote_loader": group_quote_loader, "component_reader": group_component_reader,
@@ -376,6 +374,33 @@ class CoreReplyPlan:
     debounce: PrivateDebouncePolicy | None = None
 
 
+class PrivateDialogueDenied(TaskError):
+    """A private refusal bound to the exact context that was denied."""
+
+    def __init__(self, context):
+        super().__init__("private_access_dialogue_denied",
+                         "this private user has no dialogue permission")
+        self.refusal = context
+
+
+@dataclass(frozen=True)
+class CoreReplyOutcome(Outcome):
+    """Outcome that can carry the refusal belonging to this call only.
+
+    The refused context never lives on the shared session: concurrent events
+    for different Bot accounts must each keep their own copy, cooldown and
+    route.  Success values remain the same ``CoreReplyPlan`` or prepared
+    mapping as before.
+    """
+
+    refusal: TaskContext | None = None
+
+    @classmethod
+    def from_failure(cls, error):
+        return cls(failure=Failure(error.code, str(error)),
+                   refusal=getattr(error, "refusal", None))
+
+
 class MultiHostSession:
     def __init__(self, runtime, native_context, *, settings, personas, authority, native_types,
                  provider_fingerprint, runtime_instance_id, now, native_tool_port=None, news_port=None,
@@ -634,11 +659,9 @@ class MultiHostSession:
                                else self.authority.select(target, captured.route.scope, captured.role))
                     if context.scope.kind is ScopeKind.PRIVATE:
                         # 私聊：对话权限按人判定。没有权限时不进对话；回话由控制器
-                        # 在事务之外发（那里才有平台客户端），这里只记下对象。
+                        # 在事务之外发（那里才有平台客户端），这里把对象随本次失败带出。
                         if self.application.private_access_gate.denied(context, at=self.now()):
-                            self.last_refusal = context
-                            raise TaskError("private_access_dialogue_denied",
-                                            "this private user has no dialogue permission")
+                            raise PrivateDialogueDenied(context)
                     else:
                         require(self.application.tasks.check_context_access(context, action="conversation.reply", observed_at=self.now()))
                     def admitted(original, batch_id, *, replayed):
@@ -672,7 +695,7 @@ class MultiHostSession:
                         getattr(scope, "conversation_id", ""),
                         getattr(getattr(captured, "role", None), "subject_id", ""),
                     )
-                return Outcome.failed(error.code, str(error))
+                return CoreReplyOutcome.from_failure(error)
             except Exception as error:
                 if isinstance(target, GroupTarget):
                     logger.error("[CompanionV2] 群入站异常 target=%s error_type=%s",
@@ -807,9 +830,7 @@ class MultiHostSession:
                        else self.authority.select(target, captured.route.scope, captured.role))
             if context.scope.kind is ScopeKind.PRIVATE:
                 if self.application.private_access_gate.denied(context, at=self.now()):
-                    self.last_refusal = context
-                    raise TaskError("private_access_dialogue_denied",
-                                    "this private user has no dialogue permission")
+                    raise PrivateDialogueDenied(context)
             else:
                 require(self.application.tasks.check_context_access(
                     context, action="conversation.reply", observed_at=self.now()))
@@ -854,9 +875,9 @@ class MultiHostSession:
             except Exception as error:
                 logger.warning("[CompanionV2] 私聊防抖设置暂不可读，保留普通回复 error_type=%s",
                                type(error).__name__)
-            return Outcome.success(CoreReplyPlan(captured, context, debounce))
+            return CoreReplyOutcome.success(CoreReplyPlan(captured, context, debounce))
         except TaskError as error:
-            return Outcome.failed(error.code, str(error))
+            return CoreReplyOutcome.from_failure(error)
         except Exception as error:
             logger.error("[CompanionV2] 核心回复上下文解析失败 target=%s error_type=%s",
                          target.target_id, type(error).__name__)
@@ -1093,11 +1114,11 @@ class MultiHostSession:
                     "reaction_reply_enabled": reaction_reply_enabled,
                 })
             except TaskError as error:
-                return Outcome.failed(error.code, str(error))
+                return CoreReplyOutcome.from_failure(error)
             except Exception as error:
                 logger.error("[CompanionV2] 核心回复准入准备失败 target=%s error_type=%s",
                              target.target_id, type(error).__name__)
-                return Outcome.failed("host_core_reply_prepare_failed", "core reply admission could not be prepared")
+                return CoreReplyOutcome.failed("host_core_reply_prepare_failed", "core reply admission could not be prepared")
             finally:
                 if not prepared_ok and presence is not None and typing_context is not None:
                     presence.finish_native_reply(typing_context, typing_turn)
