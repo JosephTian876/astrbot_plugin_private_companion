@@ -1232,7 +1232,8 @@ window.CompanionSetup = (() => {
   };
   function legacyReceiptReason(item) {
     if (!item?.reason) return "";
-    if (item.state === "review") return legacyScopeReason(item.reason);
+    // 原因码不再由状态决定查哪张表：「没有可导入内容」现在是 review 项，
+    // 但仍要显示成人话。先查逐项回执词典，未命中再退回范围原因码。
     return LEGACY_RECEIPT_REASONS[item.reason] || legacyScopeReason(item.reason);
   }
 

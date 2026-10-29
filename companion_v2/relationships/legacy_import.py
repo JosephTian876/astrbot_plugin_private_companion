@@ -1,9 +1,15 @@
 """Fill V2's operator-managed relationship profile from reviewed V1 records.
 
-The migration only writes the three fields V1 actually recorded. A relationship
-profile belongs to one role and one person, so the person is resolved through
-the same trusted host bindings the private-contact importer uses; a missing or
-conflicting account is reported as skipped instead of being guessed.
+V1 kept three pieces of relationship data on each user record and the other four
+public profile fields in the old "user profile" prompt.  The prompt is parsed by
+``legacy.relationship_profiles.config_relationship_profile`` and passed in as a
+``seed`` for the one person it names; there is deliberately no second field map
+here, both inputs use the public ``FIELD_LIMITS`` contract.
+
+A relationship profile belongs to one role and one person, so the person is
+resolved through the same trusted host bindings the private-contact importer
+uses; a missing or conflicting account is reported as skipped instead of being
+guessed.
 
 Idempotency rule: an existing non-empty V2 value always wins. V1 fills a field
 only while that field is empty, and the target revision is checked inside the
@@ -39,8 +45,9 @@ MAPPED_FIELDS = {
     "role_relation": "role_relation",
     "extra": "extra",
 }
-# 旧配置的「用户档案」提示词还会带来性别、生日、职业和相处方式；必须按
-# 完整档案字段读取当前值，否则 mapped 出现 interaction 等键时会 KeyError。
+# Reading the whole public contract is what makes the prompt-only fields both
+# readable and writable; deriving this from MAPPED_FIELDS would silently skip
+# user_gender/user_birthday/user_occupation/interaction again.
 PROFILE_FIELDS = tuple(FIELD_LIMITS)
 
 
@@ -91,15 +98,64 @@ def _entry(profile):
     }
 
 
-def _seed_for(profile, seed):
+def _seed_values(seed):
+    """Validate the parsed prompt against the same public field contract.
+
+    ``config_relationship_profile`` already returns V2 field names, so there is
+    no second source-to-target table here: unknown names are reported (not
+    guessed), over-limit values stay dropped (never truncated), and empty values
+    are ignored exactly like the V1 user-record fields.
+    """
+    if not isinstance(seed, dict):
+        return "", {}, [], []
+    user_id = str(seed.get("user_id") or "").strip()
+    raw_fields = seed.get("fields")
+    fields, dropped, ignored = {}, [], []
+    if isinstance(raw_fields, dict):
+        for name, value in raw_fields.items():
+            if name not in FIELD_LIMITS or not isinstance(value, str):
+                ignored.append(str(name))
+                continue
+            text = value.strip()
+            if not text:
+                continue
+            if len(text) > FIELD_LIMITS[name]:
+                dropped.append(name)
+                continue
+            fields[name] = text
+    # The prompt parser already dropped over-limit fields. Keep those reportable
+    # for the matching person instead of losing why a field is absent.
+    for name in seed.get("dropped") or ():
+        if name in FIELD_LIMITS and name not in dropped:
+            dropped.append(name)
+    return user_id, fields, dropped, ignored
+
+
+def relationship_seed_state(seed):
+    """JSON-safe identity of the parsed prompt for the migration plan token.
+
+    ``relationship_profile_token`` hashes field *names* only, so a value edited
+    between preview and apply would otherwise validate against the same token.
+    Including the normalized seed keeps both stages on the same parsed input.
+    """
+    user_id, fields, dropped, ignored = _seed_values(seed)
+    if not user_id or not (fields or dropped or ignored):
+        return {}
+    return {
+        "user_id": user_id,
+        "fields": fields,
+        "dropped": sorted(dropped),
+        "ignored": sorted(ignored),
+    }
+
+
+def _seed_matches(profile, seed_user_id):
     """这条档案记录是否就是配置里写到的主要陪伴对象。"""
-    if not seed or not seed.get("fields"):
-        return None
-    user_id = str(seed.get("user_id") or "")
-    if not user_id:
-        return None
-    known = {str(profile.get("user_id") or ""), *(str(item) for item in profile.get("user_ids") or ())}
-    return seed if user_id in known else None
+    if not seed_user_id:
+        return False
+    known = {str(profile.get("user_id") or ""),
+             *(str(item) for item in profile.get("user_ids") or ())}
+    return seed_user_id in known
 
 
 def relationship_profile_entries(runtime, context, profiles, *, seed=None):
@@ -113,6 +169,9 @@ def relationship_profile_entries(runtime, context, profiles, *, seed=None):
         return ()
     owner = RelationshipProfileConfigurationOwner(runtime)
     fields = configuration_fields()
+    seed_user_id, seed_fields, seed_dropped, seed_ignored = _seed_values(seed)
+    seed_source_fields = (list(seed.get("source_fields") or ())
+                          if isinstance(seed, dict) else [])
     entries = []
     for profile in profiles:
         entry = _entry(profile)
@@ -131,12 +190,13 @@ def relationship_profile_entries(runtime, context, profiles, *, seed=None):
             continue
         entry["subject_id"] = subject_id
         mapped, dropped = _mapped_changes(profile)
-        seeded = _seed_for(profile, seed)
-        if seeded is not None:
-            for name, value in seeded["fields"].items():
+        if _seed_matches(profile, seed_user_id):
+            for name, value in seed_fields.items():
                 mapped.setdefault(name, value)
-            entry["source_fields"].extend(seeded.get("source_fields") or ())
-            dropped = list(dict.fromkeys((*dropped, *(seeded.get("dropped") or ()))))
+            entry["source_fields"].extend(seed_source_fields)
+            dropped = list(dict.fromkeys((*dropped, *seed_dropped)))
+            if seed_ignored:
+                entry["warnings"].append("relationship_profile_seed_field_ignored")
         entry["dropped"] = dropped
         if not mapped:
             entry["reason"] = ("relationship_profile_field_too_long" if dropped
@@ -144,7 +204,7 @@ def relationship_profile_entries(runtime, context, profiles, *, seed=None):
             continue
         try:
             snapshot, current = _read_values(owner, fields, relationship_target(context, subject_id))
-        except (ConfigurationError, ValueError) as error:
+        except (ConfigurationError, ValueError, KeyError) as error:
             entry["reason"] = getattr(error, "code", "relationship_profile_target_invalid")
             continue
         changes = {name: value for name, value in mapped.items() if not current[name].strip()}
@@ -240,7 +300,11 @@ def import_relationship_profiles(runtime, context, entries, at):
                 snapshot, current = _read_values(owner, fields, target)
                 changes = {f"{GROUP}.{name}": value for name, value in entry["changes"].items()
                            if not current[name].strip()}
-                preserved = [name for name in entry["changes"] if current[name].strip()]
+                # Report what the preview already promised to keep, plus any
+                # field another writer filled between preview and this write.
+                preserved = list(dict.fromkeys(
+                    name for name in (*entry["preserved"], *entry["changes"])
+                    if current[name].strip()))
                 if changes:
                     written = owner.write(
                         target, fields, changes=changes, reset=(),

@@ -100,6 +100,17 @@ def logger_safe_detail(text: str) -> str:
     """日志里保留错误形状，抹掉绝对路径。"""
     return _WINDOWS_PATH.sub("<path>", str(text))[:200]
 
+
+def batch_group_receipt_state(code: str) -> str:
+    """批量迁移里单个群的回执状态。
+
+    ``legacy_nothing_to_import`` 表示这个 V1 群只有一条空关系网行、也没有群知识或
+    群表达可导入：**没有失败**，只是没有东西要写。把它记成 ``failed`` 会让操作者
+    去找一条并不存在的错误，因此归到 ``review``（回执文案是「没有可导入内容」，
+    不会自动写任何东西）。其余错误码仍然如实记成 ``failed``。
+    """
+    return "review" if code == "legacy_nothing_to_import" else "failed"
+
 MEMORY_PLUGIN_DATA_NAME = "astrbot_plugin_memory_companion"
 _NO_ACCOUNT_CHANGE = object()
 
@@ -252,13 +263,35 @@ class LegacyMigrationWebAPI:
             return None, "unreadable"
         return loaded, "" if loaded is not None else "unreadable"
 
-    def _relationship_config_seed(self):
+    def _relationship_seed_configuration(self, migration):
+        """「用户档案」提示词该从哪一份配置里读。
+
+        ``migration.v1_configuration`` 就是 ``build_data_plan`` 用的那份快照，正常情况下
+        一律用它：预览和执行各读一次宿主文件会得到两份不同的 seed，计划令牌也就无法
+        证明用户看到的就是将要写入的。
+
+        只有迁移对象**完全没有**携带宿主配置时（直接由 V1 数据根转储构造的迁移）才回退
+        读一次宿主配置，否则「用户档案」提示词里的性别、生日、职业、相处方式会被静默
+        丢掉。回退路径同样受计划令牌约束：``relationship_seed_state`` 把解析后的 seed 算进
+        令牌，两次读取不一致时执行会以 ``legacy_plan_stale`` 拒绝，而不是写出一份没预览过
+        的档案。
+        """
+        configuration = getattr(migration, "v1_configuration", None)
+        if isinstance(configuration, dict) and configuration:
+            return configuration
+        return self._v1_host_configuration()
+
+    def _relationship_config_seed(self, configuration):
         """旧版配置里的「用户档案」提示词 → 主要陪伴对象的关系档案种子。
 
         用户库里没有性别、生日、职业、相处方式；这些只存在于这份提示词里，
         读不到就返回 None，迁移预览不会因此多出一条空记录。
+
+        ``configuration`` 必须是本次迁移实际使用的那份配置快照
+        （``migration.v1_configuration``，也就是传给 ``build_data_plan`` 的同一份，
+        统一由 ``_relationship_seed_configuration`` 取）。这里刻意不给默认值：
+        少传一次就读成另一份，正是要避免的那个缺陷。
         """
-        configuration = self._v1_host_configuration()
         if not isinstance(configuration, dict):
             return None
         target_ids = v1_setting(configuration, "basic_config.target_user_ids", None)
@@ -580,7 +613,19 @@ class LegacyMigrationWebAPI:
 
     @staticmethod
     def _group_import_arguments(root, key, plan):
-        """Build one group import request; skip worldbook when the plan has none."""
+        """Request only the group sections V1 actually has.
+
+        The explicit single-group page applies the same rule from its preview
+        (``setup-guide.js`` gates the worldbook checkbox on entries+members and
+        the expression checkbox on availability). The batch calls the importer
+        directly, so it must derive the same flags from the reviewed plan: an
+        empty worldbook is not a request the importer can satisfy, and asking
+        for it used to fail a group that only had a relationship network.
+
+        The plan comes from the host, so the fields read below are validated
+        first: an unusable plan is one receipt (``legacy_group_plan_invalid``)
+        instead of a traceback that escapes the batch.
+        """
         if (not isinstance(plan, dict) or type(plan.get("plan_token")) is not str
                 or not plan["plan_token"]):
             raise ValueError("legacy_group_plan_invalid")
@@ -591,12 +636,21 @@ class LegacyMigrationWebAPI:
         if (not isinstance(worldbook, dict) or not isinstance(expression, dict)
                 or type(expression.get("available")) is not bool):
             raise ValueError("legacy_group_plan_invalid")
+        network = plan.get("source_group_network") or {}
+        if not isinstance(network, dict):
+            raise ValueError("legacy_group_plan_invalid")
         return {
-            "v1_root": str(root), "source_persona_id": key[0],
-            "source_group_id": key[1], "plan_token": plan["plan_token"],
-            "import_group_network": True, "confirm_group_mapping": True, "confirm_member_ids": True,
+            "v1_root": str(root),
+            "source_persona_id": key[0],
+            "source_group_id": key[1],
+            "plan_token": plan["plan_token"],
+            # Group networks are imported per (persona, group); an expression-only
+            # V1 group still produces a zero-count row, which is not a network.
+            "import_group_network": bool(network.get("member_count") or network.get("edge_count")),
+            "confirm_group_mapping": True,
+            "confirm_member_ids": True,
             "import_group_worldbook": bool(worldbook.get("entries") or worldbook.get("members")),
-            "import_group_expression": expression["available"],
+            "import_group_expression": bool(expression.get("available")),
             "confirm_expression_mapping": True,
         }
 
@@ -644,21 +698,33 @@ class LegacyMigrationWebAPI:
                                         getattr(self.controller, "role_id", ""))
             try:
                 target, group_session = await asyncio.to_thread(api._target)
-            except TaskError as error:
+                plan = await asyncio.to_thread(api._plan, root, key[0], key[1], target, group_session)
+                try:
+                    group_arguments = self._group_import_arguments(root, key, plan)
+                except (KeyError, TypeError, ValueError):
+                    # The reviewed plan cannot be turned into an import request;
+                    # that is this group's receipt, with its own error code.
+                    items.append({"kind": "group", "persona_id": key[0], "group_id": key[1],
+                                  "state": "failed", "reason": "legacy_group_plan_invalid"})
+                    continue
+                response = await asyncio.to_thread(
+                    api.apply_import, group_arguments, root, target, group_session)
+            except Exception as error:  # noqa: BLE001 - one group must not stop the rest
+                # A plan/apply exception is this group's receipt, not the end of
+                # the batch: the next group has its own transaction and target.
+                logger.warning("[CompanionV2] 群迁移条目失败 group=%s error_type=%s",
+                               logger_safe_detail(key[1]), type(error).__name__)
                 items.append({"kind": "group", "persona_id": key[0], "group_id": key[1],
-                              "state": "failed", "reason": error.code})
+                              "state": "failed",
+                              "reason": getattr(error, "code", type(error).__name__)})
                 continue
-            plan = await asyncio.to_thread(api._plan, root, key[0], key[1], target, group_session)
-            try:
-                group_arguments = self._group_import_arguments(root, key, plan)
-            except (KeyError, TypeError, ValueError):
-                items.append({"kind": "group", "persona_id": key[0], "group_id": key[1],
-                              "state": "failed", "reason": "legacy_group_plan_invalid"})
-                continue
-            response = await asyncio.to_thread(api.apply_import, group_arguments, root, target, group_session)
+            code = (response.get("data") or {}).get("code") if isinstance(
+                response.get("data"), dict) else None
+            code = code or response.get("message")
+            imported = response.get("status") == "ok"
             items.append({"kind": "group", "persona_id": key[0], "group_id": key[1],
-                          "state": "imported" if response.get("status") == "ok" else "failed",
-                          "reason": None if response.get("status") == "ok" else response.get("message"),
+                          "state": "imported" if imported else batch_group_receipt_state(code),
+                          "reason": None if imported else code,
                           "result": response.get("data")})
         counts = {"imported": sum(1 for item in items if item["state"] == "imported"),
                   "review": sum(1 for item in items if item["state"] == "review"),
@@ -1011,7 +1077,7 @@ class LegacyMigrationWebAPI:
                        existing_worldbook=None, archive_inventory_fingerprint="",
                          memory_database_fingerprint="", memory_owner_ids=(), memory_group_mappings=(),
                          reference_state=None, expression_state=None, contact_state=None,
-                         relationship_state=None):
+                         relationship_state=None, relationship_seed=None):
         scope = context.scope
         material = {
             "source": data_plan.source_fingerprint,
@@ -1039,6 +1105,7 @@ class LegacyMigrationWebAPI:
             "expression_state": expression_state or {},
             "private_contacts": contact_state or {},
             "relationship_profiles": relationship_state or {},
+            "relationship_seed": relationship_seed or {},
         }
         encoded = json.dumps(material, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -1082,13 +1149,15 @@ class LegacyMigrationWebAPI:
             self.controller.runtime, context, data_plan.private_contacts, self.controller.now())
         document["private_contacts"] = {**contact_state, "rejected": list(data_plan.private_contact_rejected)}
         from companion_v2.relationships.legacy_import import (
-            relationship_profile_entries, relationship_profile_plan, relationship_profile_token)
-        relationship_seed = self._relationship_config_seed()
+            relationship_profile_entries, relationship_profile_plan, relationship_profile_token,
+            relationship_seed_state)
+        relationship_seed = self._relationship_config_seed(self._relationship_seed_configuration(migration))
         relationship_entries = relationship_profile_entries(
             self.controller.runtime, context, data_plan.relationship_profiles,
             seed=relationship_seed)
         relationship_state = relationship_profile_plan(relationship_entries)
         relationship_token = relationship_profile_token(relationship_entries)
+        relationship_seed_token = relationship_seed_state(relationship_seed)
         document["relationship_profiles"] = {**relationship_state,
             "rejected": list(data_plan.relationship_profile_rejected)}
         document["archive"] = archive_plan.document()
@@ -1142,7 +1211,9 @@ class LegacyMigrationWebAPI:
                                                 worldbook_state, archive_plan.inventory_fingerprint,
                                                 memory_plan.fingerprint, memory_owner_ids,
                                                 memory_group_mappings, reference_state, expression_state,
-                                                contact_state, relationship_token),
+                                                contact_state,
+                                                relationship_state=relationship_token,
+                                                relationship_seed=relationship_seed_token),
         })
         document["worldbook"]["available_count"] = (
             document["worldbook"]["general_count"]
@@ -1531,17 +1602,21 @@ class LegacyMigrationWebAPI:
             self.controller.runtime, context, data_plan.private_contacts, self.controller.now())
         from companion_v2.relationships.legacy_import import (
             import_relationship_profiles as import_legacy_relationship_profiles,
-            relationship_profile_entries, relationship_profile_token)
+            relationship_profile_entries, relationship_profile_token, relationship_seed_state)
+        relationship_seed = self._relationship_config_seed(self._relationship_seed_configuration(migration))
         relationship_entries = relationship_profile_entries(
             self.controller.runtime, context, data_plan.relationship_profiles,
-            seed=self._relationship_config_seed())
+            seed=relationship_seed)
         relationship_token = relationship_profile_token(relationship_entries)
+        relationship_seed_token = relationship_seed_state(relationship_seed)
         if plan_token != self._data_plan_token(data_plan, context, service, source_group_id,
                                                source_persona_id, existing_ids, existing_heads,
                                                worldbook_state, archive_plan.inventory_fingerprint,
                                                memory_plan.fingerprint, memory_owner_ids,
                                                memory_group_mappings, reference_state, expression_state,
-                                               contact_state, relationship_token):
+                                               contact_state,
+                                               relationship_state=relationship_token,
+                                               relationship_seed=relationship_seed_token):
             return Outcome.failed("legacy_plan_stale", "V1 来源或 V2 目标在预览后发生变化，请重新试算。")
         from companion_v2.foundation.refs import ScopeKind
         if import_private_contacts and context.scope.kind is not ScopeKind.PRIVATE:
