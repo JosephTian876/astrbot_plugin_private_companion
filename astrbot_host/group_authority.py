@@ -50,14 +50,20 @@ class GroupAuthority:
             if resolved.selected.binding_id != identifier or resolved.binding.role != role:
                 raise TaskError("host_persona_binding_changed", "the configured group role binding changed")
             # Private memory/life/action grants are never inherited from private targets.
+            # Provision every missing grant first: issuing advances the identity
+            # policy revision, so the checks below must use an actor resolved
+            # after the writes rather than this pre-provision snapshot.
             for capability in sorted(REQUIRED_CAPABILITIES | OPTIONAL_CAPABILITIES):
                 grant = self.grant_id(scope, actor.subject, capability)
                 if authority.runtime.read_one("SELECT 1 FROM identity_grants WHERE grant_id = ?", (grant,)) is None:
                     authority.identities.issue_grant(grant_id=grant, subject=actor.subject, scope=scope,
                         capability=capability, tier=AuthorizationTier.STANDARD, valid_from=at,
                         expected_revision=authority.identities.revision)
+            actor = authority.actor(target, principal.native_account_id)
+            for capability in sorted(REQUIRED_CAPABILITIES | OPTIONAL_CAPABILITIES):
                 if capability in OPTIONAL_CAPABILITIES:
                     continue  # Revoked optional tool rights do not block ordinary group conversation.
+                grant = self.grant_id(scope, actor.subject, capability)
                 access = require(authority.identities.authorize(actor, scope=scope, capability=capability, observed_at=authority.now()))
                 if access.grant_id != grant:
                     raise TaskError("host_grant_changed", "the original group grant is no longer current")

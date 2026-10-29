@@ -293,6 +293,19 @@ def _source_precedence_conflict(config: dict, source: str) -> bool:
     return source in config and nested != config[source]
 
 
+def _task_provider_target(target: str) -> bool:
+    """Whether one V2 field *is* a model task's provider selection."""
+    return target.startswith("model.") and target.endswith(".provider")
+
+
+def _unset_provider(value: object) -> bool:
+    """Whether a legacy provider value means "follow the default".
+
+    V1 spelled the default route as nothing at all, an empty string, or blanks.
+    """
+    return value is None or isinstance(value, str) and not value.strip()
+
+
 def _boolean(value):
     if type(value) is bool:
         return value
@@ -1054,6 +1067,10 @@ def convert_configuration(config, *, registry, rules=None, window_kind=None) -> 
 
     Ambiguous aliases are accepted only when their converted values agree. Unknown,
     invalid, or unregistered values are reported and left out of the write intents.
+
+    A blank V1 ``model.*.provider`` means "follow the default" and stays unset, so the
+    host conversation or task profile default still applies downstream; blank values of
+    every other field migrate as written because those may be deliberate.
     """
     if not isinstance(config, dict):
         return ConfigurationMigration({}, {}, {}, (
@@ -1094,10 +1111,13 @@ def convert_configuration(config, *, registry, rules=None, window_kind=None) -> 
         present, raw = _source_value(config, source)
         if not present:
             continue
-        if (rule["target"].startswith("model.") and rule["target"].endswith(".provider")
-                and (raw is None or (isinstance(raw, str) and not raw.strip()))):
-            # 旧版空 provider 表示跟随默认；写成显式空值会覆盖任务档默认的
-            # 主 provider，导致调路由时拿不到可用适配器。
+        if _task_provider_target(rule["target"]) and _unset_provider(raw):
+            # V1 wrote "follow the default" as a blank provider.  V2 separates unset
+            # (no source → the host conversation or task profile default applies) from
+            # an explicit empty value (the provider lookup fails with
+            # model_provider_unavailable), so a blank must not become an explicit
+            # change here.  Only ``model.*.provider`` carries that meaning: a blank in
+            # any other field may be deliberate and must still migrate.
             continue
         if _source_precedence_conflict(config, source):
             differences.append(ConfigurationDifference(

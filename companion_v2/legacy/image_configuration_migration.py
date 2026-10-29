@@ -72,6 +72,10 @@ _PLATFORM_ALIASES = {
     "minimaxi": "minimax", "minimax-ai": "minimax", "minimax_ai": "minimax", "海螺": "minimax",
     "agnes-ai": "agnes", "agnes_ai": "agnes", "agnes-image": "agnes", "sapiens": "agnes",
 }
+# V1 never exposed an image quality knob.  A migrated endpoint therefore starts
+# on the service default instead of claiming ``standard``, a value only older
+# dall-e models accept; a quality the operator did write is kept as is.
+_IMAGE_QUALITIES = frozenset({"auto", "low", "medium", "high", "standard", "hd"})
 
 
 @dataclass(frozen=True)
@@ -247,6 +251,12 @@ def _endpoints(raw, *, reference_images, source, differences):
             ratio = str(item.get("ratio", item.get("aspect_ratio", "")) or "").strip()
             if ratio and not re.fullmatch(r"\d{1,5}:\d{1,5}", ratio):
                 raise ValueError("画面比例格式无效")
+            quality = str(item.get("quality", item.get("image_quality", "")) or "").strip().lower()
+            if quality and quality not in _IMAGE_QUALITIES:
+                differences.append({"field": f"image.output.endpoints.{index + 1}.quality",
+                                    "kind": "invalid_value",
+                                    "explain": "旧配置中的图片质量不属于 V2 支持的取值，已改为服务端默认。"})
+                quality = ""
         except (TypeError, ValueError, OverflowError) as error:
             differences.append({"field": f"image.output.endpoints.{index + 1}", "kind": "invalid_value",
                                 "explain": f"端点已保留为待核对项，未迁入执行队列：{error}。"})
@@ -254,7 +264,8 @@ def _endpoints(raw, *, reference_images, source, differences):
         result.append({
             "id": f"legacy-image-{index + 1:02d}", "name": name, "enabled": enabled,
             "platform": platform, "model": model, "width": width, "height": height,
-            "quality": "standard", "max_reference_images": 1 if reference_images else 0,
+            "quality": quality, "response_format": "",
+            "max_reference_images": 1 if reference_images else 0,
             "base_url": base_url, "api_key": api_key, "timeout_seconds": timeout,
             "custom_headers": headers, "ratio": ratio, "size_label": size_label,
         })

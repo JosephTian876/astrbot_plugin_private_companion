@@ -416,12 +416,10 @@ class ExternalToolExecutor:
                                                self.tasks.now(), run.task.spec.deadline_at)))
         try:
             result = require(await self.runner.run(run.task.spec.context, child_id)).task
-            if result.state in ("created", "retry_scheduled"):
-                # No slot: retire this exact child now so a queue sweep cannot dispatch it later.
-                require(self.tasks.cancel(run.task.spec.context, child_id, expected_revision=result.revision))
-                self._not_dispatched(identifier, "external_capacity_unavailable")
-            elif self._row(identifier)["state"] == "queued":
-                self._not_dispatched(identifier, "external_not_started")
+            if self._row(identifier)["state"] == "queued":
+                # The exact child never started, so a queue sweep must not dispatch it later.
+                self._not_dispatched(identifier, "external_capacity_unavailable" if result.state == "cancelled"
+                                     else "external_not_started")
             return self.snapshot(self._row(identifier), run.task.spec.context, self.tasks.now())[0]
         except BaseException:
             self._unknown(identifier)
@@ -485,11 +483,10 @@ class ExternalToolExecutor:
                 identifier, self.tasks.now(), run.task.spec.deadline_at)))
         try:
             result = require(await self.runner.run(run.task.spec.context, child_id)).task
-            if result.state in ("created", "retry_scheduled"):
-                require(self.tasks.cancel(run.task.spec.context, child_id, expected_revision=result.revision))
-                self._not_dispatched(identifier, "external_capacity_unavailable")
-            elif self._row(identifier)["state"] == "queued":
-                self._not_dispatched(identifier, "external_not_started")
+            if self._row(identifier)["state"] == "queued":
+                # The exact child never started, so a queue sweep must not dispatch it later.
+                self._not_dispatched(identifier, "external_capacity_unavailable" if result.state == "cancelled"
+                                     else "external_not_started")
             return self.snapshot(self._row(identifier), run.task.spec.context, self.tasks.now())
         except BaseException:
             self._unknown(identifier)

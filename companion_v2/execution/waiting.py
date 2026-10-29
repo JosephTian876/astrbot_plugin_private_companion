@@ -59,6 +59,28 @@ class BackgroundTaskQueue:
             elif current.unwrap().state not in QUEUED:
                 future.set_result(result)
 
+    @staticmethod
+    def _settled(future):
+        return future.result() if future.done() and not future.cancelled() else None
+
+    def _retire(self, task_id, future, *, interrupted):
+        """Release a queue reservation this waiter will never honour.
+
+        The caller's prepared inputs die with the invocation that submitted them,
+        so the reservation cannot be served later. Keep the actual cause: a
+        resolved refusal keeps its own code, and an interrupted wait names its own
+        condition, instead of relabelling every case as a generic owner shutdown.
+        """
+        settled = self._settled(future)
+        claim = settled.unwrap().claim if settled is not None and settled.is_success else None
+        if claim is not None:
+            # Another waiter allocated our claim before our runner could begin it.
+            self.supervisor.abandon(claim, reason="runner_cancelled")
+            return
+        code = interrupted or (
+            settled.failure.code if settled is not None and settled.failure is not None else None)
+        self.supervisor.discard_queued(task_id, reason="owner_unavailable", code=code)
+
     async def claim(self, context, task_id):
         current = self.supervisor.read(context, task_id)
         if current.failure:
@@ -70,24 +92,21 @@ class BackgroundTaskQueue:
         future = asyncio.get_running_loop().create_future()
         self._pending[task_id] = (context, future)
         self._next_poll = 0.0
-        handed_off = False
         try:
             while not future.done():
                 self._advance()
                 if not future.done():
                     await asyncio.wait((future,), timeout=self.interval)
-            result = future.result()
-            handed_off = result.is_success and result.unwrap().claim is not None
-            return result
+        except asyncio.CancelledError:
+            self._retire(task_id, future, interrupted="owner_unavailable")
+            raise
+        except BaseException:
+            self._retire(task_id, future, interrupted="task_claim_interrupted")
+            raise
         finally:
             self._pending.pop(task_id, None)
             self._next_poll = 0.0
-            if not handed_off:
-                result = future.result() if future.done() else None
-                claim = result.unwrap().claim if result is not None and result.is_success else None
-                if claim is not None:
-                    # Cancellation can arrive after another waiter allocated our
-                    # claim, before our runner begins it. No worker exists yet.
-                    self.supervisor.abandon(claim, reason="runner_cancelled")
-                else:
-                    self.supervisor.discard_queued(task_id, reason="owner_unavailable")
+        result = future.result()
+        if not (result.is_success and result.unwrap().claim is not None):
+            self._retire(task_id, future, interrupted=None)
+        return result

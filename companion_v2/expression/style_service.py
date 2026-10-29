@@ -291,15 +291,10 @@ class ExpressionStyleService:
                 raise
         try:
             result = require(await self.runner.run(context, identifier))
-            if result.task.state in ("created", "retry_scheduled"):
-                require(self.tasks.discard_queued(identifier, reason="owner_unavailable"))
             report = {"state": result.task.state, "task_id": identifier, "code": result.task.reason}
             self.results[work_key] = report
             return report
         finally:
-            current = self.tasks.read(context, identifier)
-            if current.is_success and current.unwrap().state in ("created", "retry_scheduled"):
-                self.tasks.discard_queued(identifier, reason="owner_unavailable")
             self.pending.pop(identifier, None)
             self.committed.discard(identifier)
 

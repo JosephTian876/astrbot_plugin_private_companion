@@ -58,7 +58,7 @@ from companion_v2.storage.repositories import OperationRepository
 from .application import AstrBotCompanionHost
 from .tools import CompositeAstrBotToolPort
 from .native import HostAccount, HostPersona, NativePrivateBridge, check_version, persona_instruction, route_id
-from .provider import AstrBotTextProvider, UsageTariff, provider_fingerprint
+from .provider import AstrBotTextProvider, REPLY_TASK_CAPABILITIES, UsageTariff, provider_fingerprint
 from .provider_catalog import TextProviderSettings, assemble_providers, loaded_routing
 from .staging_config import DELIVERY_CAPABILITY, DELIVERY_GRANT_ID
 from .staging_delivery import delivery_grants, require_delivery_access
@@ -295,7 +295,7 @@ class AstrBotStagingSession:
         self.model_profile = ModelTaskProfile(REPLY_KIND, Lane.FOREGROUND, profile.provider_id,
             profile.task_prompt, default_fallback=fallback_provider_id, replacement_rules=replacement_rules,
             fallback_on_refusal=fallback_on_refusal,
-            max_output_tokens=profile.max_output_tokens, capabilities=("text", "tools"),
+            max_output_tokens=profile.max_output_tokens, capabilities=REPLY_TASK_CAPABILITIES,
             prompt_sections=expression_prompt_sections())
         self.writing_profiles = writing_profiles(profile.provider_id, max_output_tokens=profile.max_output_tokens)
         self.reading_profile = reading_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens)

@@ -1244,13 +1244,18 @@ class AstrBotMultiController:
             logger.error("[CompanionV2] 核心命令处理失败 error_type=%s", type(error).__name__)
             return Outcome.failed("host_core_command_failed", "the core command could not be processed")
 
-    async def refuse_core_reply(self, event):
-        """Send the configured private denial notice recorded during core admission."""
+    async def refuse_core_reply(self, event, context=None):
+        """Send the denial notice that this exact event produced.
+
+        ``context`` must come from the failed preparation of the same event.
+        It is deliberately not read from the shared session: two Bot accounts
+        can be refused concurrently, and one must never send the other's copy
+        or clear its cooldown bookmark.
+        """
         session = self.session
-        context = getattr(session, "last_refusal", None) if session is not None else None
         if session is None or context is None or context.scope.kind is not ScopeKind.PRIVATE:
             return None
-        return await self._refuse_private(session, event)
+        return await self._refuse_private(session, event, context)
 
     async def receive_claimed(self, event, *, on_refusal=None, group_admission=None):
         session, target = self.session, self.target_for_event(event)
@@ -1264,24 +1269,34 @@ class AstrBotMultiController:
             result = await session.receive(event, target, group_admission=group_admission)
             if result.failure is not None and result.failure.code == "private_access_dialogue_denied":
                 # 没有对话权限：按配置回一句（真实投递模式才发）。发送失败不影响"拒绝"本身。
-                receipt = await self._refuse_private(session, event)
+                # The context travels on this result, never through a shared slot.
+                receipt = await self._refuse_private(
+                    session, event, getattr(result, "refusal", None))
                 if callable(on_refusal):
                     on_refusal(receipt)
             return result
         except Exception as error:
             return self._failure(error)
 
-    async def _refuse_private(self, session, event):
-        """一句话的礼拒；任何失败都只当"没回话"，不改写拒绝结论。"""
+    async def _refuse_private(self, session, event, context):
+        """一句话的礼拒；任何失败都只当"没回话"，不改写拒绝结论。
+
+        The caller must pass the context that belongs to this event.  A context
+        for another configured route is discarded instead of being delivered
+        to the wrong Bot account.
+        """
         from .private_notice import notify_refusal
 
+        if context is None or context.scope.kind is not ScopeKind.PRIVATE:
+            return None
         try:
-            return await notify_refusal(self, session, event,
-                                        context=getattr(session, "last_refusal", None))
+            target = self.target_for_event(event)
+            if target is None or session.bridge.target_for_scope(context.scope) != target:
+                logger.warning("[CompanionV2] 私聊礼拒上下文与当前事件路由不一致，放弃发送")
+                return None
+            return await notify_refusal(self, session, event, context=context)
         except (TaskError, ValueError, TypeError, AttributeError, KeyError):
             return None
-        finally:
-            session.last_refusal = None
 
     async def authorize_delivery(self, target_id):
         async with self._control_lock:

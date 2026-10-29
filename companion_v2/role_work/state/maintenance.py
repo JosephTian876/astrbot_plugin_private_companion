@@ -608,8 +608,6 @@ class StateMaintenance:
             require(self.tasks.submit(TaskSpec(key, context, KIND, digest(job), request_id,
                 job["at"], job["at"] + timedelta(seconds=180))))
             result = require(await self.runner.run(context, key))
-            if result.task.state in ("created", "retry_scheduled"):
-                require(self.tasks.discard_queued(key, reason="owner_unavailable"))
             task = require(self.tasks.read(context, key))
             response = {"task_id": key, "state": task.state, "reason": task.reason}
             if result.retry_at is not None:

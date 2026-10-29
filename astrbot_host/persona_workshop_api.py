@@ -276,8 +276,27 @@ class PersonaWorkshopWebAPI:
                 return provider
         raise TaskError("role_profile_model_unavailable", "the selected provider is not loaded")
 
+    @staticmethod
+    def _session_provider_id(session):
+        """The model provider this host session is actually bound to.
+
+        The two host topologies keep it in different places.  A multi-account host
+        shares one provider across every Bot account and holds it on
+        ``settings.common.provider_id``; the single-target staging session pins it on
+        its ``profile``.  ``MultiHostSession`` has no ``profile`` attribute at all, so
+        reading only the profile raised ``AttributeError`` for every multi-account
+        request.  An unusable value returns ``""`` so the caller can say why instead of
+        comparing against a missing attribute.
+
+        Delegates to the module-level helper so there is a single implementation:
+        the host-facing function also strips the configured id (upstream 0c8c5e2),
+        and a second copy inside the class would silently drift from it.
+        """
+        return _session_provider_id(session)
+
     @classmethod
-    def _text_provider(cls, controller, authorized_session=None, provider_id=""):
+    def _text_provider(cls, controller, authorized_session=None, provider_id="",
+                       message="the selected model cannot create persona drafts"):
         if provider_id:
             provider = cls._provider_for_id(controller, provider_id)
             owner = getattr(controller, "controller", controller)
@@ -288,9 +307,16 @@ class PersonaWorkshopWebAPI:
         model = getattr(model_session, "model", None)
         provider = getattr(model, "native", None)
         provider_id = getattr(model, "provider_id", "")
-        if (model is None or provider is None or provider_id != _session_provider_id(model_session)
+        selected = cls._session_provider_id(model_session)
+        if not selected:
+            # Nothing usable on either topology: name the reason, so the page shows a
+            # diagnosable failure instead of a generic "draft failed" from the broad
+            # handler below.
+            raise TaskError("role_profile_model_unavailable",
+                            "this host session has no model provider selected")
+        if (model is None or provider is None or provider_id != selected
                 or not callable(getattr(provider, "text_chat", None))):
-            raise TaskError("role_profile_model_unavailable", "the selected model cannot create persona drafts")
+            raise TaskError("role_profile_model_unavailable", message)
         model._current()
         return provider, (authorized_session or model_session).application
 
@@ -434,7 +460,9 @@ class PersonaWorkshopWebAPI:
                 application = session.application
                 owner = getattr(controller, "controller", controller)
                 model_session = owner.session or owner.last_session
-                provider, _ = self._text_provider(controller, session, provider_id=requested_provider_id)
+                provider, _ = self._text_provider(
+                    controller, session, provider_id=requested_provider_id,
+                    message="the selected model cannot create a profile draft")
                 provider_id = requested_provider_id or str(
                     getattr(getattr(model_session, "model", None), "provider_id", "") or "")
                 try:
@@ -803,19 +831,11 @@ class PersonaWorkshopWebAPI:
                     raise TaskError("host_persona_invalid", "the selected AstrBot persona has no usable prompt")
                 if len(working_source) > 30000:
                     raise TaskError("persona_standardization_source_too_large", "the selected persona is too large")
-                owner = getattr(controller, "controller", controller)
-                model_session = owner.session or owner.last_session
-                model = getattr(model_session, "model", None)
-                provider = getattr(model, "native", None)
-                provider_id = getattr(model, "provider_id", "")
-                if (model is None or provider is None or provider_id != _session_provider_id(model_session)
-                        or not callable(getattr(provider, "text_chat", None))):
-                    raise TaskError("role_profile_model_unavailable", "the selected model cannot create a persona draft")
-                model._current()
+                provider, application = self._text_provider(
+                    controller, session, message="the selected model cannot create a persona draft")
                 prompt = build_persona_standardization_prompt(working_source, answers, strength=strength,
                                                               reference_material=reference_material)
                 context_key = session.profile.target.key
-                application = session.application
                 selected_model = provider
 
             try:

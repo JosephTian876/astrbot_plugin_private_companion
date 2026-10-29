@@ -204,6 +204,34 @@ def looks_like_text_provider(native):
     return (callable(getattr(native, "_query", None))
             and callable(getattr(native, "get_model", None))
             and isinstance(getattr(native, "provider_config", None), dict))
+#: 主回复任务的模型能力要求：只需要文本。
+#:
+#: “能不能用工具”是**每一轮**的运行时决定（``model_gateway/service.py`` 在真的要
+#: 提供工具目录时单独检查），不是整轮任务的能力合同。把它写进任务 profile 会让
+#: AstrBot 里完全合法的“视觉模型但没勾工具使用”“纯文本模型”直接变成
+#: “这个模型不能回复”。
+REPLY_TASK_CAPABILITIES = ("text",)
+
+
+def host_capabilities(provider_config):
+    """由 AstrBot Provider 的 ``modalities`` 推出 V2 的本地能力集。
+
+    宿主契约（4.28.1 与 4.29.1 逐行一致，见 ``astr_main_agent`` /
+    ``tool_loop_agent_runner`` / ``utils/migra_helper``）：
+
+    * 文本是本底能力。宿主全仓没有 ``"text" in modalities`` 这类判定，
+      ``text`` 只是面板上的惰性复选框，因此这里恒定带上 ``"text"``；
+    * ``[]`` 是宿主迁移无条件写入的“未配置、不限制”，键缺失同义，两者都给全能力；
+    * 只有 ``tool_use`` / ``image`` / ``audio`` 是 ``modalities`` 授予的可选能力；
+    * 其它值（手改配置、宿主未来新增模态）一律忽略：宁可诚实少一项可选能力，
+      也不构造空集合让 ``LocalProvider`` 在装配期抛 ``ValueError``。
+    """
+    declared = provider_config.get("modalities")
+    if not isinstance(declared, list) or not declared:
+        return ("text", "tools", "image", "audio")
+    declared = {value for value in declared if isinstance(value, str)}
+    return ("text",) + tuple(capability for modality, capability in (
+        ("tool_use", "tools"), ("image", "image"), ("audio", "audio")) if modality in declared)
 
 
 class AstrBotTextProvider:
@@ -256,11 +284,7 @@ class AstrBotTextProvider:
         self.local_provider()
 
     def local_provider(self):
-        modalities = self.config.get("modalities")
-        capabilities = (tuple(capability for modality, capability in (
-            ("text", "text"), ("tool_use", "tools"), ("image", "image"), ("audio", "audio"))
-            if modality in modalities) if isinstance(modalities, list) and modalities
-            else ("text", "tools", "image", "audio"))
+        capabilities = host_capabilities(self.config)
         transport = ("astrbot_openai" if self.kind == "openai" else
                      "astrbot_gemini" if self.kind == "gemini" else "astrbot_native")
         return LocalProvider(self.binding, capabilities, self.maximum_output_tokens,

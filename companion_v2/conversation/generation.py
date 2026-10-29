@@ -486,6 +486,13 @@ class LocalReplyGenerator:
         participation = getattr(tools, "group_participation", None)
         tool_catalog, tool_filters = (tools.catalog_for_with_diagnostics(
             run.task.spec.context, run.task.spec.request_ref) if tools else ((), ()))
+        # Pass the catalog unchanged.  ``gateway.open_session()`` is the single
+        # authority on whether this round may offer tools: it decides from the
+        # authoritative resolved plan (not a second route prediction), records
+        # the degradation in the plan audit, and returns the effective catalog
+        # in the session.  Do not pre-filter here: a prediction that sees a
+        # different provider chain can silently remove tools from a plan that
+        # actually supports them (and would read the configuration twice).
         stream_reply = None
         history = ()
         completion = None
@@ -503,6 +510,9 @@ class LocalReplyGenerator:
                     raise
                 local_failure_notice = True
                 voice = None
+                # 这一轮没有进入模型循环，所以循环里的 current 从未赋值。
+                # 兜底文案仍要按本轮封存的请求判断可用的 expression action。
+                current = turn_request
             if (not local_failure_notice and segmentation.enabled and segmentation.streaming_mode == "incremental"
                     and self.send_stream_part is not None and captured is not None and streaming is not False
                     and not (voice is not None and eligible(voice, input_text=input_text,

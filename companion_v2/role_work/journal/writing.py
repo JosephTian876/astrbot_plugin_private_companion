@@ -271,12 +271,7 @@ class RoleJournalWriter:
             self._invocations.add(invocation)
             try:
                 require(self.tasks.submit(spec))
-                result = await self.runner.run(job.context, task_id)
-                if result.is_success and result.unwrap().task.state in ("created", "retry_scheduled"):
-                    # Standalone owners may opt out of the host's shared queue.
-                    task = require(self.tasks.discard_queued(task_id, reason="owner_unavailable"))
-                    return Outcome.success(RunResult(task))
-                return result
+                return await self.runner.run(job.context, task_id)
             finally:
                 self._pending.pop(task_id, None)
                 self._invocations.discard(invocation)
