@@ -12,6 +12,7 @@ from companion_v2.agenda.models import AgendaError, AgendaTarget, Frequency, Sch
 from companion_v2.delivery.service import DeliveryRequest
 from companion_v2.execution.models import ClaimResult, SupervisorLimits
 from companion_v2.execution.runner import TaskRun
+from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import SubjectKind, SubjectRef
 from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.identity_policy.personas import ConversationRoute
@@ -88,7 +89,7 @@ class AgendaBackgroundTests(AgendaBackgroundFixture, unittest.IsolatedAsyncioTes
         def saturated_lane(context, task_id):
             if busy and task_id.startswith("send-outbound-"):
                 refused.append(task_id)
-                return type(original_claim(context, task_id))(result=ClaimResult(None, "task_lane_full"))
+                return Outcome.success(ClaimResult(None, "task_lane_full"))
             return original_claim(context, task_id)
 
         # Simulate a concurrent background task holding the final lane slot.
