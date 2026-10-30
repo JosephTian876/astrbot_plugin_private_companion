@@ -790,6 +790,61 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(settings["enabled"])
         self.assertFalse(settings["automatic_enabled"])
 
+    async def test_proactive_poll_does_not_load_host_catalog_or_upgrade_plan(self):
+        from astrbot_host.setup_state import SETUP_STEPS
+        for step in SETUP_STEPS:
+            self.api.progress.complete(step)
+        self.api.progress.begin_proactive_test(attempt_id="poll-only", started_at=NOW.isoformat())
+        self.api._test_task = asyncio.get_running_loop().create_future()
+        try:
+            with patch.object(self.controller, "status", side_effect=AssertionError("host discovery")), \
+                    patch("astrbot_host.upgrade_setup.UpgradeSetup.plan", new=AsyncMock(
+                        side_effect=AssertionError("migration discovery"))):
+                result = await self.call("proactive_test_status")
+            self.assertEqual(result["status"], "ok", result)
+            self.assertEqual(result["data"]["proactive_test"]["state"], "started")
+            self.assertFalse(result["data"]["ready"])
+            denied = await self.call("proactive_test_status", username="api_key:fixture")
+            self.assertEqual(denied["data"]["code"], "dashboard_identity_required")
+        finally:
+            self.api._test_task.cancel()
+
+    async def test_proactive_test_stops_when_generation_has_already_failed(self):
+        from astrbot_host.setup_state import SETUP_STEPS
+        for step in SETUP_STEPS:
+            self.api.progress.complete(step)
+        manager = NS(status=Mock(return_value=Outcome.success({"settings": {"enabled": True}})))
+        candidate = {"opportunity": object(), "intents": (), "role_instruction": "fixture",
+                     "route": {"id": "chat", "label": "chat", "variant": "fixture"},
+                     "diagnostic_origin": {}}
+        for generation in ("failed", "cancelled", "expired", "dead_letter", "uncertain"):
+            with self.subTest(generation=generation):
+                self.api.progress.path.unlink(missing_ok=True)
+                for step in SETUP_STEPS:
+                    self.api.progress.complete(step)
+                self.api.progress.begin_proactive_test(attempt_id=generation, started_at=NOW.isoformat())
+                app = NS(
+                    contact_schedule=NS(diagnostic_candidate=AsyncMock(return_value=candidate)),
+                    tasks=NS(read=Mock(return_value=Outcome.success(NS(reason="model_generation_failed")))),
+                    proactive=NS(task_id=Mock(return_value="task-1"),
+                        contact=AsyncMock(return_value=Outcome.success(NS(task=NS(task_id="task-1")))),
+                        observe=Mock(return_value=Outcome.success({"generation": generation,
+                            "delivery": None, "judge": None, "skipped": False}))))
+                with patch.object(self.api, "_test_context", new=AsyncMock(return_value=(NS(application=app), object(), ""))), \
+                        patch("astrbot_host.setup_api.dashboard_operator", return_value=object()), \
+                        patch("astrbot_host.setup_api.ContactManagement", return_value=manager), \
+                        patch.object(self.api, "_restore_test_contact_permission_with_context"), \
+                        patch("astrbot_host.setup_api.asyncio.sleep", new=AsyncMock(
+                            side_effect=AssertionError("a terminal generation must not keep polling"))):
+                    await self.api._execute_proactive_test("administrator", generation)
+                receipt = self.api.progress.read()["proactive_test"]
+                self.assertEqual(receipt["state"], "unknown" if generation == "uncertain" else "failed")
+                self.assertEqual(receipt["error_code"], "setup_contact_generation_failed")
+                states = {item["stage"]: item["state"] for item in receipt["stages"]}
+                self.assertEqual(states["model_generation"], "failed")
+                self.assertEqual(states["delivery"], "skipped")
+                app.proactive.observe.assert_called_once()
+
     async def test_recipient_confirmation_finishes_unknown_test_without_sending_again(self):
         await self.enter_model_step()
         await self.call("model", {"provider_id": "native-model"})

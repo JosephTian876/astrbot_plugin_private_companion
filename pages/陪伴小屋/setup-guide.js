@@ -220,7 +220,7 @@ window.CompanionSetup = (() => {
   let profileOverwrite = false;
   let profileNotes = [];
   let proactiveOptIn = false;
-  let proactiveWatcher = false;
+  let proactiveWatcher = null;
   let legacyTargetId = "";
   let legacyBotKey = "";
   let legacyRoleId = "";
@@ -2992,6 +2992,33 @@ window.CompanionSetup = (() => {
     </section>`;
   }
 
+  const PROACTIVE_TEST_STAGE_LABELS = {
+    authorization: "管理授权", binding: "核心窗口绑定", runtime: "运行实例",
+    settings: "主动联系设置", purpose: "联系目的", trusted_candidate: "测试机会",
+    model_route: "模型路由", model_generation: "模型生成", persona_review: "人格复核",
+    delivery: "平台投递", receipt: "投递回执",
+  };
+  const PROACTIVE_TEST_FAILURE_SUGGESTIONS = {
+    setup_contact_generation_failed: "生成任务已结束，请检查模型路由与该任务的失败原因。",
+    model_task_unregistered: "当前角色尚未配置主动联系模型任务。",
+    model_provider_unavailable: "主动联系模型不可用，请检查模型路由。",
+    model_budget_exhausted: "主动消息模型的每日额度已用完。",
+    contact_diagnostic_source_required: "当前没有可核验的测试契机。",
+    setup_test_interrupted: "上次测试已中断，投递结果仍需核对。",
+    setup_contact_timeout: "本次等待已结束，投递结果仍需核对。",
+    delivery_result_unknown: "平台尚未返回确定的投递回执。",
+  };
+
+  function proactiveTestProgressMarkup() {
+    const test = state?.proactive_test;
+    const stages = Array.isArray(test?.stages) ? test.stages : [];
+    const labels = {passed: "已完成", running: "进行中", pending: "待处理",
+      failed: "失败", skipped: "已跳过", not_required: "无需执行"};
+    const progress = stages.map(item => `<li>${escape(PROACTIVE_TEST_STAGE_LABELS[item.stage] || item.stage)}：${escape(labels[item.state] || item.state)}${item.detail ? ` · ${escape(item.detail)}` : ""}</li>`).join("");
+    const code = typeof test?.error_code === "string" ? test.error_code : "";
+    return `${progress ? `<ol class="setup-checklist" aria-label="主动测试进度">${progress}</ol>` : ""}${code ? `<p class="setup-inline-error" role="alert">${escape(PROACTIVE_TEST_FAILURE_SUGGESTIONS[code] || "本次测试未完成，请核对模型与投递状态。")}（${escape(code)}）</p>` : ""}`;
+  }
+
   function renderProactiveTest() {
     const test = state?.proactive_test;
     if (state?.ready) {
@@ -3004,17 +3031,23 @@ window.CompanionSetup = (() => {
         <div class="setup-actions">${accepting ? "" : button("reconnect-host", "重新连接", {primary: true})}${homeButton("进入陪伴小屋", !accepting)}</div>
       </section>`;
     }
-    if (test?.state === "started" || test?.state === "unknown") {
+    if (test?.state === "started") {
+      return `<section class="setup-stage">
+        <p class="setup-kicker">第 8 步 · 验证使用</p><h3>主动测试进行中</h3>
+        ${proactiveTestProgressMarkup()}${noticeMarkup()}
+        <div class="setup-actions">${button("confirm-test-received", "已收到测试消息", {primary: true})}${button("refresh", "刷新状态")}${homeButton("进入陪伴小屋")}</div>
+      </section>`;
+    }
+    if (test?.state === "unknown") {
       return `<section class="setup-stage">
         <p class="setup-kicker">第 8 步 · 验证使用</p><h3>主动测试结果未知</h3>
-        <p>主动联系已经过模型生成与策略检查，但投递结果尚未拿到确定回执。为避免重复发送，本次不会自动重放；请到已绑定的管理员私聊核对是否已收到。</p>
-        <p class="setup-test-receipt">${test?.state === "started" ? "等待平台确认" : "结果未知"}</p>
-        ${noticeMarkup()}
-        <div class="setup-actions">${button("confirm-test-received", "已收到测试消息", {primary: true})}${button("refresh", "刷新状态")}</div>
+        <p>本次测试尚无确定结果。</p>
+        ${proactiveTestProgressMarkup()}${noticeMarkup()}
+        <div class="setup-actions">${button("confirm-test-received", "已收到测试消息", {primary: true})}${button("refresh", "刷新状态")}${homeButton("进入陪伴小屋")}</div>
       </section>`;
     }
     if (test?.state === "failed") {
-      return `<section class="setup-stage"><p class="setup-kicker">第 8 步 · 验证使用</p><h3>主动联系没有送达</h3><p>本次模型或投递链路明确失败，可以检查目标私聊连接与模型路由后重试。</p>${noticeMarkup()}<label class="setup-opt-in"><input type="checkbox" data-setup-proactive-opt-in ${proactiveOptIn ? "checked" : ""} ${busy ? "disabled" : ""}><span>我同意当前版本向已绑定的管理员私聊发送一次主动联系测试</span></label><div class="setup-actions">${button("proactive-test", "重新运行主动联系", {primary: true, disabled: !proactiveOptIn})}${button("refresh", "刷新状态")}</div></section>`;
+      return `<section class="setup-stage"><p class="setup-kicker">第 8 步 · 验证使用</p><h3>主动联系没有送达</h3>${proactiveTestProgressMarkup()}${noticeMarkup()}<label class="setup-opt-in"><input type="checkbox" data-setup-proactive-opt-in ${proactiveOptIn ? "checked" : ""} ${busy ? "disabled" : ""}><span>我同意当前版本向已绑定的管理员私聊发送一次主动联系测试</span></label><div class="setup-actions">${button("proactive-test", "重新运行主动联系", {primary: true, disabled: !proactiveOptIn})}${button("refresh", "刷新状态")}${homeButton("进入陪伴小屋")}</div></section>`;
     }
     return `<section class="setup-stage">
       <p class="setup-kicker">第 8 步 · 约 1 分钟</p><h3>测试主动消息</h3>
@@ -3344,11 +3377,15 @@ window.CompanionSetup = (() => {
 
   async function watchProactive() {
     if (proactiveWatcher) return;
-    proactiveWatcher = true;
+    const watcher = {generation: mountGeneration, attemptId: state?.proactive_test?.attempt_id};
+    proactiveWatcher = watcher;
+    const currentWatch = () => root && proactiveWatcher === watcher && mountGeneration === watcher.generation
+      && !state?.ready && state?.proactive_test?.attempt_id === watcher.attemptId;
     try {
-      for (let attempt = 0; attempt < 205; attempt += 1) {
-        const result = await api("GET", "/status");
-        state = result;
+      for (let attempt = 0; attempt < 205 && currentWatch(); attempt += 1) {
+        const result = await product().request("GET", PREFIX + "/proactive-test/status", undefined, {timeoutMs: 10000});
+        if (!currentWatch() || result?.proactive_test?.attempt_id !== watcher.attemptId) return;
+        state = {...state, ...result, ...(result.ready ? {step: "complete"} : {})};
         render();
         const current = result?.proactive_test?.state;
         if (result?.ready || current !== "started") {
@@ -3361,10 +3398,15 @@ window.CompanionSetup = (() => {
         }
         await new Promise(resolve => setTimeout(resolve, 750));
       }
+      if (currentWatch()) {
+        notice = "自动查询已暂停，本次测试仍待确认。";
+        render();
+      }
     } catch (error) {
+      if (!currentWatch()) return;
       notice = errorText(error, "主动联系状态暂时无法读取，请稍后刷新。");
       render();
-    } finally { proactiveWatcher = false; }
+    } finally { if (proactiveWatcher === watcher) proactiveWatcher = null; }
   }
 
   async function runLegacy(action) {
@@ -3777,12 +3819,24 @@ window.CompanionSetup = (() => {
       } else if (action === "complete-step" || action === "skip-step") {
         await api("POST", "/complete", {step: state.step, skipped: action === "skip-step"});
       } else if (action === "proactive-test") {
-        await api("POST", "/proactive-test", {enable_proactive: true});
+        const result = await api("POST", "/proactive-test", {enable_proactive: true});
+        if (mountGeneration !== activeGeneration) return;
+        state = {...state, ready: result.ready, proactive_test: {...state?.proactive_test,
+          state: result.state, ...(result.attempt_id ? {attempt_id: result.attempt_id} : {})}};
         proactiveOptIn = false;
         notice = "主动联系已启动，正在等待模型生成、策略检查和投递回执。";
+        render();
+        if (!result.ready && result.state === "started") void watchProactive();
+        return;
       } else if (action === "confirm-test-received") {
-        await api("POST", "/proactive-test/confirm", {attempt_id: state.proactive_test.attempt_id});
+        const result = await api("POST", "/proactive-test/confirm", {attempt_id: state.proactive_test.attempt_id});
+        if (mountGeneration !== activeGeneration) return;
+        proactiveWatcher = null;
+        state = {...state, ready: result.ready, ...(result.ready ? {step: "complete"} : {}),
+          proactive_test: result.proactive_test || {...state.proactive_test, state: result.state}};
         notice = "已记录你收到测试消息，首次设置已完成。";
+        render();
+        return;
       } else if (action === "reconnect-host") {
         await api("POST", "/host/start", {});
         notice = "当前版本已重新连接并开始接收消息。";
@@ -4691,6 +4745,7 @@ window.CompanionSetup = (() => {
   function unmount() {
     generation++;
     mountGeneration++;
+    proactiveWatcher = null;
     stopLegacySettings();
     stopQuickWorkspace();
     stopStepEditor();

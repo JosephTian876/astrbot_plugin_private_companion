@@ -204,6 +204,16 @@ def looks_like_text_provider(native):
     return (callable(getattr(native, "_query", None))
             and callable(getattr(native, "get_model", None))
             and isinstance(getattr(native, "provider_config", None), dict))
+
+
+def _same_config_value(left, right):
+    """比较一份配置值，且不把值本身写进错误或日志。"""
+    try:
+        return digest(left) == digest(right)
+    except (TypeError, ValueError):
+        return left == right
+
+
 #: 主回复任务的模型能力要求：只需要文本。
 #:
 #: “能不能用工具”是**每一轮**的运行时决定（``model_gateway/service.py`` 在真的要
@@ -291,18 +301,61 @@ class AstrBotTextProvider:
                              self.reserve, self.generate, transport=transport, default_streaming=self.streaming,
                              supports_model_override=True, model=self.model)
 
+    def _provider_class_matches(self, provider):
+        """宿主刷新注册表时会重新导入适配器模块，类对象随之更换。
+
+        模块与限定名都相同的类仍视为同一个宿主类；一旦换到别的类（例如同一
+        ID 下替换了 Provider 类型）则拒绝。
+        """
+        if provider is None:
+            return False
+        if isinstance(provider, self.provider_types):
+            return True
+        actual = type(provider)
+        return any(actual.__module__ == expected.__module__
+                   and actual.__qualname__ == expected.__qualname__
+                   for expected in self.provider_types)
+
+    def _config_drift(self, provider):
+        """列出被宿主改动或删除的已捕获配置键，绝不返回值本身。
+
+        宿主刷新注册表时会重新合并 Provider 配置，并可能补写 ``modalities``
+        这类派生字段。只比较装配时捕获的键：新增字段不构成替换，改动或删除
+        已捕获的字段才是。
+        """
+        config = getattr(provider, "provider_config", None)
+        if not isinstance(config, dict):
+            return ("provider_config",)
+        return tuple(sorted(key for key, value in self.config.items()
+                            if key not in config or not _same_config_value(config[key], value)))
+
+    def _same_provider_kind(self, provider):
+        """未登记或重新导入的宿主类，至少要是同一种 Provider 类型。"""
+        expected = str(self.config.get("type") or "")
+        actual = str(getattr(provider, "provider_config", {}).get("type") or "")
+        return bool(expected) and actual == expected
+
     def _current(self):
         current = self.context.get_provider_by_id(self.provider_id)
-        if not isinstance(current, self.provider_type):
+        if current is None:
+            raise TaskError("host_provider_changed", "original host provider is unavailable")
+        if not self._provider_class_matches(current) and not (
+                looks_like_text_provider(current) and self._same_provider_kind(current)):
             raise TaskError("host_provider_changed", "original host provider is unavailable")
         # AstrBot may rebuild provider instances when its provider registry is
         # refreshed. That is not a provider change if the model, configuration
         # and accepted parameters are still the same. Rebind the live instance
         # instead of failing every background task admitted before the refresh.
-        if (current.get_model() != self.model
-                or digest(current.provider_config) != self.config_hash
-                or frozenset(getattr(current, "default_params", {})) != self.parameters):
-            raise TaskError("host_provider_changed", "original host provider/configuration was replaced")
+        drifted = self._config_drift(current)
+        parameters = frozenset(getattr(current, "default_params", {}) or {})
+        if current.get_model() != self.model or drifted or parameters != self.parameters:
+            if drifted:
+                logger.warning("[CompanionV2] 宿主 Provider 配置已变化 provider=%s keys=%s",
+                               self.provider_id, ",".join(drifted))
+            detail = "original host provider/configuration was replaced"
+            if drifted:
+                detail += " (changed_keys: " + ", ".join(drifted) + ")"
+            raise TaskError("host_provider_changed", detail)
         self.native, self.client = current, current.client
 
     def _estimate(self, envelope, wire):
