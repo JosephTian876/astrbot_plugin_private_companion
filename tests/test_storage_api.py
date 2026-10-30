@@ -5,13 +5,66 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
 
 from astrbot_host.storage_api import PREFIX, StorageWebAPI
-from companion_v2.storage.backup import BACKUP_FORMAT
+from companion_v2.storage.backup import BACKUP_FORMAT, InstallationBackup, LEGACY_BACKUP_FORMAT
+
+
+def _write_v1_snapshot(directory, identifier, created_at, installation_id):
+    """Write a real 7.0.7 snapshot: one flat ``.sqlite3`` database plus its sidecar.
+
+    The management paths under test only inspect the pair layout, but a fixture that
+    claims the legacy format should still look like what 7.0.7 wrote: a restorable
+    SQLite database carrying the installation identity, a matching byte size and a
+    real ``content_hash``. Writing arbitrary bytes under a v1 label would let a
+    digest/schema regression pass unnoticed.
+    """
+    from companion_v2.storage.schema import SCHEMA_VERSION
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    database = directory / f"companion-v2-{identifier}.sqlite3"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("CREATE TABLE runtime_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        connection.executemany("INSERT INTO runtime_metadata (key, value) VALUES (?, ?)",
+                               (("installation_id", installation_id), ("schema_version", SCHEMA_VERSION)))
+        connection.commit()
+    finally:
+        connection.close()
+    sidecar = directory / f"companion-v2-{identifier}.json"
+    sidecar.write_text(json.dumps({
+        "format": LEGACY_BACKUP_FORMAT, "snapshot_id": identifier,
+        "created_at": created_at.isoformat(), "installation_id": installation_id,
+        "schema_version": SCHEMA_VERSION, "byte_size": database.stat().st_size,
+        "content_hash": hashlib.sha256(database.read_bytes()).hexdigest(), "note": "",
+    }), encoding="utf-8")
+    return database
+
+
+def _create_v2_bundle(source_root, directory, installation_id):
+    """Create one real, minimal v2 bundle with the product writer.
+
+    The bundle is written directly into the backup directory (nothing is copied into
+    the fixture) and the open runtime is returned so the test can ask the product to
+    verify the same bytes again after a backup-directory migration.
+    """
+    from companion_v2.storage.runtime import StorageRuntime
+
+    runtime = StorageRuntime.open(data_root=Path(source_root), installation_id=installation_id)
+    try:
+        manifest = InstallationBackup(
+            runtime, now=lambda: datetime(2026, 10, 7, 12, tzinfo=timezone.utc),
+            directory=Path(directory)).create(note="storage-api fixture").unwrap()
+    except BaseException:
+        runtime.close()
+        raise
+    return runtime, manifest
 
 
 class Request:
@@ -102,15 +155,11 @@ class StorageApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_confirmed_cleanup_removes_only_snapshots_outside_policy(self):
         backup_dir = self.runtime_root / "backups"
-        backup_dir.mkdir(parents=True)
         ids = [f"{index:032x}" for index in (1, 2)]
         for index, identifier in enumerate(ids):
-            (backup_dir / f"companion-v2-{identifier}.sqlite3").write_bytes(b"snapshot")
-            (backup_dir / f"companion-v2-{identifier}.json").write_text(json.dumps({
-                "format": BACKUP_FORMAT, "snapshot_id": identifier,
-                "created_at": datetime(2026, 10, 7, index, tzinfo=timezone.utc).isoformat(),
-                "content_hash": "fixture", "installation_id": self.installation_id,
-            }), encoding="utf-8")
+            _write_v1_snapshot(backup_dir, identifier,
+                               datetime(2026, 10, 7, index, tzinfo=timezone.utc),
+                               self.installation_id)
         self.config["storage"]["retention_count"] = 1
         self.request.payload = b'{"action":"clean"}'
 
@@ -125,14 +174,10 @@ class StorageApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_saving_backup_path_moves_existing_snapshots_and_updates_inventory(self):
         old = self.runtime_root / "backups"
         new = self.root / "external-snapshots"
-        old.mkdir(parents=True)
         identifier = "1" * 32
-        database = old / f"companion-v2-{identifier}.sqlite3"
-        sidecar = old / f"companion-v2-{identifier}.json"
-        database.write_bytes(b"verified snapshot bytes")
-        sidecar.write_text(json.dumps({"format": BACKUP_FORMAT, "snapshot_id": identifier,
-            "created_at": datetime(2026, 10, 7, tzinfo=timezone.utc).isoformat(),
-            "content_hash": "fixture", "installation_id": self.installation_id}), encoding="utf-8")
+        database = _write_v1_snapshot(old, identifier,
+                                      datetime(2026, 10, 7, tzinfo=timezone.utc),
+                                      self.installation_id)
         self.request.payload = json.dumps({"action": "save", "path": "", "backup_path": str(new),
             "retention_count": 10, "retention_days": 90}).encode()
 
@@ -147,6 +192,53 @@ class StorageApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(database.exists())
         self.assertEqual(response["data"]["inventory"]["categories"]["backups"]["files"], 2)
 
+    async def test_v2_bundle_inventory_and_backup_path_migration_keep_the_payload(self):
+        local = self.runtime_root / "backups"
+        runtime, manifest = _create_v2_bundle(self.root / "v2-bundle-source", local,
+                                              self.installation_id)
+        self.addCleanup(runtime.close)
+        snapshot_id = manifest["snapshot_id"]
+        self.assertEqual(manifest["format"], BACKUP_FORMAT)
+        bundle = local / f"companion-v2-{snapshot_id}.bundle"
+        sidecar = local / f"companion-v2-{snapshot_id}.json"
+        self.assertTrue((bundle / "payload" / "companion-v2.sqlite3").is_file())
+        self.assertTrue(sidecar.is_file())
+        # A bundle has one file per declared artifact plus its sidecar; deriving the
+        # expected inventory count keeps this honest if the minimal runtime grows.
+        expected_files = len(manifest["artifacts"]) + 1
+
+        with patch("astrbot_host.storage_api.request", self.request):
+            status = await self.api.status()
+        self.assertEqual(status["status"], "ok")
+        self.assertEqual(status["data"]["inventory"]["categories"]["backups"]["files"], expected_files)
+        self.assertEqual(status["data"]["cleanup_preview"]["snapshot_count"], 1)
+        self.assertEqual(status["data"]["cleanup_preview"]["incomplete_count"], 0)
+
+        external = self.root / "external-snapshots"
+        self.request.payload = json.dumps({"action": "save", "path": "", "backup_path": str(external),
+            "retention_count": 10, "retention_days": 90}).encode()
+        with patch("astrbot_host.storage_api.request", self.request):
+            response = await self.api.update()
+
+        self.assertEqual(response["status"], "ok")
+        installation_key = hashlib.sha256(self.installation_id.encode("utf-8")).hexdigest()
+        destination = external / "installations" / installation_key / "backups"
+        moved_bundle = destination / bundle.name
+        self.assertTrue((moved_bundle / "payload" / "companion-v2.sqlite3").is_file())
+        self.assertTrue((destination / sidecar.name).is_file())
+        self.assertFalse(bundle.exists())
+        self.assertFalse(sidecar.exists())
+        self.assertEqual(response["data"]["inventory"]["categories"]["backups"]["files"], expected_files)
+        self.assertEqual(response["data"]["cleanup_preview"]["snapshot_count"], 1)
+
+        # The moved bytes must still be a complete v2 bundle, not merely present.
+        inspected = InstallationBackup(runtime, directory=destination).inspect(snapshot_id=snapshot_id)
+        self.assertTrue(inspected.is_success, inspected.failure)
+        verified = inspected.unwrap()
+        self.assertEqual(verified["manifest"]["content_hash"], manifest["content_hash"])
+        self.assertEqual(verified["restore_scope"], "complete_installation")
+        self.assertTrue(verified["restorable"])
+
     async def test_external_backup_inventory_and_cleanup_are_isolated_by_installation(self):
         external = self.root / "shared-snapshots"
         active_key = hashlib.sha256(self.installation_id.encode("utf-8")).hexdigest()
@@ -154,23 +246,14 @@ class StorageApiTests(unittest.IsolatedAsyncioTestCase):
         other_key = hashlib.sha256(other_id.encode("utf-8")).hexdigest()
         active = external / "installations" / active_key / "backups"
         other = external / "installations" / other_key / "backups"
-        active.mkdir(parents=True)
-        other.mkdir(parents=True)
         active_ids = ["2" * 32, "3" * 32]
         for index, identifier in enumerate(active_ids):
-            (active / f"companion-v2-{identifier}.sqlite3").write_bytes(b"active")
-            (active / f"companion-v2-{identifier}.json").write_text(json.dumps({
-                "format": BACKUP_FORMAT, "snapshot_id": identifier,
-                "created_at": datetime(2026, 10, 7, index, tzinfo=timezone.utc).isoformat(),
-                "content_hash": "fixture", "installation_id": self.installation_id,
-            }), encoding="utf-8")
+            _write_v1_snapshot(active, identifier,
+                               datetime(2026, 10, 7, index, tzinfo=timezone.utc),
+                               self.installation_id)
         other_id_snapshot = "4" * 32
-        (other / f"companion-v2-{other_id_snapshot}.sqlite3").write_bytes(b"other")
-        (other / f"companion-v2-{other_id_snapshot}.json").write_text(json.dumps({
-            "format": BACKUP_FORMAT, "snapshot_id": other_id_snapshot,
-            "created_at": datetime(2026, 10, 7, tzinfo=timezone.utc).isoformat(),
-            "content_hash": "fixture", "installation_id": other_id,
-        }), encoding="utf-8")
+        _write_v1_snapshot(other, other_id_snapshot,
+                           datetime(2026, 10, 7, tzinfo=timezone.utc), other_id)
         self.config["storage"].update(backup_path=str(external), retention_count=1)
 
         with patch("astrbot_host.storage_api.request", self.request):
@@ -187,15 +270,10 @@ class StorageApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_config_save_keeps_original_backup_pairs(self):
         old = self.runtime_root / "backups"
-        old.mkdir(parents=True)
         identifier = "5" * 32
-        database = old / f"companion-v2-{identifier}.sqlite3"
-        database.write_bytes(b"verified snapshot bytes")
-        (old / f"companion-v2-{identifier}.json").write_text(json.dumps({
-            "format": BACKUP_FORMAT, "snapshot_id": identifier,
-            "created_at": datetime(2026, 10, 7, tzinfo=timezone.utc).isoformat(),
-            "content_hash": "fixture", "installation_id": self.installation_id,
-        }), encoding="utf-8")
+        database = _write_v1_snapshot(old, identifier,
+                                      datetime(2026, 10, 7, tzinfo=timezone.utc),
+                                      self.installation_id)
         new = self.root / "external-snapshots"
         self.controller.save_plugin_config = lambda _: (_ for _ in ()).throw(OSError("write failed"))
         self.request.payload = json.dumps({"action": "save", "path": "", "backup_path": str(new),

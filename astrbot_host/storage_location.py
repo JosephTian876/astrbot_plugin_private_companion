@@ -163,7 +163,14 @@ def selected_backup_directory(runtime_root: Path, selected_path: object, install
 
 
 def _backup_installations(directory: Path) -> tuple[str, ...]:
-    from companion_v2.storage.backup import BACKUP_FORMAT
+    """Installation ids with a restorable snapshot pair in this directory.
+
+    Both formats count (review P2-7): filtering on the current ``BACKUP_FORMAT``
+    silently skipped every 7.0.7 pair, so switching the backup directory left the
+    only usable old backups behind — and a later cleanup of the old directory then
+    lost them for good.
+    """
+    from companion_v2.storage.backup import BACKUP_FORMAT, LEGACY_BACKUP_FORMAT
 
     identities = set()
     if not directory.is_dir() or _is_link(directory):
@@ -174,7 +181,7 @@ def _backup_installations(directory: Path) -> tuple[str, ...]:
         try:
             document = json.loads(sidecar.read_text(encoding="utf-8"))
             identity = document.get("installation_id")
-            if (document.get("format") == BACKUP_FORMAT and type(identity) is str
+            if (document.get("format") in {BACKUP_FORMAT, LEGACY_BACKUP_FORMAT} and type(identity) is str
                     and identity and len(identity) <= 512):
                 identities.add(identity)
         except (OSError, ValueError, TypeError, AttributeError):
@@ -206,8 +213,16 @@ def _runtime_root_for_installation(plugin_root: Path, installation_id: str) -> P
 
 
 def relocate_backup_storage(plugin_root: Path, current_path: object,
-                            selected_path: object) -> tuple[tuple[tuple[Path, Path], Path], ...]:
-    """Copy verified pairs to per-installation folders before changing the path."""
+                            selected_path: object,
+                            report: dict | None = None) -> tuple[tuple[tuple[Path, Path], Path], ...]:
+    """Copy verified pairs to per-installation folders before changing the path.
+
+    An incomplete pair in the source used to abort the whole move with an
+    ``OSError`` and no way out (review P2-4). Complete pairs are copied and the
+    incomplete ones are skipped and named in ``report["skipped"]`` — they are left
+    untouched in the old directory, so nothing is lost and the switch can finish.
+    A pair a staged restore still depends on is never skipped: the copy fails closed.
+    """
     from companion_v2.storage.management import backup_directories, copy_backup_snapshots
 
     root = Path(plugin_root).resolve()
@@ -221,15 +236,27 @@ def relocate_backup_storage(plugin_root: Path, current_path: object,
         next_base.mkdir(parents=True, exist_ok=True)
 
     source_root = current_base or root
+    skipped: list[dict] = []
     transfers = []
     for source in backup_directories(source_root):
         for installation_id in _backup_installations(source):
             destination = (selected_backup_directory(root, selected_path, installation_id, plugin_root=root)
                            if next_base is not None
                            else _runtime_root_for_installation(root, installation_id) / "backups")
-            pairs = copy_backup_snapshots(source, destination, installation_id=installation_id)
+            snapshot_report: dict = {}
+            pairs = copy_backup_snapshots(source, destination, installation_id=installation_id,
+                                          skip_incomplete=True, data_root=source.parent,
+                                          report=snapshot_report)
+            skipped.extend({**item, "directory": str(source)} for item in snapshot_report.get("skipped", ()))
             if pairs:
                 transfers.append((pairs, destination))
+    if report is not None:
+        report.clear()
+        report.update({"skipped": skipped, "skipped_count": len(skipped),
+                       "transferred": sum(len(pairs) for pairs, _destination in transfers)})
+    if skipped:
+        logger.warning("[CompanionV2] 备份目录迁移跳过 %d 个不完整快照（保留在原目录）: %s",
+                       len(skipped), ", ".join(item["snapshot_id"] or item["sidecar"] for item in skipped[:5]))
     return tuple(transfers)
 
 

@@ -11,6 +11,8 @@ import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
+from companion_v2.foundation.outcome import Outcome
+from companion_v2.storage import backup as module
 from companion_v2.storage.backup import (
     BACKUP_FORMAT, InstallationBackup, PENDING_FILENAME, apply_pending, current_schema_version,
 )
@@ -25,12 +27,16 @@ def _open(temporary: str):
     return StorageRuntime.open(data_root=Path(temporary) / "data", installation_id=INSTALLATION_ID)
 
 
+def _payload(backup: InstallationBackup, snapshot_id: str, relative: str = "companion-v2.sqlite3") -> Path:
+    return backup.directory / f"companion-v2-{snapshot_id}.bundle" / "payload" / Path(relative)
+
+
 class BackupTests(unittest.TestCase):
     def test_a_snapshot_carries_rows_committed_after_the_database_file_starts(self) -> None:
         # The reason this module uses the backup API instead of copying the database
         # file: a row committed through the live connection must appear in the
         # snapshot, and the snapshot must be a self-contained single file.
-        with TemporaryDirectory(prefix="companion-v2-backup-") as temporary:
+        with TemporaryDirectory(prefix="companion-v2-backup-", ignore_cleanup_errors=True) as temporary:
             runtime = _open(temporary)
             try:
                 with runtime.transaction() as connection:
@@ -38,7 +44,7 @@ class BackupTests(unittest.TestCase):
                         "INSERT INTO runtime_metadata(key, value) VALUES (?, ?)", ("probe", "committed"))
                 backup = InstallationBackup(runtime, now=lambda: NOW)
                 manifest = backup.create(note="commit probe").unwrap()
-                snapshot = backup.directory / f"companion-v2-{manifest['snapshot_id']}.sqlite3"
+                snapshot = _payload(backup, manifest["snapshot_id"])
                 self.assertTrue(snapshot.is_file())
                 # The snapshot stands alone: no sidecar of its own to lose.
                 self.assertFalse(Path(str(snapshot) + "-wal").exists())
@@ -54,19 +60,19 @@ class BackupTests(unittest.TestCase):
                 runtime.close()
 
     def test_snapshot_is_refused_when_it_belongs_to_another_installation(self) -> None:
-        with TemporaryDirectory(prefix="companion-v2-backup-") as temporary:
+        with TemporaryDirectory(prefix="companion-v2-backup-", ignore_cleanup_errors=True) as temporary:
             runtime = _open(temporary)
             try:
                 manifest = InstallationBackup(runtime, now=lambda: NOW).create().unwrap()
-                result = _inspect_as(InstallationBackup(runtime, now=lambda: NOW),
-                                     manifest["snapshot_id"], installation_id="installation-other")
+                result = _verify_as(InstallationBackup(runtime, now=lambda: NOW),
+                                    manifest["snapshot_id"], installation_id="installation-other")
                 self.assertFalse(result.is_success)
                 self.assertEqual(result.failure.code, "backup_snapshot_foreign")
             finally:
                 runtime.close()
 
     def test_restore_is_staged_and_leaves_the_data_root_untouched_until_restart(self) -> None:
-        with TemporaryDirectory(prefix="companion-v2-backup-") as temporary:
+        with TemporaryDirectory(prefix="companion-v2-backup-", ignore_cleanup_errors=True) as temporary:
             runtime = _open(temporary)
             try:
                 backup = InstallationBackup(runtime, now=lambda: NOW)
@@ -93,7 +99,7 @@ class BackupTests(unittest.TestCase):
                 runtime.close()
 
     def test_confirmation_digest_must_match_the_snapshot_bytes(self) -> None:
-        with TemporaryDirectory(prefix="companion-v2-backup-") as temporary:
+        with TemporaryDirectory(prefix="companion-v2-backup-", ignore_cleanup_errors=True) as temporary:
             runtime = _open(temporary)
             try:
                 backup = InstallationBackup(runtime, now=lambda: NOW)
@@ -105,7 +111,7 @@ class BackupTests(unittest.TestCase):
                 runtime.close()
 
     def test_apply_pending_swaps_the_database_only_with_no_live_connection(self) -> None:
-        with TemporaryDirectory(prefix="companion-v2-backup-") as temporary:
+        with TemporaryDirectory(prefix="companion-v2-backup-", ignore_cleanup_errors=True) as temporary:
             runtime = _open(temporary)
             manifest = None
             schema_version = None
@@ -132,8 +138,8 @@ class BackupTests(unittest.TestCase):
             reopened = _open(temporary)
             try:
                 self.assertIsNone(reopened.read_one("SELECT value FROM runtime_metadata WHERE key = 'discard'", ()))
-                self.assertEqual(reopened.read_one("SELECT value FROM runtime_metadata WHERE key = 'probe'", ())["value"],
-                                 "committed")
+                probe = reopened.read_one("SELECT value FROM runtime_metadata WHERE key = 'probe'", ())
+                self.assertEqual(probe["value"], "committed")
                 self.assertFalse((Path(temporary) / "data" / PENDING_FILENAME).exists())
                 self.assertTrue((Path(temporary) / "data" / "companion-v2.sqlite3.replaced").exists())
             finally:
@@ -141,7 +147,7 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(outcome["snapshot_id"], manifest["snapshot_id"])
 
     def test_restore_can_read_a_snapshot_from_the_configured_external_directory(self) -> None:
-        with TemporaryDirectory(prefix="companion-v2-backup-external-") as temporary:
+        with TemporaryDirectory(prefix="companion-v2-backup-external-", ignore_cleanup_errors=True) as temporary:
             runtime = _open(temporary)
             external = Path(temporary) / "other-disk" / "snapshots"
             try:
@@ -170,7 +176,7 @@ class BackupTests(unittest.TestCase):
                 reopened.close()
 
     def test_apply_pending_reports_absence_instead_of_raising(self) -> None:
-        with TemporaryDirectory(prefix="companion-v2-backup-") as temporary:
+        with TemporaryDirectory(prefix="companion-v2-backup-", ignore_cleanup_errors=True) as temporary:
             runtime = _open(temporary)
             try:
                 outcome = apply_pending(runtime.data_root, installation_id=INSTALLATION_ID,
@@ -182,7 +188,7 @@ class BackupTests(unittest.TestCase):
     def test_a_malformed_staged_request_does_not_break_start_up(self) -> None:
         # Start-up calls apply_pending before opening the store, so a corrupt request
         # has to come back as a document rather than as an exception.
-        with TemporaryDirectory(prefix="companion-v2-backup-") as temporary:
+        with TemporaryDirectory(prefix="companion-v2-backup-", ignore_cleanup_errors=True) as temporary:
             runtime = _open(temporary)
             try:
                 backup = InstallationBackup(runtime, now=lambda: NOW)
@@ -196,7 +202,7 @@ class BackupTests(unittest.TestCase):
                 runtime.close()
 
     def test_current_schema_version_reads_the_file_without_opening_it_for_writing(self) -> None:
-        with TemporaryDirectory(prefix="companion-v2-backup-") as temporary:
+        with TemporaryDirectory(prefix="companion-v2-backup-", ignore_cleanup_errors=True) as temporary:
             runtime = _open(temporary)
             stored = None
             try:
@@ -221,25 +227,26 @@ class BackupTests(unittest.TestCase):
             # normal. What must not happen is a modified database file.
             self.assertEqual(hashlib.sha256(candidate.read_bytes()).hexdigest(), before)
 
-    def test_listing_skips_a_snapshot_whose_database_was_pruned(self) -> None:
-        with TemporaryDirectory(prefix="companion-v2-backup-") as temporary:
+    def test_listing_skips_a_snapshot_whose_bundle_was_pruned(self) -> None:
+        with TemporaryDirectory(prefix="companion-v2-backup-", ignore_cleanup_errors=True) as temporary:
             runtime = _open(temporary)
             try:
                 backup = InstallationBackup(runtime, now=lambda: NOW)
                 manifest = backup.create().unwrap()
                 self.assertEqual(len(backup.listing().unwrap()["snapshots"]), 1)
-                (backup.directory / f"companion-v2-{manifest['snapshot_id']}.sqlite3").unlink()
+                # A bundle without its main database is an interrupted snapshot.
+                _payload(backup, manifest["snapshot_id"]).unlink()
                 self.assertEqual(list(backup.listing().unwrap()["snapshots"]), [])
             finally:
                 runtime.close()
 
     def test_a_tampered_snapshot_fails_inspection(self) -> None:
-        with TemporaryDirectory(prefix="companion-v2-backup-") as temporary:
+        with TemporaryDirectory(prefix="companion-v2-backup-", ignore_cleanup_errors=True) as temporary:
             runtime = _open(temporary)
             try:
                 backup = InstallationBackup(runtime, now=lambda: NOW)
                 manifest = backup.create().unwrap()
-                snapshot = backup.directory / f"companion-v2-{manifest['snapshot_id']}.sqlite3"
+                snapshot = _payload(backup, manifest["snapshot_id"])
                 # Corrupt the SQLite header. Flipping an interior page would still be
                 # readable and quick_check might not notice; the header is definitive.
                 with snapshot.open("r+b") as handle:
@@ -255,7 +262,7 @@ class BackupTests(unittest.TestCase):
                 runtime.close()
 
     def test_manifest_is_plain_json_the_dashboard_can_render(self) -> None:
-        with TemporaryDirectory(prefix="companion-v2-backup-") as temporary:
+        with TemporaryDirectory(prefix="companion-v2-backup-", ignore_cleanup_errors=True) as temporary:
             runtime = _open(temporary)
             try:
                 backup = InstallationBackup(runtime, now=lambda: NOW)
@@ -267,20 +274,23 @@ class BackupTests(unittest.TestCase):
                 self.assertEqual(document["installation_id"], INSTALLATION_ID)
                 for field in ("snapshot_id", "created_at", "schema_version", "byte_size", "content_hash"):
                     self.assertIn(field, document)
+                # The whole installation is described, not only the main database.
+                paths = {item["path"] for item in document["artifacts"]}
+                self.assertIn("companion-v2.sqlite3", paths)
+                self.assertEqual(document["artifact_count"], len(document["artifacts"]))
+                self.assertEqual(document["byte_size"], sum(item["bytes"] for item in document["artifacts"]))
             finally:
                 runtime.close()
 
 
-def _inspect_as(backup: InstallationBackup, snapshot_id: str, *, installation_id: str):
-    """Inspect a snapshot against a different claimed installation identity."""
-    from companion_v2.storage import backup as module
-    path = backup._snapshot_path(snapshot_id)
+def _verify_as(backup: InstallationBackup, snapshot_id: str, *, installation_id: str):
+    """Verify a snapshot against a different claimed installation identity."""
+    document = module._read_snapshot_manifest(backup.directory, snapshot_id)
     try:
-        module._inspect(path, installation_id=installation_id, schema_version=backup._schema_version())
+        module._verify_bundle(document, directory=backup.directory, installation_id=installation_id,
+                              schema_version=backup._schema_version())
     except module.BackupError as error:
-        from companion_v2.foundation.outcome import Outcome
         return Outcome.failed(error.code, str(error))
-    from companion_v2.foundation.outcome import Outcome
     return Outcome.success({})
 
 

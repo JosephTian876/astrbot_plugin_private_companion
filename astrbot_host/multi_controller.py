@@ -29,7 +29,7 @@ from .multi_settings import MultiHostSettings, find_persona_mapping
 from .bootstrap_provider import resolve_bootstrap_provider
 from .group_settings import GroupTarget
 from .native import installed_native_types, native_text_provider
-from .backup_api import apply_staged_restore
+from .backup_api import guard_restore_startup
 from .storage_location import resolve_data_root, selected_backup_directory
 from .native_extensions import NativeExtensionRegistry, together_execution_binding
 from .native_extensions.builtins import MANAGED_EXTENSIONS, create_bundled_extensions
@@ -64,6 +64,10 @@ class AstrBotMultiController:
         self.runtime = self.authority = self.session = self.last_session = None
         # The dashboard can report whether a staged restore was applied at open.
         self.last_restore = None
+        # Diagnostics for the startup gate: set before opening, kept on failure so
+        # the operator can see which journal/pending request blocked the store.
+        self.restore_state = None
+        self.restore_blocked = False
         self.native_extensions = None
         self._accepting = self._terminated = False
         # Lifecycle work may wait on AstrBot; keep that wait out of the lock
@@ -479,7 +483,9 @@ class AstrBotMultiController:
         reason = ("插件模块未能导入，请重新加载 V2 插件；若仍失败，请检查安装包是否完整并查看 AstrBot 日志。"
                   if code == "host_module_unavailable" else
                   str(error) if code.split("__", 1)[0] == "host_native_lookup_timeout"
-                  or code in ("host_binding_changed", "account_config_save_failed", "account_config_persistence_unavailable") else
+                  or code in ("host_binding_changed", "account_config_save_failed", "account_config_persistence_unavailable",
+                              "backup_restore_rollback_incomplete", "backup_restore_journal_unreadable",
+                              "backup_restore_startup_blocked") else
                   "shared host configuration, native route or authority could not be verified")
         self.last_failure = {"code": code, "reason": reason}
         if operation:
@@ -608,8 +614,24 @@ class AstrBotMultiController:
         backup_directory = selected_backup_directory(
             root / "runtime", storage.get("backup_path", "") if isinstance(storage, dict) else "",
             settings.installation_id, plugin_root=self.data_root)
-        last_restore = apply_staged_restore(root / "runtime", installation_id=settings.installation_id,
-                                            backup_directory=backup_directory)
+        last_restore, restore_state = guard_restore_startup(
+            root / "runtime", installation_id=settings.installation_id,
+            backup_directory=backup_directory)
+        self.last_restore, self.restore_state = last_restore, restore_state
+        if restore_state.get("blocking"):
+            # A restore whose rollback did not finish is not "no restore": the
+            # journal holds the previous installation. StorageRuntime.open would
+            # create a new empty database for any missing file and fork the data.
+            # Keep the staged request, the journal and every byte, report a
+            # readable code, and let the next start retry the same rollback.
+            self.restore_blocked = True
+            logger.error(
+                "[CompanionV2] 拒绝在还原回滚未完成时打开数据库 code=%s journals=%s pending=%s root=%s",
+                restore_state.get("code"),
+                ",".join(item.get("name", "?") for item in restore_state.get("journals") or ()),
+                bool(restore_state.get("pending")), root / "runtime")
+            raise HostControlError(restore_state["code"], restore_state["detail"])
+        self.restore_blocked = False
         runtime = StorageRuntime.open(data_root=root / "runtime", installation_id=settings.installation_id)
         runtime.backup_directory = backup_directory
         try:
@@ -825,14 +847,35 @@ class AstrBotMultiController:
                 if self.runtime is not None and (self.runtime.data_root != root.resolve()
                         or self.runtime.installation_id != settings.installation_id):
                     raise TaskError("host_storage_changed", "stop and reload before changing the active V2 data installation")
+                # A startup gate refusal is sticky for this process: opening the
+                # database here (the only path that bypasses _create_storage) would
+                # fork exactly like the startup would have. Require a restart after
+                # the journal is fixed.
+                if self.restore_blocked:
+                    raise TaskError(
+                        "backup_restore_startup_blocked",
+                        "a staged restore could not be rolled back; fix the data root and restart the plugin")
                 opened_here = self.runtime is None
                 if self.runtime is None and (root / StorageRuntime.DATABASE_FILENAME).is_file():
+                    # This path opens the store without going through
+                    # _create_storage. It still must apply a staged restore first
+                    # and honor the same rollback gate; otherwise a crash journal
+                    # could be bypassed by saving a mapping before the host starts.
+                    storage_config = self.config.get("storage", {}) if isinstance(self.config, dict) else {}
+                    backup_directory = selected_backup_directory(
+                        root, storage_config.get("backup_path", "") if isinstance(storage_config, dict) else "",
+                        settings.installation_id, plugin_root=self.data_root)
+                    last_restore, restore_state = await asyncio.to_thread(
+                        guard_restore_startup, root, installation_id=settings.installation_id,
+                        backup_directory=backup_directory)
+                    self.last_restore, self.restore_state = last_restore, restore_state
+                    if restore_state.get("blocking"):
+                        self.restore_blocked = True
+                        raise TaskError(restore_state["code"], restore_state["detail"])
+                    self.restore_blocked = False
                     self.runtime = await asyncio.to_thread(
                         StorageRuntime.open, data_root=root, installation_id=settings.installation_id)
-                    storage = self.config.get("storage", {}) if isinstance(self.config, dict) else {}
-                    self.runtime.backup_directory = selected_backup_directory(
-                        root, storage.get("backup_path", "") if isinstance(storage, dict) else "",
-                        settings.installation_id, plugin_root=self.data_root)
+                    self.runtime.backup_directory = backup_directory
                 try:
                     if self.runtime is not None:
                         authority = MultiAuthority(self.runtime, settings, now=self.now,
@@ -1427,6 +1470,10 @@ class AstrBotMultiController:
                 "failure_code": session.application.failure_code if session else None,
                 "failure_detail": session.application.failure_detail if session else None,
                 "targets": self.web_api.target_inventory(), "last_failure": self.last_failure,
+                # Why the store was or was not opened. ``restore_state.blocking`` is
+                # the startup gate; the detail names the journal and never contains
+                # credentials or snapshot bytes.
+                "restore_state": self.restore_state,
                 "settings_error": getattr(self.settings_error, "code", None),
                 "parser_availability": parser_availability()}
 
