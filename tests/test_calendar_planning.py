@@ -988,7 +988,44 @@ class CalendarGlobalSwitchTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual({item["kind"] for item in calendar_items}, {"role_plan", "user_report", "commitment"})
 
 
+class OrchestratedScheduleContextTests(StateFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_orchestrated_mode_injects_the_narrow_current_window(self):
+        _, app, context, manager = self.setup_state()
+        self.configure(manager, calendar_enabled=True, schedule_simulation_mode="orchestrated", enabled=True)
+        plan_source = self.source(app, context, "orchestrated-plan-source")
+        app.calendar.command(context, identifier="orchestrated-plan", action="create", expected_revision=0,
+            operation_key="orchestrated-plan", data=calendar_data(), sources=(plan_source,))
+
+        consumer = app.messages.role_state_context
+        snapshot = consumer.capture(context, NOW)
+        self.assertEqual(snapshot["schedule_simulation_mode"], "orchestrated")
+        self.assertEqual(snapshot["calendar"]["items"][0]["title"], "私人阅读安排")
+        source = self.source(app, context, "orchestrated-message")
+        materials = consumer.contributions(snapshot, context, NOW, fallback_source=source)
+        instruction = consumer.instruction(materials)
+        self.assertIn("窄窗口", instruction)
+        self.assertIn("私人阅读安排", instruction)
+        self.assertIn("不得声称该时段没课、没安排或完全空闲", instruction)
+        self.assertNotIn("连续日程（HDSI）", instruction)
+
+
 class ContinuousScheduleContextTests(StateFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_continuous_mode_preserves_partial_context_without_calendar(self):
+        _, app, context, manager = self.setup_state()
+        for calendar_enabled, calendar in ((False, app.calendar), (True, None)):
+            with self.subTest(calendar_enabled=calendar_enabled):
+                self.configure(manager, calendar_enabled=calendar_enabled, schedule_simulation_mode="continuous")
+                consumer = ConversationStateContext(app.role_state, calendar)
+                snapshot = consumer.capture(context, NOW)
+                self.assertEqual(snapshot["projection_version"], 4)
+                self.assertEqual(snapshot["calendar"], {"items": [], "partial": True, "skipped": 0})
+                materials = consumer.contributions(snapshot, context, NOW)
+                self.assertEqual(len(materials), 1)
+                self.assertEqual(materials[0].source.owner, "role.calendar.projection")
+                instruction = consumer.instruction(materials)
+                self.assertIn("连续日程（HDSI）", instruction)
+                self.assertIn("材料可能不完整", instruction)
+
     async def test_continuous_mode_supplies_calendar_context_without_role_state_and_rechecks_access(self):
         _, app, context, manager = self.setup_state()
         self.configure(manager, calendar_enabled=True, schedule_simulation_mode="continuous")

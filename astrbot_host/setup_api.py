@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from astrbot.api.web import request
 
-from companion_v2.execution.models import TaskError, require
+from companion_v2.execution.models import TERMINAL, TaskError, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.proactive.configuration import PURPOSES
@@ -221,6 +221,7 @@ class SetupWebAPI:
             (PREFIX + "/prepare", self.prepare, ["POST"], "Prepare the confirmed Companion V2 profile"),
             (PREFIX + "/complete", self.complete, ["POST"], "Record a completed Companion V2 setup section"),
             (PREFIX + "/proactive-test", self.proactive_test, ["POST"], "Run a one-time proactive contact through the V2 contact and delivery pipeline"),
+            (PREFIX + "/proactive-test/status", self.proactive_test_status, ["GET"], "Read the existing proactive test receipt without host discovery"),
             (PREFIX + "/proactive-diagnostic", self.proactive_diagnostic, ["POST"], "Run a confirmed purpose-specific proactive diagnostic to the core administrator"),
             (PREFIX + "/proactive-test/confirm", self.confirm_proactive_test, ["POST"], "Record administrator confirmation of the existing test message"),
         ]
@@ -335,17 +336,34 @@ class SetupWebAPI:
                 "settings_error": getattr(getattr(self.controller, "settings_error", None), "code", None),
                 "host": status}
 
-    async def status(self):
-        try:
-            username = self._admin()
+    async def _test_progress(self, username: str) -> dict:
+        saved = self.progress.read()
+        receipt = saved["proactive_test"]
+        if (receipt and receipt["state"] == "started"
+                and (self._test_task is None or self._test_task.done())):
             async with self._test_lock:
                 saved = self.progress.read()
                 receipt = saved["proactive_test"]
                 if (receipt and receipt["state"] == "started"
                         and (self._test_task is None or self._test_task.done())):
                     await self._restore_test_contact_permission(username, receipt["attempt_id"])
-                    self.progress.finish_proactive_test(outcome="unknown",
+                    saved = self.progress.finish_proactive_test(outcome="unknown",
                         finished_at=datetime.now(timezone.utc).isoformat(), error_code="setup_test_interrupted")
+        return saved
+
+    async def proactive_test_status(self):
+        try:
+            saved = await self._test_progress(self._admin())
+            return self._response(Outcome.success({"proactive_test": saved["proactive_test"],
+                                                   "ready": saved["ready"]}))
+        except TaskError as error:
+            return self._error(error.code, str(error))
+        except (ValueError, TypeError, KeyError, OSError, UnicodeError):
+            return self._error("setup_progress_unavailable", "the existing test receipt could not be read")
+
+    async def status(self):
+        try:
+            await self._test_progress(self._admin())
             document = self._status_document()
             from .upgrade_setup import UpgradeSetup
             try:
@@ -894,6 +912,7 @@ class SetupWebAPI:
                 state = self.progress.confirm_proactive_test(attempt_id=data["attempt_id"],
                     confirmed_by=username, confirmed_at=datetime.now(timezone.utc).isoformat())
                 return self._response(Outcome.success({"state": state["proactive_test"]["state"],
+                    "proactive_test": state["proactive_test"],
                     "ready": state["ready"], "replay_allowed": False}))
             except TaskError as error:
                 return self._error(error.code, str(error))
@@ -1317,15 +1336,34 @@ class SetupWebAPI:
             deadline = asyncio.get_running_loop().time() + 150
             last_progress = None
             while asyncio.get_running_loop().time() < deadline:
+                receipt = self.progress.read()["proactive_test"]
+                if not receipt or receipt["attempt_id"] != attempt_id or receipt["state"] != "started":
+                    return
                 observed = require(app.proactive.observe(context, task.task_id))
                 delivery = observed["delivery"]
-                stage_state("model_generation", "passed")
+                generation = observed.get("generation")
+                stage_state("model_generation", "passed" if generation == "succeeded" else "running")
                 judge = observed.get("judge")
                 stage_state("persona_review", "passed" if observed.get("judge_allowed") is True else
                             "not_required" if judge is None else
                             "running" if judge == "pending" else "pending")
-                if delivery in (None, "pending", "partial"):
+                if delivery in ("pending", "partial", "dispatched"):
                     stage_state("delivery", "running")
+                if delivery is None and generation in TERMINAL - {"succeeded"}:
+                    current_task = require(app.tasks.read(context, task.task_id))
+                    stage_state("model_generation", "failed")
+                    for item in stages:
+                        if item["stage"] == "model_generation" and current_task.reason:
+                            item["detail"] = redact_text(str(current_task.reason))[:256]
+                    stage_state("persona_review", "skipped")
+                    stage_state("delivery", "skipped")
+                    stage_state("receipt", "skipped")
+                    self._restore_test_contact_permission_with_context(username, attempt_id, app, context)
+                    self.progress.finish_proactive_test(
+                        outcome="unknown" if generation == "uncertain" else "failed",
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        error_code="setup_contact_generation_failed", report=report())
+                    return
                 progress = (tuple((item["stage"], item["state"], item.get("detail", ""))
                                   for item in stages), delivery, observed.get("receipt_ref"))
                 if progress != last_progress:
@@ -1386,8 +1424,11 @@ class SetupWebAPI:
                     code = "setup_contact_permission_restore_failed"
                     outcome = "unknown"
             try:
+                for item in stages:
+                    if item["state"] == "running":
+                        item["state"] = "failed"
                 self.progress.finish_proactive_test(outcome=outcome,
-                    finished_at=datetime.now(timezone.utc).isoformat(), error_code=code)
+                    finished_at=datetime.now(timezone.utc).isoformat(), error_code=code, report=report())
             except ValueError:
                 pass
 

@@ -19,6 +19,7 @@ class Element {
   addEventListener(name, callback) { this.listeners.set(name, callback); }
   replaceChildren(...children) { this.children = children; }
   append(...children) { this.children.push(...children); }
+  querySelectorAll() { return this.children; }
   setAttribute() {}
   showModal() { this.open = true; }
   close() { this.open = false; }

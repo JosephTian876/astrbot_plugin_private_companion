@@ -54,6 +54,9 @@
     $("start-host").disabled = value || state?.host_state === "running";
     $("stop-host").disabled = value || !state || ["new", "stopped"].includes(state.host_state);
     ["write-diary", "start-sleep"].forEach(id => { $(id).disabled = value || !state?.config.enabled || state?.host_state !== "running"; });
+    /* 配置没读到（state 为 null）时别让用户对着能点的表单白点：整组禁用，
+       具体原因由 load() 的提示给出，刷新成功后自动恢复。 */
+    $("config-form").querySelectorAll("input, button").forEach(el => { el.disabled = value || !state; });
   }
   async function api(method, body) {
     try {
@@ -202,8 +205,15 @@
       state = selected = null;
       ["journal-list", "journal-detail", "reading-list", "sleep-list", "receipt-list", "retry-id", "dream-retry"].forEach(id => $(id).replaceChildren());
       $("retry-form").hidden = true;
-      for (const id of ["role", "participant", "routine-state", "sleep-scope", "sleep-executor", "sleep-next", "sleep-active-wake", "sleep-pressure", "sleep-debt", "sleep-workload", "sleep-recommended"]) $(id).textContent = "—";
-      $("host-state").textContent = "暂不可用"; $("editor").close(); notice(error.message, true); controls(false);
+      for (const id of ["role", "participant", "sleep-scope", "sleep-executor", "sleep-next", "sleep-active-wake", "sleep-pressure", "sleep-debt", "sleep-workload", "sleep-recommended"]) $(id).textContent = "—";
+      /* 配置/状态没读到时给出明确状态，而不是一排“—”：用户能分清是
+         「没有配置」还是「这次没读到」，也知道下一步点哪里。 */
+      $("routine-state").textContent = "读取失败";
+      $("host-state").textContent = "暂不可用";
+      $("settings").open = true;
+      $("editor").close();
+      notice(`${error.message} 配置暂时无法读取或保存，请点「刷新记录」重试。`, true);
+      controls(false);
     }
   }
   function open(action, item = null) {
@@ -225,7 +235,17 @@
     document.querySelectorAll(".tab-panel").forEach(p => { p.hidden = p.id !== tab; }); $("activity-pages").hidden = !["reading", "sleep"].includes(tab);
   }));
   $("config-form").addEventListener("input", () => { dirty = true; });
-  $("config-form").addEventListener("submit", e => { e.preventDefault(); const changes = {}; configFields.forEach(k => { changes[k] = booleanFields.includes(k) ? $(k).checked : ["sleep_minutes", "sleep_variation_minutes", "sleep_window_minutes"].includes(k) ? Number($(k).value) : $(k).value; }); send("configure", { changes, edit_token: state.edit_token }); });
+  $("config-form").addEventListener("submit", e => {
+    e.preventDefault();
+    /* 状态没读到时 state 仍是 null：这里以前会直接读 state.edit_token 抛错，
+       表单看起来“点了没反应”。先把原因说清楚，再让用户刷新。 */
+    if (!state) { $("settings").open = true; notice("配置尚未读取成功，请先点「刷新记录」重试后再保存。", true); return; }
+    try {
+      const changes = {};
+      configFields.forEach(k => { changes[k] = booleanFields.includes(k) ? $(k).checked : ["sleep_minutes", "sleep_variation_minutes", "sleep_window_minutes"].includes(k) ? Number($(k).value) : $(k).value; });
+      send("configure", { changes, edit_token: state.edit_token });
+    } catch (error) { notice(error?.message || "保存失败，请刷新后重试。", true); }
+  });
   $("editor-form").addEventListener("submit", e => {
     e.preventDefault(); const args = {};
     if (dialogAction === "add_text") { args.title = $("text-title").value; args.text = $("text-body").value; }

@@ -54,6 +54,7 @@ function harness({status, responses = {}, targets = [], refreshedTargets = targe
       if (result instanceof Error) return Promise.reject(result);
       if (result !== undefined) return Promise.resolve(result);
       if (method === 'GET' && route === 'setup/status') return Promise.resolve(currentStatus);
+      if (method === 'GET' && route === 'setup/proactive-test/status') return Promise.resolve(currentStatus);
       return Promise.resolve({});
     },
     targets: () => currentTargets,
@@ -1348,7 +1349,8 @@ test('the proactive test requires explicit consent and polls the real delivery r
   const delivered = readyStatus({proactive_test: {state: 'delivered', attempt_id: 'attempt-1',
     finished_at: '2026-10-02T04:17:47Z'}});
   const page = harness({status: initial, responses: {
-    'GET setup/status': [initial, started, delivered],
+    'GET setup/status': initial,
+    'GET setup/proactive-test/status': delivered,
     'POST setup/proactive-test': {state: 'started', attempt_id: 'attempt-1', ready: false},
   }});
   page.mount();
@@ -1361,6 +1363,46 @@ test('the proactive test requires explicit consent and polls the real delivery r
   assert.deepEqual(JSON.parse(JSON.stringify(call.body)), {enable_proactive: true});
   assert.match(page.html, /首次设置已完成/);
   assert.equal(page.calls.filter(item => item.method === 'POST' && item.route === 'setup/proactive-test').length, 1);
+  assert.equal(page.calls.filter(item => item.route === 'setup/status').length, 1);
+});
+
+test('an in-flight test shows its real stage and stale polling cannot undo recipient confirmation', async () => {
+  let releasePoll;
+  const started = readyStatus({step: 'proactive_test', ready: false,
+    proactive_test: {state: 'started', attempt_id: 'same-attempt',
+      stages: [{stage: 'model_generation', state: 'running'}, {stage: 'delivery', state: 'pending'}]}});
+  const page = harness({status: started, responses: {
+    'GET setup/proactive-test/status': () => new Promise(resolve => { releasePoll = resolve; }),
+    'POST setup/proactive-test/confirm': {ready: true, state: 'received',
+      proactive_test: {state: 'received', attempt_id: 'same-attempt'}},
+  }});
+  page.mount();
+  await settle();
+  assert.match(page.html, /主动测试进行中/);
+  assert.match(page.html, /模型生成：进行中/);
+  assert.match(page.html, /平台投递：待处理/);
+  assert.doesNotMatch(page.html, /主动测试结果未知/);
+  page.click('confirm-test-received');
+  await settle();
+  assert.match(page.html, /首次设置已完成/);
+  releasePoll(started);
+  await settle();
+  assert.match(page.html, /首次设置已完成/);
+  assert.equal(page.calls.filter(item => item.route === 'setup/status').length, 1);
+  page.unmount();
+});
+
+test('a failed test displays the recorded failure and keeps the home entry available', async () => {
+  const page = harness({status: readyStatus({ready: false, step: 'proactive_test',
+    proactive_test: {state: 'failed', attempt_id: 'failed-model', error_code: 'setup_contact_generation_failed',
+      stages: [{stage: 'model_generation', state: 'failed', detail: 'model_provider_unavailable'}]}})});
+  page.mount();
+  await settle();
+  assert.match(page.html, /模型生成：失败/);
+  assert.match(page.html, /model_provider_unavailable/);
+  assert.match(page.html, /进入陪伴小屋/);
+  assert.doesNotMatch(page.html, /首次设置已完成/);
+  page.unmount();
 });
 
 test('migration apply sends the reviewed plan token and refuses locally without a plan', async () => {
