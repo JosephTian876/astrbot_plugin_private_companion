@@ -319,6 +319,19 @@ class LocalRoleTools:
         optional = self.messages.optional_guidance
         optional_changed = (tuple(m for m in original.context.materials if optional(m))
                             != tuple(m for m in request.context.materials if optional(m)))
+        if request.instruction != original.instruction:
+            from .style_context import EXPRESSION_STYLE_INSTRUCTION
+            style_purposes = {"expression_style_context", "expression_style_rule"}
+            old_styles = tuple(m for m in original.context.materials if m.purpose in style_purposes)
+            new_styles = tuple(m for m in request.context.materials if m.purpose in style_purposes)
+            expected_instruction = original.instruction
+            style_suffix = "\n" + EXPRESSION_STYLE_INSTRUCTION
+            if (any(m.purpose == "expression_style_rule" for m in old_styles)
+                    and not any(m.purpose == "expression_style_rule" for m in new_styles)
+                    and style_suffix in expected_instruction):
+                expected_instruction = expected_instruction.replace(style_suffix, "", 1)
+            if not optional_changed or request.instruction != expected_instruction:
+                return False
         if optional_changed:
             if not self.messages.validate_optional_refresh(context, batch_id, original, request):
                 return False

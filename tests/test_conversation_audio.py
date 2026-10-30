@@ -243,4 +243,4 @@ class ConversationAudioTests(AudioFixture, unittest.IsolatedAsyncioTestCase):
             return self.captured_audio(locator.position)
         self.bridge.audio_loader = change_role
         result = await self.bridge.capture(self.audio_event())
-        self.assertEqual(result.failure.code, "host_persona_changed")
+        self.assertTrue(result.is_success, result.failure)

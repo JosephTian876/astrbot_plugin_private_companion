@@ -25,12 +25,12 @@ from companion_v2.storage.runtime import StorageRuntime
 from companion_v2.proactive.search_settings import SearchSettingsStore
 from .multi_authority import HOST_ID, MANIFEST, MultiAuthority
 from .multi_session import MultiHostSession, persona_conversation
-from .multi_settings import MultiHostSettings
+from .multi_settings import MultiHostSettings, find_persona_mapping
 from .bootstrap_provider import resolve_bootstrap_provider
 from .group_settings import GroupTarget
-from .native import installed_native_types
-from .backup_api import apply_staged_restore
-from .storage_location import selected_backup_directory
+from .native import installed_native_types, native_text_provider
+from .backup_api import guard_restore_startup
+from .storage_location import resolve_data_root, selected_backup_directory
 from .native_extensions import NativeExtensionRegistry, together_execution_binding
 from .native_extensions.builtins import MANAGED_EXTENSIONS, create_bundled_extensions
 from .settings import DELIVERY_AUTHORIZATION_TTL, INSTALLATION_PREFIX, PROFILE_PATTERN, HostControlError
@@ -54,13 +54,20 @@ class AstrBotMultiController:
     def __init__(self, context, config, data_root, *, native_types=None, now=None):
         self.lifecycle_token = uuid4().hex
         self.config = config
-        self.context, self.data_root = context, Path(data_root).resolve()
+        # Hosts may hand us the plugin code tree or a V1 data root when
+        # get_data_dir() is incomplete. Normalize again here so every caller
+        # (not only main.py) lands in an isolated V2 data root.
+        self.context, self.data_root = context, resolve_data_root(Path(data_root).resolve())
         self.integration = IntegrationRegistry(context)
         self.native_types = native_types or installed_native_types()
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.runtime = self.authority = self.session = self.last_session = None
         # The dashboard can report whether a staged restore was applied at open.
         self.last_restore = None
+        # Diagnostics for the startup gate: set before opening, kept on failure so
+        # the operator can see which journal/pending request blocked the store.
+        self.restore_state = None
+        self.restore_blocked = False
         self.native_extensions = None
         self._accepting = self._terminated = False
         # Lifecycle work may wait on AstrBot; keep that wait out of the lock
@@ -105,7 +112,7 @@ class AstrBotMultiController:
         # mapping works without a redundant save on a second configuration
         # screen. An explicitly saved provider still wins.
         bootstrap = resolve_bootstrap_provider(
-            self.context, getattr(self.native_types, "provider", None), settings.common.provider_id)
+            self.context, getattr(self.native_types, "is_text_provider", None), settings.common.provider_id)
         if (not settings.common.provider_id and bootstrap.source == "auto"
                 and bootstrap.provider_id):
             settings = replace(settings, common=replace(
@@ -152,7 +159,7 @@ class AstrBotMultiController:
             # again at first use so a blank reviewed setting follows AstrBot's
             # current model instead of failing the mapping-to-start flow.
             bootstrap = resolve_bootstrap_provider(
-                self.context, getattr(self.native_types, "provider", None), "")
+                self.context, getattr(self.native_types, "is_text_provider", None), "")
             if bootstrap.source == "auto" and bootstrap.provider_id:
                 self.settings = replace(self.settings, common=replace(
                     self.settings.common, provider_id=bootstrap.provider_id))
@@ -217,8 +224,28 @@ class AstrBotMultiController:
         configured_target = self._core_target(parked) is not None
         return {"bound": parked.confirmed, "pinned": False, "pending": not parked.confirmed,
                 "confirmed": parked.confirmed, "configured_target": configured_target,
-                **{name: identity[name] for name in
-                   ("platform_id", "account_id", "participant_id", "bot_id", "role_id", "persona_id")}}
+                **self._reviewed_identity(identity)}
+
+    def _reviewed_identity(self, identity):
+        """The role a confirmed window actually routes to after the last review.
+
+        A persona that was renamed or regrouped into another role keeps the parked
+        file's old key.  Comparing that stale key against the live role made
+        开始使用 report host_persona_binding_changed forever, even though the window
+        itself was still the confirmed one, so resolve it through the reviewed map.
+        """
+        current = dict(identity)
+        settings = self.settings
+        if settings is None:
+            return current
+        from .identity_derivation import normalize_persona_id
+        wanted = normalize_persona_id(current.get("persona_id"))
+        mapping = next((item for item in settings.personas
+                        if item.bot_id == current["bot_id"]
+                        and normalize_persona_id(item.persona_id) == wanted), None)
+        current["role_id"] = (mapping.role_id if mapping is not None
+                              else settings.canonical_role_id(current["role_id"]))
+        return current
 
     def _core_target(self, binding):
         settings = self.settings
@@ -229,10 +256,13 @@ class AstrBotMultiController:
                       == (binding.platform_id, binding.account_id, binding.participant_id)), None)
         if match is None:
             return None
-        if binding.persona_id and not any(persona.bot_id == match.bot_id
-                                           and persona.persona_id == binding.persona_id
-                                           for persona in settings.personas):
-            return None
+        if binding.persona_id:
+            from .identity_derivation import normalize_persona_id
+            wanted = normalize_persona_id(binding.persona_id)
+            if not any(persona.bot_id == match.bot_id
+                       and normalize_persona_id(persona.persona_id) == wanted
+                       for persona in settings.personas):
+                return None
         return match
 
     async def proactive_diagnostic_target(self):
@@ -282,7 +312,7 @@ class AstrBotMultiController:
     def _register_core_binding(self, binding):
         """Seed the first shared target from the Dashboard-confirmed private window."""
         from copy import deepcopy
-        from .identity_derivation import derive_role_id
+        from .identity_derivation import derive_core_target_id, derive_role_id
 
         if binding.persona_id:
             native = self.context.persona_manager.get_persona_v3_by_id(binding.persona_id)
@@ -321,7 +351,7 @@ class AstrBotMultiController:
                        == (binding.platform_id, binding.account_id, binding.participant_id)), None)
         if target is None:
             used_ids = {item.get("target_id") for item in targets if type(item) is dict}
-            base_id = "setup-core-" + binding.account_id
+            base_id = derive_core_target_id(binding.platform_id, binding.account_id, binding.participant_id)
             target_id = base_id
             suffix = 2
             while target_id in used_ids:
@@ -372,8 +402,13 @@ class AstrBotMultiController:
         if request.reason == "host_identity_invalid":
             return {"handled": True, "ok": False, "reason": request.reason,
                     "reply": "人格名不能包含换行或过长，请用一行短名字重发。"}
+        persona_id = request.persona_id
+        if request.kind == "bind" and not persona_id:
+            # 不带人格名时固定这个窗口此刻真实使用的人格。空字符串在运行时只会
+            # 变成 "[%None]"，窗口一旦解析出真实人格就会因未映射而无法回复。
+            persona_id = await self._window_persona(identity)
         candidate = PendingBinding(identity["platform_id"], identity["account_id"],
-                                   identity["participant_id"], request.persona_id)
+                                   identity["participant_id"], persona_id)
         if request.kind == "confirm":
             if existing is None:
                 return {"handled": True, "ok": False, "reason": "host_binding_missing",
@@ -403,6 +438,17 @@ class AstrBotMultiController:
                     "reply": "这条绑定无法成立，请回到「开始使用」查看原因。"}
         return {"handled": True, "ok": True, "confirmed": False,
                 "reply": describe_pin(identity), "binding": self.binding_state()}
+
+    async def _window_persona(self, identity):
+        """The persona this private window actually speaks in, when unnamed."""
+        resolver = getattr(self.session_topology, "window_persona", None)
+        if not callable(resolver):
+            return ""
+        try:
+            return await resolver(identity["platform_id"], identity["participant_id"])
+        except Exception as error:
+            logger.debug("[CompanionV2] 绑定时读取当前人格失败 error_type=%s", type(error).__name__)
+            return ""
 
     def confirm_binding(self):
         parked = self._parked_binding()
@@ -437,7 +483,9 @@ class AstrBotMultiController:
         reason = ("插件模块未能导入，请重新加载 V2 插件；若仍失败，请检查安装包是否完整并查看 AstrBot 日志。"
                   if code == "host_module_unavailable" else
                   str(error) if code.split("__", 1)[0] == "host_native_lookup_timeout"
-                  or code in ("host_binding_changed", "account_config_save_failed", "account_config_persistence_unavailable") else
+                  or code in ("host_binding_changed", "account_config_save_failed", "account_config_persistence_unavailable",
+                              "backup_restore_rollback_incomplete", "backup_restore_journal_unreadable",
+                              "backup_restore_startup_blocked") else
                   "shared host configuration, native route or authority could not be verified")
         self.last_failure = {"code": code, "reason": reason}
         if operation:
@@ -506,8 +554,7 @@ class AstrBotMultiController:
                                                  window.get("participant_id"))
                 if target is None or target.participant_id == "*" or window.get("bot_id") != target.bot_id:
                     continue
-                mapping = next((item for item in settings.personas if item.bot_id == target.bot_id
-                                and item.persona_id == window.get("persona_id")), None)
+                mapping = find_persona_mapping(settings.personas, target.bot_id, window.get("persona_id"))
                 if mapping is None:
                     continue
                 conversations[target.target_id] = {
@@ -518,7 +565,7 @@ class AstrBotMultiController:
         provider_id = settings.common.provider_id
         provider = self.context.get_provider_by_id(provider_id) if provider_id else None
         model_issue = None
-        if not isinstance(provider, self.native_types.provider):
+        if not native_text_provider(self.native_types, provider):
             model_issue = "host_provider_unavailable" if provider_id else "host_provider_required"
             if not allow_unavailable_model:
                 reason = ("the configured model has no verified native adapter" if provider_id
@@ -538,7 +585,7 @@ class AstrBotMultiController:
         manifest = {"binding_contract": settings.binding_contract,
                     "settings_fingerprint": settings.fingerprint,
                     "provider_fingerprint": provider_fingerprint(provider) if model_issue != "host_provider_required"
-                        and provider is not None and isinstance(provider, self.native_types.provider) else "",
+                        and provider is not None and native_text_provider(self.native_types, provider) else "",
                     "personas": [asdict(persona) for persona in personas]}
         manifest["fingerprint"] = digest(manifest)
         # Account/persona mappings have their own validity. Keep a pending model
@@ -567,8 +614,24 @@ class AstrBotMultiController:
         backup_directory = selected_backup_directory(
             root / "runtime", storage.get("backup_path", "") if isinstance(storage, dict) else "",
             settings.installation_id, plugin_root=self.data_root)
-        last_restore = apply_staged_restore(root / "runtime", installation_id=settings.installation_id,
-                                            backup_directory=backup_directory)
+        last_restore, restore_state = guard_restore_startup(
+            root / "runtime", installation_id=settings.installation_id,
+            backup_directory=backup_directory)
+        self.last_restore, self.restore_state = last_restore, restore_state
+        if restore_state.get("blocking"):
+            # A restore whose rollback did not finish is not "no restore": the
+            # journal holds the previous installation. StorageRuntime.open would
+            # create a new empty database for any missing file and fork the data.
+            # Keep the staged request, the journal and every byte, report a
+            # readable code, and let the next start retry the same rollback.
+            self.restore_blocked = True
+            logger.error(
+                "[CompanionV2] 拒绝在还原回滚未完成时打开数据库 code=%s journals=%s pending=%s root=%s",
+                restore_state.get("code"),
+                ",".join(item.get("name", "?") for item in restore_state.get("journals") or ()),
+                bool(restore_state.get("pending")), root / "runtime")
+            raise HostControlError(restore_state["code"], restore_state["detail"])
+        self.restore_blocked = False
         runtime = StorageRuntime.open(data_root=root / "runtime", installation_id=settings.installation_id)
         runtime.backup_directory = backup_directory
         try:
@@ -675,14 +738,28 @@ class AstrBotMultiController:
     async def initialize_profile(self):
         async with self._lifecycle_lock:
             try:
-                self._idle()
                 self.refresh_settings()
                 manifest, conversations = await self._probe()
+                previous_session = self.session
+                restore_running = bool(previous_session is not None
+                    and previous_session.application.state == "running")
+                if previous_session is not None and previous_session.application.state not in ("new", "stopped"):
+                    self._accepting = False
+                    report = await previous_session.close(grace_seconds=0.5)
+                    if getattr(report, "state", None) != "stopped":
+                        raise TaskError("host_must_stop", "the shared host did not finish stopping before initialization")
+                    async with self._control_lock:
+                        if self.session is previous_session:
+                            self.last_session, self.session = previous_session, None
+                self._idle()
                 async with self._control_lock:
                     if self._terminated:
                         raise TaskError("host_terminated", "the shared host is stopping or terminated")
                     self._idle()
                     receipt = await self._initialize_manifest_locked(manifest, conversations)
+                    session = self.session
+                if restore_running:
+                    await self._start_initialized_session(session)
                 self.last_failure = None
                 return Outcome.success(receipt)
             except Exception as error:
@@ -770,14 +847,35 @@ class AstrBotMultiController:
                 if self.runtime is not None and (self.runtime.data_root != root.resolve()
                         or self.runtime.installation_id != settings.installation_id):
                     raise TaskError("host_storage_changed", "stop and reload before changing the active V2 data installation")
+                # A startup gate refusal is sticky for this process: opening the
+                # database here (the only path that bypasses _create_storage) would
+                # fork exactly like the startup would have. Require a restart after
+                # the journal is fixed.
+                if self.restore_blocked:
+                    raise TaskError(
+                        "backup_restore_startup_blocked",
+                        "a staged restore could not be rolled back; fix the data root and restart the plugin")
                 opened_here = self.runtime is None
                 if self.runtime is None and (root / StorageRuntime.DATABASE_FILENAME).is_file():
+                    # This path opens the store without going through
+                    # _create_storage. It still must apply a staged restore first
+                    # and honor the same rollback gate; otherwise a crash journal
+                    # could be bypassed by saving a mapping before the host starts.
+                    storage_config = self.config.get("storage", {}) if isinstance(self.config, dict) else {}
+                    backup_directory = selected_backup_directory(
+                        root, storage_config.get("backup_path", "") if isinstance(storage_config, dict) else "",
+                        settings.installation_id, plugin_root=self.data_root)
+                    last_restore, restore_state = await asyncio.to_thread(
+                        guard_restore_startup, root, installation_id=settings.installation_id,
+                        backup_directory=backup_directory)
+                    self.last_restore, self.restore_state = last_restore, restore_state
+                    if restore_state.get("blocking"):
+                        self.restore_blocked = True
+                        raise TaskError(restore_state["code"], restore_state["detail"])
+                    self.restore_blocked = False
                     self.runtime = await asyncio.to_thread(
                         StorageRuntime.open, data_root=root, installation_id=settings.installation_id)
-                    storage = self.config.get("storage", {}) if isinstance(self.config, dict) else {}
-                    self.runtime.backup_directory = selected_backup_directory(
-                        root, storage.get("backup_path", "") if isinstance(storage, dict) else "",
-                        settings.installation_id, plugin_root=self.data_root)
+                    self.runtime.backup_directory = backup_directory
                 try:
                     if self.runtime is not None:
                         authority = MultiAuthority(self.runtime, settings, now=self.now,
@@ -850,9 +948,12 @@ class AstrBotMultiController:
                             raise
                         saved = self.authority.require_manifest()
                         candidate, repaired = recover_repeated_single_target(self.config, saved.get("binding_contract"))
-                        if not repaired:
+                        if repaired:
+                            probed = self._recover_saved_mapping(candidate, probed)
+                        elif self._confirmed_core_window():
+                            await asyncio.to_thread(self._adopt_confirmed_mapping, probed)
+                        else:
                             raise
-                        probed = self._recover_saved_mapping(candidate, probed)
                     await self._assemble(probed)
                 self.last_failure = None
                 return Outcome.success({"loaded": True, "started": False})
@@ -885,6 +986,30 @@ class AstrBotMultiController:
         logger.info("[CompanionV2] 已移除重复迁移的旧私聊目标，恢复已保存的角色映射")
         return restored
 
+    def _confirmed_core_window(self) -> bool:
+        """Whether Dashboard已确认的核心窗口仍在当前映射里。
+
+        只有「开始使用」里确认过、且映射仍然存在的核心管理员窗口才算操作员已复核；
+        没有绑定文件时不猜，继续按绑定变化拒绝启动。
+        """
+        parked = self._parked_binding()
+        return bool(parked is not None and parked.confirmed and self._core_target(parked) is not None)
+
+    def _adopt_confirmed_mapping(self, manifest):
+        """Re-pin a manifest that only lags behind an already-confirmed core window.
+
+        ``confirm_binding`` 把确认过的窗口写进插件配置，但当时的 manifest 还是
+        改动前的映射。此后每次加载都会以 host_binding_changed（private_target /
+        persona）拒绝启动，而页面上没有任何操作能修好它。确认过的窗口就是操作员
+        的复核结论，这里按 reviewed 重新固定；身份归属真的变了仍由
+        host_identity_conflict 拦下。
+        """
+        with self.runtime.transaction():
+            receipt = self.authority.initialize(manifest, reviewed=True,
+                                                allow_legacy_staging=self._adopting_legacy_profile)
+        logger.info("[CompanionV2] 已按开始使用中确认的核心管理员窗口更新账号与角色绑定")
+        return receipt
+
     async def start(self):
         async with self._lifecycle_lock:
             try:
@@ -906,27 +1031,33 @@ class AstrBotMultiController:
                     try:
                         await asyncio.to_thread(self.authority.require_manifest, manifest)
                     except TaskError as error:
-                        if error.code != "host_not_initialized":
+                        if error.code == "host_not_initialized":
+                            await self._initialize_manifest_locked(manifest, conversations)
+                            await asyncio.to_thread(self.authority.require_manifest, manifest)
+                        elif error.code == "host_binding_changed" and self._confirmed_core_window():
+                            await asyncio.to_thread(self._adopt_confirmed_mapping, manifest)
+                        else:
                             raise
-                        await self._initialize_manifest_locked(manifest, conversations)
-                        await asyncio.to_thread(self.authority.require_manifest, manifest)
                     if self.session is None or self.session.application.state != "new":
                         await self._assemble(manifest)
                     session = self.session
-                    task, model = await asyncio.to_thread(self._startup_generations)
-                    task_generation = task["generation"] if task else 0
-                    model_generation = model["generation"] if model else 0
-                result = await session.start(expected_task_generation=task_generation,
-                                             expected_model_generation=model_generation)
-                require(result)
-                async with self._control_lock:
-                    self._settings()
-                    self._accepting, self.last_failure = True, None
-                    targets = len(self.settings.all_targets)
-                return Outcome.success({"state": "running", "targets": targets, "startup": result.unwrap()})
+                return await self._start_initialized_session(session)
             except Exception as error:
                 self._accepting = False
                 return self._failure(error, operation="start")
+
+    async def _start_initialized_session(self, session):
+        task, model = await asyncio.to_thread(self._startup_generations)
+        result = await session.start(expected_task_generation=task["generation"] if task else 0,
+                                     expected_model_generation=model["generation"] if model else 0)
+        require(result)
+        async with self._control_lock:
+            self._settings()
+            if self.session is not session:
+                raise TaskError("host_session_changed", "the initialized host changed before it could resume")
+            self._accepting, self.last_failure = True, None
+            targets = len(self.settings.all_targets)
+        return Outcome.success({"state": "running", "targets": targets, "startup": result.unwrap()})
 
     def _startup_generations(self):
         task = self.runtime.read_one("SELECT generation FROM task_supervisor WHERE singleton = 1", ())
@@ -999,8 +1130,7 @@ class AstrBotMultiController:
             raise
         if special or type(persona_id) is not str:
             return None
-        return next((mapping for mapping in self.settings.personas
-                     if mapping.bot_id == target.bot_id and mapping.persona_id == persona_id), None)
+        return find_persona_mapping(self.settings.personas, target.bot_id, persona_id)
 
     def claims(self, event):
         from .recalls import is_notice_event
@@ -1340,6 +1470,10 @@ class AstrBotMultiController:
                 "failure_code": session.application.failure_code if session else None,
                 "failure_detail": session.application.failure_detail if session else None,
                 "targets": self.web_api.target_inventory(), "last_failure": self.last_failure,
+                # Why the store was or was not opened. ``restore_state.blocking`` is
+                # the startup gate; the detail names the journal and never contains
+                # credentials or snapshot bytes.
+                "restore_state": self.restore_state,
                 "settings_error": getattr(self.settings_error, "code", None),
                 "parser_availability": parser_availability()}
 

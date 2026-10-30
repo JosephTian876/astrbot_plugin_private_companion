@@ -25,9 +25,9 @@ window.CompanionRealityAccess = (() => {
     bridge_timeout:"连接超时。可用同一个操作编号核对原请求。",
   };
   const labels = {
-    mobile:{path:"", capability:"reality.snapshot.read", icon:"map-pin", title:"手机摘要",
-      description:"读取位置、终端状态、活动和健康摘要。", allowed:"允许读取手机摘要", revoke:"撤回手机摘要授权",
-      saved:"已允许当前私聊读取手机摘要。", removed:"已撤回当前私聊的手机摘要授权。", ready:"手机摘要工具已进入当前对话。"},
+    mobile:{path:"", capability:"reality.snapshot.read", icon:"smartphone", title:"手机读取",
+      description:"一次授权覆盖当前定位与手机状态；不会主动采集。", allowed:"允许手机读取（定位与手机状态）", revoke:"撤回手机读取授权",
+      saved:"已允许当前私聊读取手机摘要。定位与手机状态现在一起可用。", removed:"已撤回当前私聊的手机读取授权。", ready:"手机读取工具已进入当前对话。"},
     camera:{path:"/camera", capability:"reality.camera.observe", icon:"camera", title:"摄像头单帧",
       description:"仅按用户本轮明确请求读取单帧并返回识别摘要。", allowed:"允许摄像头单帧观察", revoke:"撤回摄像头授权",
       saved:"已允许当前私聊按明确请求读取单帧。", removed:"已撤回当前私聊的摄像头授权。",
@@ -56,7 +56,7 @@ window.CompanionRealityAccess = (() => {
     ["米家设备", ["deviceList", "deviceStatus", "deviceControl", "deviceAction"]],
     ["设备操作确认", ["operationLookup", "operationCancel"]],
   ];
-  let node = null, scope = "", paths = {}, statuses = {}, pending = {}, busy = new Set();
+  let node = null, scope = "", paths = {}, statuses = {}, pending = {}, busy = new Set(), focusKind = "";
   let notices = {}, generation = 0;
   const pendingByScope = new Map();
   /* 授权读取结果按私聊角色范围暂存于本页内存。这样切换工作区后先能看到
@@ -90,9 +90,19 @@ window.CompanionRealityAccess = (() => {
   }
   function render() {
     if (!node?.isConnected) return;
-    const sections = groups.map(([title, kinds]) => `<section class="reality-consent-group" aria-label="${title}">
-      <h4>${title}</h4><div class="reality-consent-grid">${kinds.map(panel).join("")}</div></section>`).join("");
-    node.innerHTML = `<div class="reality-consent-head"><div><strong>当前会话能力授权</strong><small>${esc(identityLine())}</small></div>
+    if (focusKind && labels[focusKind]) {
+      node.innerHTML = `<div class="reality-consent-head"><div><strong>${esc(labels[focusKind].title)}</strong><small>${esc(identityLine())}</small></div>
+        <button class="button small" type="button" data-reality-access-action="refresh" ${busy.size ? "disabled" : ""}>重新读取</button></div>
+        <section class="reality-consent-group"><div class="reality-consent-grid is-single">${panel(focusKind)}</div></section>`;
+      window.lucide?.createIcons({attrs:{"aria-hidden":"true"}});
+      return;
+    }
+    const primary = groups[0];
+    const advanced = groups.slice(1).map(([title, kinds]) => `<details class="reality-consent-advanced">
+      <summary>${title}</summary><div class="reality-consent-grid">${kinds.map(panel).join("")}</div></details>`).join("");
+    const sections = `<section class="reality-consent-group" aria-label="${primary[0]}">
+      <h4>${primary[0]}</h4><div class="reality-consent-grid">${primary[1].map(panel).join("")}</div></section>${advanced}`;
+    node.innerHTML = `<div class="reality-consent-head"><div><strong>当前私聊的现实触及授权</strong><small>${esc(identityLine())} · 手机读取一次授权覆盖定位与手机状态，摄像头单独授权</small></div>
       <button class="button small" type="button" data-reality-access-action="refresh" ${busy.size ? "disabled" : ""}>重新读取</button></div>${sections}`;
     window.lucide?.createIcons({attrs:{"aria-hidden":"true"}});
   }
@@ -186,5 +196,5 @@ window.CompanionRealityAccess = (() => {
     const ticket = generation;
     void Promise.all(Object.keys(labels).map(kind => loadOne(kind, ticket)));
   }
-  return {mount, unmount};
+  return {mount, unmount, focus(kind){ focusKind = typeof kind === "string" ? kind : ""; render(); }};
 })();

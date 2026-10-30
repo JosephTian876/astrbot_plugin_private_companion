@@ -12,7 +12,7 @@ from companion_v2.memory.person.access import owner_key
 from companion_v2.memory.person.admin_names import PersonAcquaintanceNameManagement
 from companion_v2.memory.person.configuration import AcquaintanceSettings
 from companion_v2.memory.person.management import PersonAcquaintanceDirectory
-from companion_v2.memory.person.models import KIND, MAX_CONTEXTS, count_input, display_name, empty_document
+from companion_v2.memory.person.models import KIND, MAX_CONTEXTS, count_input, display_name, empty_document, known_names
 from astrbot_host.management_identity import dashboard_operator
 from tests.group_host_support import GroupFixture
 from tests.native_adapter_support import completion, final_text
@@ -112,7 +112,20 @@ class PersonAcquaintanceTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         payload = json.loads(material.payload)
         # The group card wins over the account nickname; both stay platform views.
         self.assertEqual((payload["display_name"], payload["name_basis"]), ("明哥", "platform"))
+        self.assertEqual(payload["native_account_id"], "200")
+        self.assertIsNone(payload["address_name"])
         self.assertEqual(payload["msg_count"], 1)
+
+    async def test_platform_rename_is_recorded_and_exposed_as_a_recent_change(self):
+        await self.start_host()
+        await self.receive(sender="200", nickname="小明")
+        context, batch = await self.receive(sender="200", nickname="小明明")
+        document = json.loads(self.card(context)["document_json"])
+        self.assertEqual(document["display_name_events"][0]["old"], "小明")
+        self.assertEqual(document["display_name_events"][0]["new"], "小明明")
+        material = next(m for m in self.materials(context, batch) if m.purpose == "current_person_card")
+        payload = json.loads(material.payload)
+        self.assertEqual(payload["recent_renames"][0]["new"], "小明明")
 
     async def test_known_names_include_cards_from_other_groups_without_group_ids(self):
         from types import SimpleNamespace as NS
@@ -297,6 +310,14 @@ class PersonCardModelTests(unittest.TestCase):
             count_input(document, group_scope(str(index)), "t" + str(index), "2026-09-26")
         self.assertEqual(len(document["contexts"]), MAX_CONTEXTS)
         self.assertIn("group:" + str(MAX_CONTEXTS + 3), document["contexts"])
+
+    def test_legacy_nickname_is_an_address_hint_not_a_display_name(self):
+        document = empty_document()
+        document["platform_nickname"] = "珝环"
+        document["legacy_private_contact"] = {"nickname": "比折"}
+        names = known_names(document, group_scope("300"))
+        self.assertIn("比折", names)
+        self.assertEqual(display_name(document, group_scope("300")), ("珝环", "platform"))
 
     def test_memory_group_and_top_level_do_not_import_person(self):
         offenders = [path for root in (Path("companion_v2/memory"), Path("companion_v2/memory/group"))

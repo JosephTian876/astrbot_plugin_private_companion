@@ -1,4 +1,4 @@
-"""Account edits synchronize private targets without widening group access."""
+﻿"""Account edits synchronize private targets without widening group access."""
 
 from copy import deepcopy
 import json

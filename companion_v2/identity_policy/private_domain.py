@@ -13,6 +13,11 @@ def source_ref(data):
         datetime.fromisoformat(data["expires_at"]) if data["expires_at"] else None)
 
 
+def as_source_ref(item):
+    """Accept persisted mappings and already materialized source references."""
+    return item if isinstance(item, SourceRef) else source_ref(item)
+
+
 class PrivateDomainAccess:
     def __init__(self, tasks):
         self.tasks, self.runtime = tasks, tasks.runtime
@@ -37,7 +42,7 @@ class PrivateDomainAccess:
         if not isinstance(sources, (tuple, list)) or len(sources) > limit:
             raise TaskError("domain_sources_invalid", "source dependency budget exceeded")
         for item in sources:
-            ref = source_ref(item) if isinstance(item, dict) else item
+            ref = as_source_ref(item)
             if not isinstance(ref, SourceRef) or ref.scope != context.scope:
                 raise TaskError("domain_source_scope", "source belongs to another conversation")
             require(self.sources.validate_reference_for_audience(ref, recipient=context.actor.subject, observed_at=at))

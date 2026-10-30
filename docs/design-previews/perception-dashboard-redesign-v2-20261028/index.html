@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>感知 · 呼吸感仪表盘</title>
+<style>
+:root{
+  --bg:#f3f5f0; --ink:#1e2a21; --muted:#788279; --faint:#9ca69d;
+  --line:rgba(47,75,54,.13); --green:#3c6047; --green-soft:#e4eee2;
+  --amber:#b17a30; --amber-soft:#f6ead3; --rose:#a35d58; --rose-soft:#f7e8e5;
+  --blue:#59798e; --blue-soft:#e5eef2;
+  font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:
+  radial-gradient(1100px 720px at 10% -10%,rgba(211,227,205,.64),transparent 66%),
+  radial-gradient(800px 600px at 96% 12%,rgba(246,232,205,.42),transparent 68%),
+  var(--bg);color:var(--ink)}
+.page{max-width:1680px;margin:0 auto;padding:34px 38px 46px;min-height:100vh}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:26px}
+.eyebrow{font-size:10px;letter-spacing:.18em;color:var(--faint);font-weight:700;margin-bottom:7px}
+h1{font-size:28px;letter-spacing:-.04em;font-weight:600;margin:0}
+.sub{font-size:12px;color:var(--muted);margin:7px 0 0}
+.top-right{display:flex;align-items:center;gap:9px;flex-wrap:wrap;justify-content:flex-end;padding-top:4px}
+.pill{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:rgba(255,255,255,.54);backdrop-filter:blur(8px);border-radius:999px;padding:7px 11px;color:var(--muted);font-size:11px}
+.pill b{color:var(--ink);font-weight:600}.dot{width:6px;height:6px;border-radius:50%;background:var(--green)}
+.btn{border:1px solid var(--line);background:rgba(255,255,255,.45);border-radius:10px;padding:8px 13px;font:inherit;font-size:11.5px;color:var(--ink);cursor:pointer}
+.btn.dark{background:var(--green);color:#fff;border-color:var(--green)}
+.ambient{position:relative;overflow:hidden;border-radius:30px;padding:31px 35px 25px;background:
+  linear-gradient(112deg,rgba(255,255,255,.88),rgba(246,249,243,.68) 56%,rgba(238,244,234,.5));
+  border:1px solid rgba(55,82,60,.11);box-shadow:0 20px 55px rgba(49,77,56,.07)}
+.ambient:before{content:"";position:absolute;width:470px;height:470px;border-radius:50%;right:-170px;top:-260px;background:radial-gradient(circle,rgba(208,226,202,.75),rgba(208,226,202,0) 68%)}
+.ambient:after{content:"";position:absolute;width:300px;height:300px;border-radius:50%;left:32%;bottom:-260px;background:radial-gradient(circle,rgba(246,233,206,.6),rgba(246,233,206,0) 68%)}
+.ambient-main{position:relative;display:grid;grid-template-columns:minmax(280px,1.1fr) minmax(300px,.9fr) auto;gap:30px;align-items:center}
+.nowline{display:flex;align-items:flex-start;gap:18px}
+.clock{font-size:56px;line-height:.92;letter-spacing:-.075em;font-weight:520}
+.clock small{font-size:14px;letter-spacing:0;color:var(--muted);margin-left:8px;font-weight:400}
+.date{font-size:12px;color:var(--muted);margin-top:11px}.date span{color:var(--faint);margin:0 5px}
+.place{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11px;margin-top:10px}
+.weather{display:flex;align-items:center;gap:14px;padding-left:25px;border-left:1px solid var(--line)}
+.wicon{width:54px;height:54px;border-radius:17px;background:rgba(233,241,229,.88);display:grid;place-items:center;color:#496852}
+.wicon svg{width:29px;height:29px;fill:none;stroke:currentColor;stroke-width:1.55;stroke-linecap:round;stroke-linejoin:round}
+.temp{font-size:37px;line-height:1;letter-spacing:-.055em;font-weight:520}.temp small{font-size:16px;color:var(--muted);letter-spacing:0}
+.condition{font-size:11.5px;color:var(--muted);margin-top:6px}.condition span{color:var(--faint);margin:0 5px}
+.ambient-side{min-width:245px;display:flex;flex-direction:column;align-items:flex-end;gap:9px}
+.ambient-side .line{font-size:11px;color:var(--muted);text-align:right}
+.ambient-side b{color:var(--ink);font-weight:600}
+.soft-chips{display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end}
+.soft-chip{font-size:10.5px;color:#5e6d62;background:rgba(255,255,255,.55);border:1px solid var(--line);border-radius:7px;padding:5px 8px}
+.ambient-foot{position:relative;display:flex;justify-content:space-between;align-items:center;gap:16px;border-top:1px solid var(--line);margin-top:22px;padding-top:14px;font-size:10.5px;color:var(--faint)}
+.ambient-foot .left{display:flex;gap:18px;flex-wrap:wrap}.ambient-foot b{color:#5d6a60;font-weight:600}
+.attention{display:flex;gap:10px;align-items:center;margin-top:14px;padding:9px 13px;border-radius:12px;background:rgba(249,239,218,.65);border:1px solid rgba(190,145,69,.18);color:#7a5b2c;font-size:11px}
+.attention .mark{width:17px;height:17px;border-radius:50%;background:#eddbb5;display:grid;place-items:center;font-size:10px;font-weight:700}
+.attention .links{margin-left:auto;display:flex;gap:7px;flex-wrap:wrap}.attention button{border:none;background:rgba(255,255,255,.55);padding:4px 8px;border-radius:999px;color:#7a5b2c;font:inherit;font-size:10.5px;cursor:pointer}
+.grid{display:grid;grid-template-columns:4fr 5fr 3fr;gap:26px;margin-top:31px}
+.stream{padding:4px 5px}
+.stream-head{display:flex;align-items:baseline;justify-content:space-between;gap:14px;padding:0 4px 14px;border-bottom:1px solid var(--line);margin-bottom:13px}
+.stream-head h2{font-size:12px;letter-spacing:.06em;font-weight:700;margin:0;color:#536157}.stream-head small{font-size:10px;color:var(--faint)}
+.health-body{display:flex;gap:15px;align-items:flex-start;padding:8px 4px 0}
+.pulse-orb{width:82px;height:82px;border-radius:50%;position:relative;flex:none;display:grid;place-items:center;background:radial-gradient(circle at 38% 31%,#f2f7ef,#e0ebdd 72%);border:1px solid rgba(65,95,70,.12)}
+.pulse-orb:after{content:"";position:absolute;inset:-8px;border:1px solid rgba(74,106,78,.11);border-radius:50%}
+.pulse-orb svg{width:37px;height:37px;fill:none;stroke:#47654f;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.health-copy h3{font-size:17px;letter-spacing:-.02em;margin:1px 0 6px;font-weight:600}.health-copy p{font-size:11px;color:var(--muted);line-height:1.7;margin:0}
+.health-badge{display:inline-flex;align-items:center;gap:5px;border-radius:999px;background:var(--amber-soft);color:var(--amber);font-size:10px;padding:4px 8px;margin-bottom:9px}
+.health-stat{margin-top:16px;border-top:1px solid var(--line);padding-top:13px;display:grid;gap:9px}
+.stat-line{display:flex;justify-content:space-between;gap:12px;font-size:11px;color:var(--muted)}.stat-line b{color:var(--ink);font-weight:600}.stat-line .off{color:var(--faint);font-weight:400}
+.health-foot{margin-top:16px;display:flex;gap:8px}.health-foot .btn{flex:1;text-align:center}.health-foot .btn.dark{flex:1.25}
+.timeline{position:relative;padding:2px 4px 0 23px}
+.timeline:before{content:"";position:absolute;left:4px;top:12px;bottom:20px;width:1px;background:linear-gradient(var(--line),rgba(47,75,54,.04))}
+.titem{position:relative;padding:0 0 19px}
+.titem:before{content:"";position:absolute;left:-23px;top:5px;width:7px;height:7px;border-radius:50%;background:#fff;border:1.5px solid #9ead9e}
+.titem.now:before{background:var(--green);border-color:var(--green);box-shadow:0 0 0 4px var(--green-soft)}
+.ttime{font-size:9.5px;letter-spacing:.04em;color:var(--faint);margin-bottom:3px}.ttitle{font-size:12px;color:var(--ink);font-weight:600;line-height:1.55}.tdetail{font-size:10.5px;color:var(--muted);line-height:1.6;margin-top:2px}
+.titem.soft .ttitle{font-weight:500;color:#5b685e}.titem.soft:before{border-style:dashed}
+.capabilities{display:flex;flex-direction:column;gap:2px}
+.cap{display:grid;grid-template-columns:28px minmax(0,1fr) auto;align-items:center;gap:9px;padding:10px 3px;border-bottom:1px solid rgba(227,233,225,.75)}
+.cap:last-child{border-bottom:none}.cap-ic{width:28px;height:28px;border-radius:9px;background:rgba(231,238,228,.72);display:grid;place-items:center;color:#627265}.cap-ic svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.cap-name{font-size:11px;color:#4e5c51}.cap-meta{font-size:9.5px;color:var(--faint);margin-top:2px}.cap-state{font-size:10px;display:flex;align-items:center;gap:5px;white-space:nowrap}.cap-state .d{width:5px;height:5px;border-radius:50%;background:#91a291}.cap-state.ok{color:#4b7157}.cap-state.ok .d{background:#4b7157}.cap-state.wait{color:#a4752e}.cap-state.wait .d{background:#b28235}.cap-state.off{color:#9ca69d}.cap-state.off .d{background:#adb6ae}
+.quick{margin-top:20px;padding:13px 15px;border-radius:14px;background:rgba(255,255,255,.42);border:1px solid var(--line)}
+.quick h3{font-size:11px;margin:0 0 9px;color:#56645a;font-weight:600}.quick p{font-size:10.5px;color:var(--muted);line-height:1.65;margin:0}
+.quick .btn{width:100%;margin-top:11px;text-align:center}
+@media(max-width:1180px){.page{padding:24px}.ambient-main{grid-template-columns:1.2fr .8fr}.ambient-side{display:none}.grid{grid-template-columns:1fr 1fr}.capabilities{grid-column:span 2}}
+@media(max-width:760px){.ambient-main{grid-template-columns:1fr}.weather{border-left:none;padding-left:0}.grid{grid-template-columns:1fr}.capabilities{grid-column:auto}.ambient{padding:24px}}
+</style>
+</head>
+<body>
+<main class="page">
+  <header class="top">
+    <div>
+      <div class="eyebrow">PERCEPTION · PRESENT MOMENT</div>
+      <h1>感知</h1>
+      <p class="sub">把此刻能感知到的环境、身体与连接，收成一条可以呼吸的线。</p>
+    </div>
+    <div class="top-right">
+      <span class="pill"><span class="dot"></span>同步 <b>19:53</b></span>
+      <span class="pill"><b>12</b> 个通道 · <b>10</b> 个在线</span>
+      <button class="btn">重新读取</button>
+    </div>
+  </header>
+
+  <section class="ambient">
+    <div class="ambient-main">
+      <div class="nowline">
+        <div class="clock">19:53<small>周三</small></div>
+        <div class="date">10 月 28 日<span>·</span>农历九月十九</div>
+        <div class="place">东莞 · 当前实况</div>
+      </div>
+      <div class="weather">
+        <div class="wicon"><svg viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 0 0 .8-7.9A6 6 0 0 0 6.4 9.4 4.3 4.3 0 0 0 7 18Z"/><path d="M8 21h8"/></svg></div>
+        <div><div class="temp">26<small>°C</small></div><div class="condition">多云<span>·</span>湿度 66%<span>·</span>风 14 km/h</div></div>
+      </div>
+      <div class="ambient-side">
+        <div class="line">今天没有临近的<b>生日或纪念日</b></div>
+        <div class="soft-chips"><span class="soft-chip">宜 听歌</span><span class="soft-chip">忌 硬撑</span><span class="soft-chip">当前无预警</span></div>
+        <div class="line">环境来源 <b>和风天气</b> · 19:48</div>
+      </div>
+    </div>
+    <div class="attention"><span class="mark">!</span><span>还有 2 项动作可以解锁更多感知：手机读取未授权，华为健康未绑定。</span><span class="links"><button>去授权 →</button><button>去绑定 →</button></span></div>
+    <div class="ambient-foot"><span class="left"><span>最近刷新 <b>19:53:10</b></span><span>通道只显示最近授权快照</span></span><span>不主动采集 · 不推断未见内容</span></div>
+  </section>
+
+  <section class="grid">
+    <section class="stream">
+      <div class="stream-head"><h2>身体 / 健康</h2><small>独立数据源</small></div>
+      <div class="health-body">
+        <div class="pulse-orb"><svg viewBox="0 0 24 24"><path d="M3 12h4l2.2-4.2L13 16l2.1-4H21"/><path d="M12 21a9 9 0 1 0-9-9"/></svg></div>
+        <div class="health-copy"><span class="health-badge">未绑定</span><h3>让角色知道你最近<br>过得怎么样</h3><p>绑定属于当前 AstrBot 安装，不填写其他人的账号。睡眠、静息心率、HRV、运动会成为对话与主动关心的背景。</p></div>
+      </div>
+      <div class="health-stat">
+        <div class="stat-line"><span>华为运动健康</span><b class="off">等待绑定</b></div>
+        <div class="stat-line"><span>对话健康摘要</span><b class="off">未开启</b></div>
+        <div class="stat-line"><span>主动关心</span><b class="off">未开启</b></div>
+        <div class="stat-line"><span>最近同步</span><b class="off">—</b></div>
+      </div>
+      <div class="health-foot"><button class="btn dark">绑定华为账号</button><button class="btn">去健康感知</button></div>
+    </section>
+
+    <section class="stream">
+      <div class="stream-head"><h2>今天</h2><small>最近发生与即将发生</small></div>
+      <div class="timeline">
+        <div class="titem now"><div class="ttime">19:53</div><div class="ttitle">感知刷新完成</div><div class="tdetail">环境、模型与记录通道已同步；现实触及等待手机授权。</div></div>
+        <div class="titem"><div class="ttime">19:48</div><div class="ttitle">东莞 · 多云 26°C</div><div class="tdetail">湿度 66% · 风速 14 km/h · 暂无天气预警</div></div>
+        <div class="titem soft"><div class="ttime">今天</div><div class="ttitle">主动联系 1 / 3</div><div class="tdetail">下一次自然窗口约在 20:30 之后，仍受免打扰与最近对话影响。</div></div>
+        <div class="titem soft"><div class="ttime">最近</div><div class="ttitle">外部资讯 · 10 条</div><div class="tdetail">橘鸦 AI 早报，56 分钟前检查；不会自动进入对话。</div></div>
+        <div class="titem soft"><div class="ttime">当前</div><div class="ttitle">撤回记录 · 暂无</div><div class="tdetail">只回显当前窗口授权范围内的记录，不重新读取群消息。</div></div>
+      </div>
+    </section>
+
+    <section class="stream">
+      <div class="stream-head"><h2>连接</h2><small>能力与权限</small></div>
+      <div class="capabilities">
+        <div class="cap"><span class="cap-ic"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M9 7h6M9 11h6"/></svg></span><span><div class="cap-name">现实触及</div><div class="cap-meta">定位 · 手机 · 摄像头</div></span><span class="cap-state wait"><i class="d"></i>待授权</span></div>
+        <div class="cap"><span class="cap-ic"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M9 9h6v6H9z"/></svg></span><span><div class="cap-name">模型路由</div><div class="cap-meta">对话 · 语音 · 生图 · 视觉</div></span><span class="cap-state ok"><i class="d"></i>已配置</span></div>
+        <div class="cap"><span class="cap-ic"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="M8 10h8M8 14h5"/></svg></span><span><div class="cap-name">外部与记录</div><div class="cap-meta">资讯 · 余额 · 撤回</div></span><span class="cap-state ok"><i class="d"></i>可读取</span></div>
+        <div class="cap"><span class="cap-ic"><svg viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 21l7.8-7.5 1.1-1.1a5.5 5.5 0 0 0-.1-7.8Z"/></svg></span><span><div class="cap-name">健康感知</div><div class="cap-meta">睡眠 · 心率 · 运动</div></span><span class="cap-state off"><i class="d"></i>未绑定</span></div>
+      </div>
+      <div class="quick"><h3>这不是健康报告</h3><p>健康数据只作为背景材料。角色可以自然关心、打趣或跳过，不主动播报指标，不做医疗判断。</p><button class="btn">打开健康感知 →</button></div>
+    </section>
+  </section>
+</main>
+</body>
+</html>

@@ -100,7 +100,8 @@ class NativeScreenProvider:
             raise ValueError("screen_native_binding_changed")
         context = request.get("context")
         scope = context.get("audience", {}).get("scope", {}) if type(context) is dict else {}
-        if (type(scope) is not dict or scope.get("kind") != "private"
+        # 会话范围不是权限边界：V2 已在调用前按主体完成授权，这里只校验请求完整性。
+        if (type(scope) is not dict
                 or not all(isinstance(request.get(key), str) and request[key]
                            for key in ("invocation_id", "origin_key", "arguments_hash"))):
             raise ValueError("screen_native_context_invalid")

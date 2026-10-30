@@ -27,16 +27,34 @@ def prepare_reaction_turn(semantic, context, original, turn_id):
     return semantic.reaction_available(context, turn_id)
 
 
+def _reaction_turn_note(capable, enabled):
+    """Tell the model this turn's choice without touching the cached prefix."""
+    if not capable:
+        return ""
+    if enabled:
+        return "本轮图库表情可用：需要时调用 reaction.search，或按表达需要附带一次表情意图。"
+    return ("本轮不使用图库表情：不要调用 reaction.search，也不要输出表情意图标签；"
+            "按普通文字回复，不要向用户解释这条规则。")
+
+
 def inject_core_reaction_instruction(event, request, semantic, turn_id):
     core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
     if not isinstance(core, dict):
         return
     context = core["prepared"]["context"]
-    enabled = semantic.reaction_available(context, turn_id)
+    capable = semantic.reaction_capable(context)
+    enabled = capable and semantic.reaction_available(context, turn_id)
     core["_reaction_reply"] = core.get("_reaction_reply", {}) | {
         "semantic": semantic, "context": context, "turn_id": turn_id, "enabled": enabled}
-    if enabled and INSTRUCTION not in (request.system_prompt or ""):
+    if capable and INSTRUCTION not in (request.system_prompt or ""):
         request.system_prompt = ((request.system_prompt or "").rstrip() + "\n\n" + INSTRUCTION).lstrip()
+    # The per-turn roll belongs to the current user message, not the system
+    # prefix: flipping it there would invalidate the whole cached conversation.
+    # The host clears turn context after tool injection, so record it here and
+    # let the caller apply it once that pass has finished.
+    notes = core.setdefault("_turn_notes", {})
+    if isinstance(notes, dict):
+        notes["reactions"] = _reaction_turn_note(capable, enabled)
 
 
 def capture_core_reaction_intent(event, message):

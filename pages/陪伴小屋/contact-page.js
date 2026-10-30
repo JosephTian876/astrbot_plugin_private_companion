@@ -201,6 +201,9 @@ window.CompanionContactPage = (() => {
     proactive_quiet_hours:"当前处于免打扰时段。", proactive_paused:"当前已暂停主动联系。",
     proactive_disabled:"主动联系总开关已关闭。", contact_automatic_disabled:"后台自动联系未开启。",
     model_task_unregistered:"请先登记主动联系模型。", host_not_running:"当前运行实例尚未启动。",
+    contact_model_profile_exceeded:"主动联系的上下文超过当前模型输入或输出上限。请减少历史长度，或在「模型与连接」换用上下文更大的模型。",
+    model_estimation_failed:"当前模型无法接受这次主动联系的上下文长度；请减少历史长度或换用上下文更大的模型。",
+    host_model_limit:"当前模型输入或输出上限不足；请减少历史长度或换用上下文更大的模型。",
   };
   const CODE = /^[a-z][a-z0-9_]{2,60}$/;
   const denied = new Set(["dashboard_identity_required","core_access_required","binding_revoked",

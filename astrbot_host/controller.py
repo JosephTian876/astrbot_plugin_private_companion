@@ -982,10 +982,13 @@ class AstrBotStagingController:
             return {"handled": True, "ok": False, "reason": request.reason,
                     "reply": "人格名不能包含换行或过长，请用一行短名字重发。"}
 
+        persona_id = request.persona_id
+        if request.kind == "bind" and not persona_id:
+            persona_id = await self._window_persona(identity)
         parked = PendingBinding(platform_id=identity["platform_id"],
                                 account_id=identity["account_id"],
                                 participant_id=identity["participant_id"],
-                                persona_id=request.persona_id)
+                                persona_id=persona_id)
 
         if request.kind == "confirm":
             existing_binding = self._parked_binding()
@@ -1022,6 +1025,17 @@ class AstrBotStagingController:
                     "reply": "这条绑定无法成立：" + str(error)}
         return {"handled": True, "ok": True, "confirmed": False, "reply": describe_pin(pinned),
                 "binding": self.binding_state()}
+
+    async def _window_persona(self, identity):
+        """The persona this private window actually speaks in, when unnamed."""
+        resolver = getattr(self.session_topology, "window_persona", None)
+        if not callable(resolver):
+            return ""
+        try:
+            return await resolver(identity["platform_id"], identity["participant_id"])
+        except Exception as error:
+            logger.debug("[CompanionV2] 绑定时读取当前人格失败 error_type=%s", type(error).__name__)
+            return ""
 
     async def receive_notice(self, event):
         if is_poke_notice(event):

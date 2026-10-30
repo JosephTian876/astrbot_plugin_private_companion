@@ -6,6 +6,7 @@ import json
 import time
 
 from .owner import NativeImageOwner, checked
+from .output_configuration import MAX_TASK_TIMEOUT_SECONDS, task_timeout_seconds as derive_task_timeout_seconds
 from .package import package_hash
 from .references import (EDIT_REFERENCE_ROLES, ReferenceSelectionError, edit_role,
                          select_edit_tickets)
@@ -40,9 +41,22 @@ class NativeImageProvider:
         self._tasks = set()
         if wait_budget_seconds < 0 or poll_interval_seconds <= 0:
             raise NativeImageError("invalid_native_wait_budget")
-        self.wait_budget_seconds = wait_budget_seconds
+        # The per-task budget has exactly one source: the saved endpoint/local
+        # configuration.  The constructor value (bootstrap reads a legacy
+        # top-level key) may be stale and must never shorten it.
+        self.wait_budget_seconds = max(wait_budget_seconds, self.task_timeout_seconds())
         self.poll_interval_seconds = poll_interval_seconds
         self.now, self.monotonic, self.sleep = now, monotonic, sleep
+
+    def task_timeout_seconds(self) -> int:
+        """Live time budget for a new image task, before anything is dispatched.
+
+        The catalog declares only the documented ceiling; the effective budget
+        is derived from the current saved configuration so a save applies to the
+        next task without re-registering an immutable tool definition.
+        """
+        config = getattr(self.owner.backend, "config", None)
+        return derive_task_timeout_seconds(config if isinstance(config, dict) else {})
 
     def _live(self):
         if self._closed:
@@ -77,7 +91,11 @@ class NativeImageProvider:
                                           ) + "并返回原操作与产物回执；采用和发送由 V2 负责。",
                           "parameters": {"type": "object", "properties": properties,
                                          "required": required, "additionalProperties": False},
-                          "side_effect": "external_network", "timeout_seconds": 300})
+                          "side_effect": "external_network",
+                          # The declaration is the immutable catalog identity of
+                          # a session; it must not embed a mutable configured
+                          # budget.  The per-task budget is applied live above.
+                          "timeout_seconds": MAX_TASK_TIMEOUT_SECONDS})
         return {"schema": SCHEMA, "plugin_id": PLUGIN_ID, "provider_id": PROVIDER_ID,
                 "generation": self.owner.generation,
                 "package": {"extension_id": "image", "package_id": PLUGIN_ID,
@@ -160,6 +178,12 @@ class NativeImageProvider:
 
     @staticmethod
     def _response(request: dict, operation: dict) -> dict:
+        # The wire contract is exactly eleven keys (see
+        # companion_v2.capabilities.native.parse_result).  ``failed`` means the
+        # owner proved nothing was executed, so it maps to ``not_committed`` and
+        # is safe to retry, while ``unknown`` stays ``unknown`` and is never
+        # retried.  Redacted per-endpoint diagnostics stay in the operation
+        # receipt for operators; adding them here would break every receipt.
         succeeded = operation["state"] == "succeeded"
         failed = operation["state"] in {"failed", "stopped"}
         state = "succeeded" if succeeded else "failed" if failed else "unknown"
@@ -219,6 +243,10 @@ class NativeImageProvider:
 
     async def _execute(self, request: dict, *, before_dispatch, host_references=(), fetch_reference=None) -> dict:
         value = self._request(request)
+        # Snapshot the live budget once, before any I/O.  A dashboard save while
+        # this task is running changes the next task only; it must never extend
+        # or shorten the deadline this task already started with.
+        budget_seconds = self.task_timeout_seconds()
         await checked(before_dispatch)
         scope = scope_key(value["context"])
         tickets = self._host_references(host_references)
@@ -307,7 +335,8 @@ class NativeImageProvider:
         if operation["state"] == "pending":
             operation = await wait_for_output(self.owner, operation, authorize=before_dispatch,
                                               deadline=deadline_timestamp(value["deadline_at"]),
-                                              budget_seconds=self.wait_budget_seconds, interval_seconds=self.poll_interval_seconds,
+                                              budget_seconds=budget_seconds,
+                                              interval_seconds=self.poll_interval_seconds,
                                               now=self.now, monotonic=self.monotonic, sleep=self.sleep)
         # Return the control receipt even if authority changed while the backend
         # was running. Artifact bytes and host adoption have their own guards;

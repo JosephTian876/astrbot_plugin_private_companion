@@ -42,7 +42,23 @@ def provider_name(provider, identifier: str = "") -> str:
 
 
 def _supported(provider, expected_type) -> bool:
-    return expected_type is None or isinstance(provider, expected_type)
+    """``expected_type`` 可以是类、类元组，或 native_types 的文本 provider 判定器。"""
+    if expected_type is None:
+        return True
+    if callable(expected_type) and not isinstance(expected_type, type):
+        return bool(expected_type(provider))
+    return isinstance(provider, expected_type)
+
+
+def supported_text_provider(provider, expected_type) -> bool:
+    """Public form used by setup routes that check a chosen provider."""
+    return _supported(provider, expected_type)
+
+
+def text_provider_predicate(native_types):
+    """The registered classes plus any provider exposing the text surface."""
+    checker = getattr(native_types, "is_text_provider", None)
+    return checker if callable(checker) else getattr(native_types, "provider_types", None)
 
 
 def text_provider_catalog(context, expected_type) -> list[dict]:

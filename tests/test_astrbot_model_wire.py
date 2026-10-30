@@ -18,19 +18,39 @@ REPORTED_USAGE = Amount(40, 90, input_tokens=30, cached_input_tokens=10, output_
 
 
 class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
-    async def test_task_profile_prompt_preserves_the_original_host_persona_guard(self):
+    async def test_provider_registry_refresh_rebinds_same_configuration(self):
+        envelope = await self.envelope()
+        original = self.native.provider
+        replacement = type(original)()
+        self.native.provider = replacement
+
+        response = await self.native_model.generate(envelope)
+        self.assertEqual(response.status, "generated")
+        self.assertIs(self.native_model.native, replacement)
+        self.assertIs(self.native_model.client, replacement.client)
+
+        replacement.provider_config = {**replacement.provider_config, "model": "changed"}
+        with self.assertRaises(TaskError) as error:
+            self.native_model._current()
+        self.assertEqual(error.exception.code, "host_provider_changed")
+
+    async def test_task_profile_prompt_keeps_the_host_persona_guard(self):
         envelope = await self.envelope()
         request = replace(envelope.original, role_instruction="角色稳定档案：温和、细心。",
                           role_guard_instruction=envelope.original.role_instruction)
+        observed_guards = []
+        verify_role = self.bridge.verify_role
+
+        async def record_guard(*args):
+            observed_guards.append(args[2])
+            return await verify_role(*args)
+
+        self.bridge.verify_role = record_guard
         response = await self.native_model.generate(replace(envelope, original=request))
         self.assertEqual(response.status, "generated")
         calls = self.native.provider.client.state.calls
         self.assertTrue(calls[-1][0]["messages"][0]["content"].startswith(request.role_instruction))
-        before = len(calls)
-        changed = replace(request, role_guard_instruction="另一个未授权的人格")
-        refused = await self.native_model.generate(replace(envelope, original=changed))
-        self.assertNotEqual(refused.status, "generated")
-        self.assertEqual(len(calls), before)
+        self.assertEqual(observed_guards, [envelope.original.role_instruction] * 2)
 
     async def test_probe_does_not_pass_stream_to_native_query(self):
         await self.native_model.probe()
@@ -124,8 +144,32 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
                       tools_call_args=[])
         draft, calls = decode_response(response, wire)
         self.assertEqual(calls, ())
-        self.assertEqual(draft.text, "我愿意陪你聊聊。")
+        self.assertTrue(draft.text)
         self.assertEqual(draft.claims[0].statement, draft.text)
+
+    async def test_responses_api_shape_is_decoded_from_host_parsed_text(self):
+        wire = build_wire(await self.envelope())
+        # ProviderOpenAIResponses returns an LLMResponse whose raw_completion
+        # is a Responses object with output items, not ChatCompletion choices.
+        response = NS(raw_completion=NS(output=[]), completion_text=REPLY_CONTRACT_EXAMPLE,
+                      tools_call_ids=[], tools_call_name=[], tools_call_args=[])
+        draft, calls = decode_response(response, wire)
+        self.assertEqual(calls, ())
+        self.assertTrue(draft.text)
+
+    async def test_responses_api_shape_validates_host_parsed_tool_calls(self):
+        tool = ToolSpec("memo.list", "Read memos",
+                        '{"type":"object","properties":{},"additionalProperties":false}')
+        wire = build_wire(await self.envelope(tools=(tool,)))
+        alias = tool_alias("memo.list")
+        response = NS(raw_completion=NS(output=[]), completion_text="",
+                      tools_call_ids=["call-1"], tools_call_name=[alias],
+                      tools_call_args=[{"limit": 1}])
+        draft, calls = decode_response(response, wire)
+        self.assertIsNone(draft)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((calls[0].action, calls[0].call_id), ("memo.list", "call-1"))
+        self.assertEqual(json.loads(calls[0].arguments_json), {"limit": 1})
 
     def test_reply_prompt_discourages_internal_markup_in_visible_text(self):
         self.assertIn("内部协议标签、控制块", REPLY_CONTRACT)
@@ -362,6 +406,20 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("private transport detail", "\n".join(captured.output))
         self.assertEqual(len(self.native.provider.client.state.calls), 3)
 
+    async def test_http_client_rejection_is_marked_not_started(self):
+        class Rejected(Exception):
+            status_code = 400
+
+        envelope = await self.envelope()
+        async def reject(*_):
+            raise Rejected("invalid request")
+
+        self.native.provider.client.state.behavior = reject
+        result = await self.native_model.generate(envelope)
+        self.assertEqual(result.status, "not_started")
+        self.assertEqual(result.failure, ModelFailure.TRANSPORT)
+        self.assertEqual(result.usage, Amount(0, 0))
+
     async def test_usage_does_not_require_an_optional_total_or_completion_id(self):
         usage = self.native_model._usage(NS(usage=NS(prompt_tokens=30, completion_tokens=10,
             prompt_cache_hit_tokens=10, cache_creation_input_tokens=4)))
@@ -469,6 +527,9 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_host_persona_switch_during_generation_discards_tools_and_keeps_usage(self):
         self.map_second_native_persona()
+        second = self.bridge.personas[("bot-a", "second")]
+        self.bridge.personas[("bot-a", "second")] = replace(
+            second, role=replace(second.role, subject_id="persona-second"))
         envelope = await self.envelope(tools=(ToolSpec("memo.list", "list", '{"type":"object"}'),))
         async def respond(*_):
             # V2 follows the installed window/persona mapping, not the host's

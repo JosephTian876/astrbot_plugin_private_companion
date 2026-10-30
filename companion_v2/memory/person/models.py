@@ -29,7 +29,18 @@ def empty_document():
     return {"version": VERSION, "route": None, "native_account_id": None,
             "platform_nickname": None, "nickname_updated_at": None,
             "admin_nickname": None, "admin_nickname_updated_at": None,
+            "display_name_events": [],
             "group_cards": {}, "contexts": {}, "private_attempts": {"count": 0, "last_at": None}}
+
+
+def legacy_nickname(document):
+    """The name the role historically used for this person, if V1 recorded one.
+
+    It is an address hint, not an identity proof: the account stays the key and
+    the value is only shown after the same card owner was authenticated.
+    """
+    contact = document.get("legacy_private_contact") or {}
+    return clean_name(contact.get("nickname"))
 
 
 def bind_route(document, context):
@@ -108,7 +119,8 @@ def known_names(document, scope, *, limit=8):
         value = clean_name(entry.get("card"))
         if value and value not in names:
             names.append(value)
-    for value in (document.get("platform_nickname"), document.get("admin_nickname")):
+    for value in (document.get("platform_nickname"), document.get("admin_nickname"),
+                  legacy_nickname(document)):
         value = clean_name(value)
         if value and value not in names:
             names.append(value)

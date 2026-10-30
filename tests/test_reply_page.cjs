@@ -918,6 +918,28 @@ test('offline preview submits the current draft and renders the result', async (
   assert.match(harnessed.slots['preview-status'].textContent, /使用当前窗口的设置草稿/);
 });
 
+test('preview identifies components that this private session will not send', async () => {
+  const harnessed = await loaded(harness());
+  harnessed.listeners['root:click']({target: {closest: () => ({dataset: {replyAction: 'preview'}})}});
+  await drains();
+  harnessed.requests[1].resolve({...PREVIEW,
+    quote: {enabled: true, group_enabled: true, first_part_only: true, skip_chars: 0,
+      mention_speaker: true},
+    voice: {enabled: false, provider_id: '', instruction: ''}});
+  await drains();
+  const html = harnessed.slots['preview-result'].innerHTML;
+  assert.match(html, /预览会话：私聊/);
+  assert.match(html, /引用：私聊不发送/);
+  assert.match(html, /@：私聊不发送/);
+  assert.match(html, /语音位置：未启用 · 按请求插入/);
+  const sequence = html.match(/aria-label="发送顺序">([\s\S]*?)<\/div>/)[1];
+  assert.match(sequence, /引用 · 私聊不发送/);
+  assert.match(sequence, /@ · 私聊不发送/);
+  assert.match(sequence, /语音 · 未启用 · 按请求插入/);
+  assert.doesNotMatch(sequence, /引用 · 固定第一段/);
+  harnessed.page.unmount();
+});
+
 test('offline preview shows each segment component plan and its attachment rules', async () => {
   const harnessed = await loaded(harness());
   harnessed.listeners['root:click']({target: {closest: selector =>
@@ -944,6 +966,20 @@ test('offline preview shows each segment component plan and its attachment rules
   assert.match(html, /语音 · 按请求插入/);
   assert.match(html, /网址保护 · 链接整段保留/);
   assert.match(html, /组件挂载 · 预览模拟/);
+  assert.match(html, /预览会话：群聊/);
+  assert.match(html, /reply-preview-position-arrow/);
+  const sequences = [...html.matchAll(/aria-label="发送顺序">([\s\S]*?)<\/div>/g)]
+    .map(match => match[1]);
+  assert.equal(sequences.length, 2);
+  const firstSequence = sequences[0];
+  for (const [before, after] of [['引用 · 固定第一段', '平台表情 · 跟随第一段'],
+    ['平台表情 · 跟随第一段', '语音 · 按请求插入'],
+    ['语音 · 按请求插入', '@ · 跟随第一段']]) {
+    assert.ok(firstSequence.indexOf(before) < firstSequence.indexOf(after),
+      `${before} should precede ${after}: ${firstSequence}`);
+  }
+  assert.ok(sequences[1].indexOf('语音 · 按请求插入') < sequences[1].indexOf('2 张图片 · 文字后'),
+    'the successful voice part should place its image after the voice');
 
   const positionInput = (key, value) => harnessed.listeners['root:input']({target: {
     dataset: {replyPreviewOption: key}, value,

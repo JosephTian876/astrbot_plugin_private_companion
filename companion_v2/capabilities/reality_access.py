@@ -10,6 +10,7 @@ from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
 
 from .models import CapabilityAuthorizationState, CapabilityDesiredState
+from .privacy import is_core
 from .repositories import CapabilityRepository
 
 
@@ -34,8 +35,9 @@ class RealitySnapshotAccess:
 
     def _access(self, operator, at, *, action="capability.view"):
         context = self.context
-        if context.scope.kind is not ScopeKind.PRIVATE:
-            raise TaskError("reality_private_required", "Reality access requires a private conversation")
+        # 核心管理员默认可用：会话范围不再限制现实触及能力。
+        if is_core(self.runtime, operator.subject):
+            return
         require(self.application.tasks.authorize_context(context, action="conversation.reply", observed_at=at))
         require(self.policy.authorize(operator, scope=context.scope, action=action,
                                       owner=context.actor.subject, observed_at=at))
@@ -71,9 +73,11 @@ class RealitySnapshotAccess:
             ) == (self.package.package_id, self.package.package_version, self.package.artifact_hash)
             active = bool(same and installed.desired_state is CapabilityDesiredState.ACTIVE)
             role_enabled = bool(selection and selection.enabled)
-            consented = bool(consent and consent["state"] == CapabilityAuthorizationState.ACTIVE.value)
-            can_manage = self.policy.scope_access(operator, scope=self.context.scope,
-                action="capability.role.set", observed_at=at, core_only=True).is_success
+            consented = bool(is_core(self.runtime, self.context.actor.subject) or
+                             (consent and consent["state"] == CapabilityAuthorizationState.ACTIVE.value))
+            can_manage = bool(is_core(self.runtime, operator.subject) or
+                self.policy.scope_access(operator, scope=self.context.scope,
+                    action="capability.role.set", observed_at=at, core_only=True).is_success)
             external = self.application.external
             invokable = bool(external and any(tool.action == self.capability
                              for tool in external.catalog_for(self.context)))

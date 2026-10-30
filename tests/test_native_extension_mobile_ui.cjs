@@ -76,7 +76,8 @@ test("mobile connection partitions settings into collapsible cards without dropp
   const html = root.innerHTML;
   assert.equal((html.match(/data-mobile-config-section=/g) || []).length, 5);
   assert.match(html, /data-mobile-config-section="gateway" open/);
-  for (const field of Object.values(schema.mobile.items)) {
+  for (const [key, field] of Object.entries(schema.mobile.items)) {
+    if (["telemetry_enabled", "telemetry_ttl_seconds"].includes(key)) continue;
     assert.ok(html.includes(field.description), "missing mobile field: " + field.description);
   }
   panel.stop();

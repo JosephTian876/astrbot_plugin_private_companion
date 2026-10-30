@@ -110,6 +110,8 @@ class CoreReplyImagePromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preferences, values)
         self.inject(offered=offered, values=preferences)
         self.assertNotIn("已命中图片请求规则", self.request.system_prompt)
+        self.assertNotIn("已命中图片请求规则", self.state["_turn_notes"]["image"])
+        stable_system = self.request.system_prompt
 
         self.prepared["native_input"] = NS(text="帮我改一下", at=self.prepared["native_input"].at,
                                            images=(object(),))
@@ -119,7 +121,10 @@ class CoreReplyImagePromptTests(unittest.IsolatedAsyncioTestCase):
                          ["memory.query", "image.generate", "image.edit"])
         self.assertEqual(preferences, values)
         self.inject(offered=offered, values=preferences)
-        self.assertIn("已命中图片请求规则", self.request.system_prompt)
+        self.assertIn("已命中图片请求规则", self.state["_turn_notes"]["image"])
+        # The per-turn hint rides the user message; the cached system prefix
+        # must stay byte-identical between an ordinary and an image turn.
+        self.assertEqual(self.request.system_prompt, stable_system)
 
     def test_tool_mode_keeps_image_tools_available_on_non_image_turns(self):
         values = {**DEFAULTS, "trigger_mode": "tool"}
@@ -153,7 +158,8 @@ class CoreReplyImagePromptTests(unittest.IsolatedAsyncioTestCase):
                          ["memory.query", "image.generate", "image.edit"])
         self.assertEqual(preferences, values)
         self.inject(values=values)
-        self.assertIn("已命中图片请求规则", self.request.system_prompt)
+        self.assertIn("已命中图片请求规则", self.state["_turn_notes"]["image"])
+        self.assertNotIn("已命中图片请求规则", self.request.system_prompt)
 
     def test_unavailable_image_preferences_preserve_other_tools(self):
         with patch("astrbot_host.core_reply_image_prompt.effective_settings", side_effect=TaskError("unavailable", "settings unavailable")):

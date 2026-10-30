@@ -30,7 +30,15 @@ def response_format(request):
 def capture(completion):
     choices = getattr(completion, "choices", ())
     if not isinstance(choices, (list, tuple)) or len(choices) != 1:
-        return CapturedModelOutput("", "invalid")
+        # 原生 Gemini 等 provider 只暴露归一化后的 completion_text。
+        body = getattr(completion, "completion_text", None)
+        if not isinstance(body, str):
+            return CapturedModelOutput("", "invalid")
+        if len(body) > 65536:
+            return CapturedModelOutput(body[:65536], "oversized")
+        if getattr(completion, "tools_call_args", None):
+            return CapturedModelOutput(body, "invalid")
+        return CapturedModelOutput(body, "stop")
     choice = choices[0]
     message = getattr(choice, "message", None)
     body = getattr(message, "content", None)

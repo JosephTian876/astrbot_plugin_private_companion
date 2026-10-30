@@ -265,9 +265,10 @@ class PersonaWorkshopWebAPI:
         provider_id = provider_id.strip() if isinstance(provider_id, str) else ""
         if not provider_id:
             return None
-        expected_type = getattr(getattr(controller, "native_types", None), "provider", None)
+        from .bootstrap_provider import supported_text_provider, text_provider_predicate
+        expected_type = text_provider_predicate(getattr(controller, "native_types", None))
         for provider in list(controller.context.get_all_providers() or []):
-            if expected_type is not None and not isinstance(provider, expected_type):
+            if expected_type is not None and not supported_text_provider(provider, expected_type):
                 continue
             meta = provider.meta() if callable(getattr(provider, "meta", None)) else None
             identifier = str(getattr(meta, "id", "") or getattr(provider, "id", "") or "").strip()

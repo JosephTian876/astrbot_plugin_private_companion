@@ -298,14 +298,14 @@ class ConversationQuoteTests(QuoteFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(captured.quotes[0].sent_at)
         self.assertEqual(captured.quotes[0].message_id, "-345")
 
-    async def test_role_change_during_quote_preparation_cannot_be_admitted(self):
+    async def test_conversation_reset_during_quote_preparation_keeps_the_same_role(self):
         original = self.bridge.quote_loader
         async def load(*args, **kwargs):
             quote = await original(*args, **kwargs)
             self.native.cid = "changed"
             return quote
         self.bridge.quote_loader = load
-        self.assertEqual((await self.bridge.capture(self.quote_event())).failure.code, "host_persona_changed")
+        self.assertTrue((await self.bridge.capture(self.quote_event())).is_success)
 
     async def test_quote_locator_is_frozen_before_host_await(self):
         event = self.quote_event()

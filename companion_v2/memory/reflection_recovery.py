@@ -12,7 +12,9 @@ from .reflection_output import OutputProblem, parse_output, proposal_for_repair,
 REPAIRABLE = frozenset({"invalid_json", "duplicate_json_field", "nonfinite_json_number", "invalid_shape",
     "invalid_summary", "invalid_proposals", "invalid_decisions", "invalid_proposal", "invalid_details",
     "invalid_qualifiers", "invalid_item_id", "duplicate_item_id", "related_item_unresolved", "invalid_decision",
-    "output_length", "output_oversized", "missing_repair_item"})
+    "invalid_anniversaries", "unknown_evidence", "unknown_target", "ambiguous_target", "unexpected_repair_item",
+    "conflicting_target", "overlapping_pending_decision", "output_invalid", "output_length", "output_oversized",
+    "missing_repair_item"})
 STALE_INPUTS = frozenset({"memory_reflection_stale", "memory_settings_changed", "memory_pending_changed",
     "memory_schedule_changed", "source_revoked", "source_expired", "memory_evidence_forgotten",
     "memory_revision_conflict", "memory_evidence_changed"})

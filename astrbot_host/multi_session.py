@@ -88,7 +88,9 @@ def _confirm_current_persona_projection(bridge, account, selected, projection, i
         # A prompt edit does not change the mapped character. Keep current
         # metadata so each live turn can compare against its captured text.
         projection = replace(projection, instruction_hash=fingerprint)
-        bridge.personas[(account.bot_id, selected)] = projection
+        if ((account.bot_id, selected) in bridge.personas
+                or (account.bot_id, "[%None]") not in bridge.personas):
+            bridge.personas[(account.bot_id, selected)] = projection
     return projection
 
 
@@ -434,7 +436,7 @@ class MultiHostSession:
             file_settings=lambda scope, role: file_intake_settings(runtime, scope, role))
         self.model = AstrBotTextProvider(native_context, bridge=self.bridge,
             binding=ProviderBinding("model.text", common.provider_id, native_types.version, provider_fingerprint),
-            provider_id=common.provider_id, version=native_types.version, provider_type=native_types.provider,
+            provider_id=common.provider_id, version=native_types.version, provider_type=native_types.provider_types,
             function_tool_type=native_types.function_tool, tool_set_type=native_types.tool_set,
             tariff=common.tariff, maximum_output_tokens=common.max_output_tokens,
             maximum_input_estimate=common.maximum_input_estimate, output_parameter=common.output_parameter,
@@ -942,6 +944,7 @@ class MultiHostSession:
                         and isinstance(getattr(part, "text", None), str))
                     captured = replace(captured, text=raw_text)
                 segmentation_settings, presentation_settings = None, None
+                group_tool_profile = "full"
                 captured_voice_policy, voice_settings_available = None, False
                 captured_outbound_settings = None
                 astrbot_animated_image_understanding_enabled = False
@@ -957,6 +960,8 @@ class MultiHostSession:
                         snapshot = self.application.reply_settings.snapshot(context.actor, context, self.now())
                         presentation_settings = {name: snapshot.values[GROUP + "." + name]
                                                  for name in OUTPUT_TEXT_FIELDS}
+                        profile = snapshot.values.get(GROUP + ".group_tool_profile", "full")
+                        group_tool_profile = profile if profile in ("lean", "standard", "full") else "full"
                         astrbot_animated_image_understanding_enabled = (
                             snapshot.values.get(GROUP + ".astrbot_animated_image_understanding_enabled") is True)
                         names = {field.name for field in fields(SegmentationPolicy)} | {
@@ -1106,6 +1111,7 @@ class MultiHostSession:
                     "native_source_future": source_future,
                     "segmentation_settings": segmentation_settings,
                     "presentation_settings": presentation_settings,
+                    "group_tool_profile": group_tool_profile,
                     "outbound_settings": captured_outbound_settings,
                     "astrbot_animated_image_understanding_enabled": astrbot_animated_image_understanding_enabled,
                     "voice_reply_policy": voice_policy,

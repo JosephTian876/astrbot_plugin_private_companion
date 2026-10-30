@@ -233,7 +233,7 @@ class LegacyGroupDataHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         replay_plan = (await self.request("/plan", query=query))["data"]
         self.assertEqual(replay_plan["group_expression"]["remaining"], 0)
         rows = self.controller.runtime.read_all(
-            "SELECT state, scope_key FROM expression_style_signals WHERE run_id LIKE 'legacy-expression:%'")
+            "SELECT state, scope_key FROM expression_style_signals WHERE run_id LIKE 'legacy-expression:%'", ())
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["state"], "adopted")
         context = LegacyGroupDataWebAPI(self.controller, "group-a", "role-a")._scope_context(

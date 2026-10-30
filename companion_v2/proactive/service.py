@@ -754,6 +754,28 @@ class ProactiveContacts:
                          diagnostic_origin=job.diagnostic_origin)
         return True
 
+    def _contact_request_fits(self, run, request):
+        """Preflight the selected provider without inserting a model request.
+
+        The gateway records ``model_requests`` before it reserves the provider, so a
+        prompt that exceeds the model's input ceiling cannot be retried inside the
+        same task. Resolve the same route read-only and ask each provider to reserve
+        it first; only a fitting request reaches ``gateway.generate``.
+        """
+        plan = self.gateway.router.resolve(run, request)
+        if not plan.providers:
+            return True
+        try:
+            # Only the first route is reserved here. The fallback is a later
+            # execution route with its own model override; preflighting it with
+            # the primary envelope would reject a fitting primary for no reason.
+            plan.providers[0].reserve(plan.envelope)
+            return True
+        except Exception:
+            logger.debug("[CompanionV2] 主动联系提示超过模型档案 task=%s",
+                         run.task.task_id, exc_info=True)
+            return False
+
     async def _generate(self, run):
         job = self._pending[run.task.task_id]
         at = self.tasks.now()
@@ -836,25 +858,46 @@ class ProactiveContacts:
                 self._pending[run.task.task_id] = job
             presentation = text_policy(job.presentation_settings or {})
             segmentation = _segmentation_policy(job.segmentation_settings)
+            memory_materials = () if job.administrator_test else self._memory_materials(job, records)
+            expression_materials = self._expression_materials(job, contact_id)
+            rhythm_snapshot = (None if job.administrator_test else
+                               self.budget.rhythm_snapshot(job.context, preferences, at))
+            role_state = (None if job.administrator_test else role_state_for_prompt(
+                self._role_state_summary(job.context, at), job.intent.purpose))
+            recent_life = (None if job.administrator_test
+                           or (source_origin and any(k in source_origin for k in ("activity_event", "journal_event")))
+                           else self._recent_life_summary(job.context, at))
             request = request_for(job, records, preferences, history,
                 last_reply=last_reply, dialogue=dialogue,
                 reactions_available=reactions_available,
                 voice_available=voice_available, poke_available=poke_available,
-                memory=() if job.administrator_test else self._memory_materials(job, records),
-                expression=self._expression_materials(job, contact_id),
-                rhythm_snapshot=(None if job.administrator_test else
-                                 self.budget.rhythm_snapshot(job.context, preferences, at)),
-                role_state=(None if job.administrator_test else role_state_for_prompt(
-                    self._role_state_summary(job.context, at), job.intent.purpose)),
-                recent_life=(None if job.administrator_test
-                             or (source_origin and any(k in source_origin for k in ("activity_event", "journal_event")))
-                             else self._recent_life_summary(job.context, at)))
+                memory=memory_materials, expression=expression_materials,
+                rhythm_snapshot=rhythm_snapshot, role_state=role_state, recent_life=recent_life)
             extra_instruction = "\n".join(text for text in
                 (segmentation.instruction, presentation.instruction,
                  news_presentation_instruction(segmentation) if job.intent.purpose == "news"
                  or source_origin is not None and "news_event" in source_origin else "") if text)
             if extra_instruction:
                 request = replace(request, instruction=request.instruction + "\n" + extra_instruction)
+            if not self._contact_request_fits(run, request):
+                # Optional memory and history are the first things a smaller
+                # context model must lose; the current event, source evidence
+                # and the role instruction remain authoritative.
+                compact = request_for(job, records, preferences, (),
+                    last_reply=None, dialogue=(),
+                    reactions_available=reactions_available,
+                    voice_available=voice_available, poke_available=poke_available,
+                    memory=(), expression=(), rhythm_snapshot=None,
+                    role_state=None, recent_life=None)
+                if extra_instruction:
+                    compact = replace(compact, instruction=compact.instruction + "\n" + extra_instruction)
+                if not self._contact_request_fits(run, compact):
+                    raise TaskError(
+                        "contact_model_profile_exceeded",
+                        "the proactive contact prompt exceeds the selected model input or output profile")
+                logger.warning("[CompanionV2] 主动联系上下文超过模型档案，已省略可选记忆/历史 task=%s",
+                               run.task.task_id)
+                request = compact
             completion = await self.gateway.generate(run, request)
             if completion.draft is None:
                 raise ValueError("contact generation requires a final decision")

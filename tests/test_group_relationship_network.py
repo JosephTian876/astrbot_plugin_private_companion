@@ -136,6 +136,26 @@ class GroupRelationshipNetworkTests(unittest.TestCase):
         self.assertEqual(by_account["200"]["group_observation"]["message_count"], 5)
         self.assertEqual(projection["edges"][0]["evidence_basis"], "v1_group_aggregate")
 
+    def test_rename_history_and_same_name_collision_are_explicit(self):
+        at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        document = fold_event(None, context=context(), event=event("200", at, "rename-1"),
+                              text="第一条", nickname="小明")
+        document = fold_event(document, context=context(),
+                              event=event("200", at + timedelta(seconds=10), "rename-2"),
+                              text="第二条", nickname="小明明")
+        renamed = document["members"]["200"]
+        self.assertEqual(renamed["renames"][0]["old"], "小明")
+        self.assertEqual(renamed["renames"][0]["new"], "小明明")
+
+        document = fold_event(document, context=context(),
+                              event=event("201", at + timedelta(seconds=20), "same-name"),
+                              text="同名的人", nickname="小明")
+        projection = project_document(document, group_id="300")
+        by_account = {member["native_account_id"]: member for member in projection["members"]}
+        self.assertTrue(by_account["200"]["name_collision"])
+        self.assertTrue(by_account["201"]["name_collision"])
+        self.assertEqual(by_account["200"]["recent_renames"][0]["new"], "小明明")
+
     def test_imported_group_larger_than_previous_capacity_survives_live_observation(self):
         at = datetime(2026, 10, 1, tzinfo=timezone.utc)
         members = {str(index): {"name": f"成员{index}", "message_count": index,

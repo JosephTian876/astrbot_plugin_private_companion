@@ -102,6 +102,86 @@ class LegacyGroupDataWebAPI:
             group_ids=(target_group_id,) if source_group_id in item.group_ids else item.group_ids)
             for item in members)
 
+    @staticmethod
+    def _as_group_member(item, target_group_id, *, account_ids=None):
+        return MemberEntry(item.entry_id, name=item.name, aliases=item.aliases,
+            declared_account_ids=(item.declared_account_ids if account_ids is None else tuple(account_ids)),
+            gender=item.gender, content=item.content,
+            priority=item.priority, group_ids=(target_group_id,), identity_note=item.identity_note,
+            boundary_note=item.boundary_note, important_memories=item.important_memories)
+
+    @staticmethod
+    def _member_rank(item):
+        """Prefer a curated profile over the generic per-group observation row."""
+        return (item.priority, len(item.content), len(item.aliases),
+                len(item.identity_note), len(item.boundary_note), len(item.important_memories))
+
+    @staticmethod
+    def _recorded_accounts(selected):
+        members = (selected or {}).get("members") or {}
+        if isinstance(members, dict):
+            return {str(account) for account in members}
+        if isinstance(members, (list, tuple)):
+            return {str(item.get("native_account_id")) for item in members
+                    if isinstance(item, dict) and item.get("native_account_id")}
+        return set()
+
+    @classmethod
+    def _merge_group_members(cls, base_members, group_members, target_group_id, *, recorded_accounts=None):
+        """Bring curated account-wide profiles into the selected group.
+
+        V1 kept two layers: generic ``group_observation`` rows scoped to one
+        group and hand-maintained profiles without a group scope.  The group
+        importer used to read only the first layer, so known people arrived as
+        generic observation rows with no relationship material.
+        Merge by authenticated account and keep the richer entry; a curated
+        profile is never allowed to silently replace a different account.
+        ``recorded_accounts`` bounds the merge to people V1 recorded in this
+        group, so a global profile cannot leak into an unrelated group.
+        """
+        merged = {item.entry_id: item for item in group_members}
+        owners = {}
+        for item in merged.values():
+            for account in item.declared_account_ids:
+                owners.setdefault(account, set()).add(item.entry_id)
+        for item in base_members:
+            accounts = tuple(account for account in item.declared_account_ids
+                             if recorded_accounts is None or account in recorded_accounts)
+            if recorded_accounts is not None and not accounts:
+                continue
+            matches = set()
+            for account in accounts:
+                matches.update(owners.get(account, ()))
+            # A curated profile that spans multiple group entries is ambiguous;
+            # preserve each authenticated account instead of merging people.
+            if len(matches) > 1:
+                continue
+            if not matches:
+                if item.entry_id in merged:
+                    continue
+                enriched = cls._as_group_member(item, target_group_id, account_ids=accounts)
+                merged[enriched.entry_id] = enriched
+                for account in enriched.declared_account_ids:
+                    owners.setdefault(account, set()).add(enriched.entry_id)
+                continue
+            entry_id = next(iter(matches))
+            current = merged.get(entry_id)
+            if (current is None or cls._member_rank(item) < cls._member_rank(current)
+                    or (item.entry_id in merged and item.entry_id != entry_id)):
+                continue
+            replacement = cls._as_group_member(item, target_group_id, account_ids=accounts)
+            merged.pop(entry_id, None)
+            for account in current.declared_account_ids:
+                owner_entries = owners.get(account)
+                if owner_entries is not None:
+                    owner_entries.discard(entry_id)
+                    if not owner_entries:
+                        owners.pop(account, None)
+            merged[replacement.entry_id] = replacement
+            for account in replacement.declared_account_ids:
+                owners.setdefault(account, set()).add(replacement.entry_id)
+        return tuple(merged.values())
+
     def _plan(self, root, source_persona_id, source_group_id, target, session):
         data = build_data_plan(root, source_persona_id=source_persona_id)
         selected = next((item for item in data.group_networks
@@ -127,7 +207,10 @@ class LegacyGroupDataWebAPI:
         mapped = map_legacy_worldbook(data, source_group_id=source_group_id,
             confirm_member_ids=True, include_group=True)
         group_entries, group_members = mapped[2], mapped[3]
-        group_members = self._remap_group_members(group_members, source_group_id, target.group_id)
+        recorded = self._recorded_accounts(selected)
+        group_members = self._merge_group_members(
+            mapped[1], self._remap_group_members(group_members, source_group_id, target.group_id),
+            target.group_id, recorded_accounts=recorded)
         source_id = self._worldbook_source_id(source_persona_id, source_group_id)
         binding = SourceBinding(context.scope.installation_id, role_id=self.role_id,
             persona_id=self.role_id, native_scope_ids=(target.group_id,), scope_kind=ScopeKind.GROUP,
@@ -214,8 +297,11 @@ class LegacyGroupDataWebAPI:
                 entries, members, group_entries, group_members = map_legacy_worldbook(
                     data, source_group_id=arguments["source_group_id"],
                     confirm_member_ids=True, include_group=True)
-                group_members = self._remap_group_members(
-                    group_members, arguments["source_group_id"], target.group_id)
+                recorded = self._recorded_accounts(selected)
+                group_members = self._merge_group_members(
+                    members, self._remap_group_members(
+                        group_members, arguments["source_group_id"], target.group_id),
+                    target.group_id, recorded_accounts=recorded)
                 if not group_entries and not group_members:
                     return outcome_response(Outcome.failed("legacy_group_worldbook_empty",
                         "the selected V1 group has no importable group-scoped knowledge."))
@@ -251,8 +337,12 @@ class LegacyGroupDataWebAPI:
                     current_entries = map_legacy_worldbook(current_data,
                         source_group_id=arguments["source_group_id"], confirm_member_ids=True,
                         include_group=True)
-                    current_group_members = self._remap_group_members(current_entries[3],
-                        arguments["source_group_id"], target.group_id)
+                    current_group_members = self._merge_group_members(
+                        current_entries[1],
+                        self._remap_group_members(current_entries[3],
+                            arguments["source_group_id"], target.group_id),
+                        target.group_id,
+                        recorded_accounts=self._recorded_accounts(current_selected))
                     if (self._worldbook_digest(current_entries[2], current_group_members)
                             != self._worldbook_digest(group_entries, group_members)):
                         raise TaskError("legacy_plan_stale", "V1 group knowledge changed during import; preview again.")

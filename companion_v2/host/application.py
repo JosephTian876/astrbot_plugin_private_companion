@@ -480,6 +480,8 @@ class CompanionApplication:
                                                 role_state=self.role_state, weather_port=weather_port,
                                                 weather_alert_port=weather_alert_port, balance_port=balance_port,
                                                 news_port=news_port, screen_peek=self.screen_peek, wake_port=wake_port,
+                                                health_settings=lambda context, at: self.perception_settings.capture(
+                                                    context, at)["settings"],
                                                 notify=self.notify)
         self.proactive.schedule = self.contact_schedule
         self.role_reader.attach(self.gateway, self.role_reading, require_running=self.require_running,

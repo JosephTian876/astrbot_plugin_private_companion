@@ -22,7 +22,7 @@ from tests.native_adapter_support import completion
 from tests.staging_bootstrap_support import database_contents, wait_for_batch
 from tests.memory_stream_support import StreamFixture
 from tests.video_support import video_bytes
-from astrbot_host.multi_settings import MultiHostSettings
+from astrbot_host.multi_settings import MultiHostSettings, find_persona_mapping
 from astrbot_host.shared_host_migration import migrate_single_target_config
 from astrbot_host.multi_authority import MultiAuthority
 from astrbot_host.settings import INSTALLATION_PREFIX
@@ -42,6 +42,16 @@ class _Query(dict):
 
 
 class MultiSettingsTests(unittest.TestCase):
+    def test_follow_window_mapping_applies_only_when_it_is_the_bot_single_mapping(self):
+        from astrbot_host.multi_settings import PersonaMapping
+
+        default = PersonaMapping("bot-a", "[%None]", "role-default")
+        explicit = PersonaMapping("bot-a", "second", "role-second")
+
+        self.assertEqual(find_persona_mapping((default,), "bot-a", "custom"),
+                         PersonaMapping("bot-a", "custom", "role-default"))
+        self.assertEqual(find_persona_mapping((default, explicit), "bot-a", "custom"), None)
+        self.assertEqual(find_persona_mapping((default, explicit), "bot-a", "second"), explicit)
     def test_legacy_mode_is_migrated_and_ambiguous_routes_are_rejected(self):
         config = multi_config()
         config["staging"]["enabled"] = True
@@ -190,6 +200,38 @@ class LegacyStagingReceiptTests(unittest.TestCase):
 
 
 class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_default_mapping_routes_the_window_selected_persona(self):
+        config = multi_config()
+        config["multi_host"]["personas"] = [
+            {"bot_id": "bot-a", "persona_id": "[%None]", "role_id": "role-a"},
+            {"bot_id": "bot-b", "persona_id": "original", "role_id": "role-b"},
+            {"bot_id": "bot-b", "persona_id": "second", "role_id": "role-b-second"},
+        ]
+        self.controller = self.make_controller(config)
+        await self.start_host()
+        self.window_personas["qq-main:FriendMessage:200"] = "second"
+
+        mapping = await self.controller.persona_mapping_for_event(self.event())
+        account = self.controller.session.bridge.accounts[("qq-main", "100")]
+        _, _, _, projection, instruction = await self.controller.session.bridge._selected_role_snapshot(
+            account, "qq-main:FriendMessage:200")
+
+        self.assertEqual((mapping.persona_id, mapping.role_id), ("second", "role-a"))
+        self.assertEqual((projection.persona_id, projection.role.subject_id), ("second", "role-a"))
+        self.assertEqual(instruction, self.native.persona_records["second"]["prompt"])
+
+    async def test_initialize_profile_rebuilds_and_resumes_a_running_host(self):
+        await self.start_host()
+        previous = self.controller.session
+
+        result = await self.controller.initialize_profile()
+
+        self.assertTrue(result.is_success, result.failure)
+        self.assertEqual(previous.application.state, "stopped")
+        self.assertIsNot(self.controller.session, previous)
+        self.assertEqual(self.controller.session.application.state, "running")
+        self.assertTrue(self.controller._accepting)
+
     async def test_primary_window_link_moves_alias_capture_to_the_primary_window(self):
         config = multi_config()
         config["multi_host"]["window_links"] = [

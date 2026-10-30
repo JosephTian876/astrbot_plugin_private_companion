@@ -5,6 +5,7 @@ from datetime import datetime, time, timedelta, timezone
 import json
 from zoneinfo import ZoneInfo
 
+from companion_v2.capabilities.privacy import is_core
 from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require, stamp
 from companion_v2.foundation.refs import ScopeKind, SourceRef, VersionRef
 from companion_v2.screen.models import ScreenFeedbackKind
@@ -115,7 +116,8 @@ class ScreenContactEvents:
         *when*: a delivered goodnight line after its delay, or a delivered proactive
         message that stayed unanswered.
         """
-        if (context.scope.kind is not ScopeKind.PRIVATE or not preferences.values["automatic_enabled"]
+        if (context.scope.kind is not ScopeKind.PRIVATE or not is_core(self.runtime, context.actor.subject)
+                or not preferences.values["automatic_enabled"]
                 or not preferences.values["screen_glance_enabled"] or preferences.reason("screen")):
             return None
         decision = self._goodnight_peek(context, preferences, at)
@@ -222,7 +224,8 @@ class ScreenContactEvents:
                 or self.runtime.read_one("SELECT 1 FROM proactive_contacts WHERE task_id = ?", (task_id,)))
 
     def select(self, context, preferences, at):
-        if (context.scope.kind is not ScopeKind.PRIVATE or not preferences.values["screen_glance_enabled"]
+        if (context.scope.kind is not ScopeKind.PRIVATE or not is_core(self.runtime, context.actor.subject)
+                or not preferences.values["screen_glance_enabled"]
                 or preferences.reason("screen") or not preferences.values["automatic_enabled"]
                 or self._cooling_down(context, preferences, at)
                 or self._daily_count(context, preferences, at) >= preferences.values["screen_glance_daily_limit"]):

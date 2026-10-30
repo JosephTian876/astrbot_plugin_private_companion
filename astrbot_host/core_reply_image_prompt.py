@@ -13,6 +13,16 @@ from companion_v2.references.prompts import IMAGE_REFERENCE_INSTRUCTION
 from .native_extensions.request_context import set_system_instruction
 
 
+def _record_turn_note(session, text):
+    """Keep the per-turn image hint out of the system prompt."""
+    state = getattr(session, "state", None)
+    if not isinstance(state, dict):
+        return
+    notes = state.setdefault("_turn_notes", {})
+    if isinstance(notes, dict):
+        notes["image"] = text
+
+
 logger = logging.getLogger(__name__)
 _PURPOSES = {
     "image.generate": "没有可用参考图时按画面描述生成新图；包括全新角色、普通场景与无身份锚点的自拍",
@@ -131,11 +141,12 @@ def _identity_reference_guidance(material):
 
 
 def inject_core_image_prompt(session, request, offered, values):
-    """Keep configuration in system and role reference data in the turn suffix."""
+    """Keep configuration in system and per-turn hints in the turn suffix."""
     session.state.pop("_image_reference_material", None)
     actions = tuple(item.spec.action for item in offered if item.spec.action in IMAGE_ACTIONS)
     if not actions or values is None:
         set_system_instruction(request, "image_output")
+        _record_turn_note(session, "")
         return
     from .core_reply_tools import native_tool_name
 
@@ -164,8 +175,12 @@ def inject_core_image_prompt(session, request, offered, values):
                 "本轮用户文本已命中图片请求规则。若这句话确实是在要新图、自拍或改图，"
                 "直接调用对应图片工具，不要只回一段描述或反复确认。"
             )
+    # The rule match is a per-turn signal. Keeping it in system would flip the
+    # whole cached prefix on every image request, so it rides the turn suffix
+    # applied after the host clears turn context.
+    _record_turn_note(session, rule_hint)
     instruction = "\n".join(part for part in (
-        prompt_instruction(values), rule_hint,
+        prompt_instruction(values),
         "本轮图片工具：\n" + descriptions, _DELIVERY) if part)
     if reference_limit is not None:
         instruction += (f"\n当前生图改图路线最多接收 {reference_limit} 张参考图。"

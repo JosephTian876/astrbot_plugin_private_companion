@@ -13,7 +13,7 @@ from companion_v2.execution.models import (Lane, ProviderBinding, SideEffect, Ta
 from companion_v2.execution.runner import ExactTaskRunner
 from companion_v2.execution.service import outcome
 from companion_v2.model_gateway.models import ModelTaskProfile
-from companion_v2.identity_policy.private_domain import source_ref
+from companion_v2.identity_policy.private_domain import as_source_ref
 from companion_v2.identity_policy.interventions import (REST_WAKE_INTERVENTION,
     STATE_INTERVENTION, require_capability)
 from companion_v2.role_work.growth.configuration import skills_enabled
@@ -514,8 +514,8 @@ class StateMaintenance:
         dependencies.extend(json.loads(encode(cycle_sources)))
         for item in calendar.get("items", []) + activities["items"]:
             dependencies.extend(item.get("sources", []))
-        sources = tuple(dict.fromkeys((*sources, *(source_ref(s) for s in mood_round["sources"]),
-                                       *(source_ref(s) for s in dependencies))))
+        sources = tuple(dict.fromkeys((*sources, *(as_source_ref(s) for s in mood_round["sources"]),
+                                       *(as_source_ref(s) for s in dependencies))))
         self.service.evidence.validate(context, sources)
         return {"context": context, "instruction": instruction, "request_id": request_id, "at": now,
             "revision": record["revision"] if record else 0, "record_hash": digest(record), "record": record,
