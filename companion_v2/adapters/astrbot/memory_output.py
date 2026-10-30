@@ -4,6 +4,20 @@ import json
 
 from companion_v2.model_gateway.models import CapturedModelOutput
 
+from .response_diagnostics import native_finish_reason
+
+
+# CapturedModelOutput names the same endings with its own vocabulary. Anything the
+# provider leaves unclassified stays "stop", which is what this path reported
+# before the candidate's finish reason could be read at all.
+_CAPTURED_FINISH_REASONS = {
+    "stop": "stop",
+    "length": "length",
+    "content_filter": "refusal",
+    "tool_calls": "invalid",
+    "function_call": "invalid",
+}
+
 
 def explicit_refusal(completion):
     choices = getattr(completion, "choices", ())
@@ -38,7 +52,9 @@ def capture(completion):
             return CapturedModelOutput(body[:65536], "oversized")
         if getattr(completion, "tools_call_args", None):
             return CapturedModelOutput(body, "invalid")
-        return CapturedModelOutput(body, "stop")
+        # 触到输出上限的回答不是「说完了」：把它记成 stop 会让上层把半句正文当成
+        # 完整回答交付出去。candidate 自己给出的结束原因才是这里的依据。
+        return CapturedModelOutput(body, _CAPTURED_FINISH_REASONS.get(native_finish_reason(completion), "stop"))
     choice = choices[0]
     message = getattr(choice, "message", None)
     body = getattr(message, "content", None)
