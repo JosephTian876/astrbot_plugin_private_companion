@@ -364,8 +364,6 @@ class UnwiredJudgeTests(JudgeFixture, unittest.IsolatedAsyncioTestCase):
 
 class JudgeCacheTests(JudgeFixture, unittest.IsolatedAsyncioTestCase):
     async def test_repeated_body_is_reviewed_again_after_a_contact_was_sent(self):
-        # Isolate cache validity from the existing single-slot delivery contention.
-        self.limits = replace(self.limits, background_slots=2)
         host = await self.judged_host(dedup_enabled=False, proactive_closing_contacts_threshold=9)
         app = host.application
         first = await self.judged(app)
@@ -413,6 +411,7 @@ class JudgeCacheTests(JudgeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((record["decision"], record["judge"]["decision"], record["judge"]["allowed"]),
                          ("send", "send", True))
         self.assertEqual(len(self.judge_calls), 1)
+        await self.delivery_state(app, self.contacts(app)[0]["task_id"], "delivered")
         self.assertEqual(len(self.sent), 2)
 
     async def test_judge_settings_have_no_daily_cap_field(self):
