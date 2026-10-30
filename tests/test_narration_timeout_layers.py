@@ -70,6 +70,9 @@ class NarrationLayerTests(unittest.TestCase):
                          UNDERSTANDING_DEFAULTS["video_understanding_wait_seconds"])
 
     def test_every_layer_inside_the_configured_wait_is_ordered(self):
+        # These are the values one wait implies. What this plugin budgets per call
+        # is the task layer; the model round adds its own profile default, so the
+        # round tests below cover both sides of the 7 s / 19 s boundary.
         for waits, layers in ((range(3, 31), image_narration_layers),
                               (range(3, 61), video_narration_layers)):
             for wait in waits:
@@ -112,7 +115,7 @@ class NarrationLayerTests(unittest.TestCase):
 class _NarrationFixture(ExecutionFixture):
     """A real supervisor and runner behind the real owner, with a bounded model round."""
 
-    wait_seconds = 3
+    wait_seconds = 8
     kind = ""
     logger_name = ""
 
@@ -196,12 +199,15 @@ class _NarrationFixture(ExecutionFixture):
 
 
 class ImageNarrationRoundTests(_NarrationFixture, unittest.IsolatedAsyncioTestCase):
-    wait_seconds = 3
+    wait_seconds = IMAGE_NARRATION_WAIT_SECONDS
     kind = "conversation.image_narration"
     logger_name = "companion_v2.conversation.media.image_narration"
 
     def setUp(self):
-        self.provider_seconds, self.budget_seconds, self.wait = image_narration_layers(self.wait_seconds)
+        # The fake gateway cuts the round where a real one does: at the profile
+        # default, not at a number a different wait would imply.
+        self.provider_seconds = IMAGE_NARRATION_PROVIDER_TIMEOUT_SECONDS
+        _, self.budget_seconds, self.wait = image_narration_layers(self.wait_seconds)
         super().setUp()
 
     def make_service(self):
@@ -236,14 +242,37 @@ class ImageNarrationRoundTests(_NarrationFixture, unittest.IsolatedAsyncioTestCa
         self.assertIn("code=model_timeout", logged,
                       "the layer that stopped the round must name itself")
         self.assertNotIn("image_narration_wait_exhausted", logged)
-        self.assertIn("provider_seconds=%s" % self.provider_seconds, logged)
+        self.assertIn("provider_seconds_default=%s" % self.provider_seconds, logged)
         self.assertAlmostEqual(self.deadline_seconds(), self.budget_seconds, delta=1)
         self.assertEqual(dict(self.events()[-1]), {"state": "failed", "reason": "worker_error"})
         self.assertEqual(self.rounds, 1)
 
+    async def test_a_wait_below_the_provider_default_stops_at_the_task_layer(self):
+        # The wait is configurable down to 1 s while the round keeps the profile
+        # default, so below a 7 s wait the supervised task expires first. That is
+        # still a named stop -- it is never the silent outer cancellation this
+        # change removes.
+        self.wait_seconds = 3
+        _, self.budget_seconds, self.wait = image_narration_layers(self.wait_seconds)
+        with self.assertLogs(self.logger_name, level="INFO") as captured:
+            caption = await self.caption()
+        self.assertEqual(caption, "")
+        logged = "\n".join(captured.output)
+        self.assertIn("code=timeout", logged,
+                      "the task layer must name itself when it expires before the model round")
+        self.assertNotIn("model_timeout", logged)
+        self.assertNotIn("image_narration_wait_exhausted", logged)
+        self.assertAlmostEqual(self.deadline_seconds(), self.budget_seconds, delta=1)
+        self.assertEqual(dict(self.events()[-1]), {"state": "expired", "reason": "timeout"})
+
     async def test_the_previous_numbers_stopped_the_round_at_the_outer_layer(self):
+        # A wait the old arithmetic really overran: deadline ``wait + 1`` sat
+        # outside the waiting reply, so the reply cancelled first and recorded
+        # nothing the owner could read.
+        self.wait_seconds = 3
         with patch.object(image_module, "image_narration_layers",
                           lambda wait: (15, max(2, wait + 1), wait)):
+            _, self.budget_seconds, self.wait = image_narration_layers(self.wait_seconds)
             self.provider_seconds = 15
             self.round_text = "never reached"
             with self.assertLogs(self.logger_name, level="INFO") as captured:
@@ -262,12 +291,14 @@ class ImageNarrationRoundTests(_NarrationFixture, unittest.IsolatedAsyncioTestCa
 
 
 class VideoNarrationRoundTests(_NarrationFixture, unittest.IsolatedAsyncioTestCase):
-    wait_seconds = 3
+    wait_seconds = VIDEO_NARRATION_WAIT_SECONDS
     kind = "conversation.video_narration"
     logger_name = "companion_v2.conversation.media.video.narration"
 
     def setUp(self):
-        self.provider_seconds, self.budget_seconds, self.wait = video_narration_layers(self.wait_seconds)
+        # Same rule as the image sidecar: the cut point is the profile default.
+        self.provider_seconds = VIDEO_NARRATION_PROVIDER_TIMEOUT_SECONDS
+        _, self.budget_seconds, self.wait = video_narration_layers(self.wait_seconds)
         super().setUp()
 
     def make_service(self):
@@ -309,7 +340,9 @@ class VideoNarrationRoundTests(_NarrationFixture, unittest.IsolatedAsyncioTestCa
         self.assertEqual(dict(self.events()[-1]), {"state": "failed", "reason": "worker_error"})
 
     async def test_the_previous_numbers_stopped_the_round_at_the_outer_layer(self):
+        self.wait_seconds = 3
         with patch.object(video_module, "video_narration_layers", lambda wait: (60, max(2, wait + 1), wait)):
+            _, self.budget_seconds, self.wait = video_narration_layers(self.wait_seconds)
             self.provider_seconds = 60
             self.round_text = "never reached"
             with self.assertLogs(self.logger_name, level="WARNING") as captured:
@@ -318,6 +351,20 @@ class VideoNarrationRoundTests(_NarrationFixture, unittest.IsolatedAsyncioTestCa
         logged = "\n".join(captured.output)
         self.assertIn("code=video_narration_wait_exhausted", logged)
         self.assertNotIn("model_timeout", logged)
+
+    async def test_a_wait_below_the_provider_default_stops_at_the_task_layer(self):
+        self.wait_seconds = 3
+        _, self.budget_seconds, self.wait = video_narration_layers(self.wait_seconds)
+        with self.assertLogs(self.logger_name, level="WARNING") as captured:
+            narration = await self.caption()
+        self.assertEqual((narration.text, narration.available), ("视频转述失败，尚未读到视频内容。", False))
+        logged = "\n".join(captured.output)
+        self.assertIn("code=timeout", logged,
+                      "the task layer must name itself when it expires before the model round")
+        self.assertNotIn("model_timeout", logged)
+        self.assertNotIn("video_narration_wait_exhausted", logged)
+        self.assertAlmostEqual(self.deadline_seconds(), self.budget_seconds, delta=1)
+        self.assertEqual(dict(self.events()[-1]), {"state": "expired", "reason": "timeout"})
 
     async def test_a_fast_round_keeps_its_caption_and_the_declared_deadline(self):
         self.slow_round = False

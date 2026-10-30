@@ -36,9 +36,13 @@ OWNER = "conversation.video_narration"
 # Same shape as every other bounded sidecar: one ceiling, three derived layers.
 # A reply turn stalls for at most `video_understanding_wait_seconds` (1-60 s,
 # default 20) while the native video round runs, so that wait is the ceiling and
-# the layers derive downward from it - the model round expires first, the
-# supervised task second, the waiting reply last. Each layer then records its own
-# reason instead of being cancelled by an outer one that cannot name it.
+# the layers derive downward from it - the model round should expire first, the
+# supervised task second, the waiting reply last. The reply and the task follow
+# the configured wait on every call; the model round follows this profile's
+# default (20 - 2 = 18) or the saved ``model.conversation.video_narration
+# .timeout_seconds``, so above a 19 s wait the round expires first and below it
+# the task does. Either way the inner layer records its own reason instead of
+# being cancelled by the waiting reply, which cannot name what it interrupted.
 VIDEO_NARRATION_WAIT_SECONDS = 20
 VIDEO_NARRATION_MARGIN_SECONDS = 2
 VIDEO_NARRATION_HANDOFF_SECONDS = 1
@@ -49,6 +53,9 @@ VIDEO_NARRATION_BUDGET_SECONDS = VIDEO_NARRATION_WAIT_SECONDS - VIDEO_NARRATION_
 def video_narration_layers(wait_seconds):
     """Return (provider, task, parent) seconds for one configured wait.
 
+    ``provider`` is the model-round budget this wait implies at the default
+    configuration; the round itself runs on ``video_narration_profile()
+    .timeout_seconds``, i.e. that default or the value saved on the model page.
     Below 3 s the three layers collapse: a native video round cannot be measured
     in a shorter window, so the waiting reply stays the only honest fence.
     """
@@ -223,7 +230,7 @@ class NativeVideoNarrationService:
                "max_chars": settings.get("video_understanding_max_chars", 2400)}
         self.pending[task_id] = job
         now = self.tasks.now()
-        provider_seconds, budget_seconds, wait = video_narration_layers(
+        _, budget_seconds, wait = video_narration_layers(
             settings.get("video_understanding_wait_seconds", VIDEO_NARRATION_WAIT_SECONDS))
         try:
             with self.runtime.transaction():
@@ -233,16 +240,16 @@ class NativeVideoNarrationService:
                 result = await asyncio.wait_for(self.runner.run(context, task_id), timeout=wait)
             except TimeoutError:
                 logger.warning("[CompanionV2] 视频原生转述超出等待预算 position=%s code=%s "
-                               "wait_seconds=%s provider_seconds=%s budget_seconds=%s",
+                               "wait_seconds=%s provider_seconds_default=%s budget_seconds=%s",
                                video.descriptor.position, "video_narration_wait_exhausted",
-                               wait, provider_seconds, budget_seconds)
+                               wait, VIDEO_NARRATION_PROVIDER_TIMEOUT_SECONDS, budget_seconds)
                 return VideoNarration(video.source, "视频转述超时，尚未读到视频内容。", False)
             stopped = result.failure.code if result.failure else result.unwrap().stop_code
             if stopped is not None:
                 logger.warning("[CompanionV2] 视频原生转述未完成 position=%s code=%s "
-                               "wait_seconds=%s provider_seconds=%s budget_seconds=%s",
+                               "wait_seconds=%s provider_seconds_default=%s budget_seconds=%s",
                                video.descriptor.position, stopped,
-                               wait, provider_seconds, budget_seconds)
+                               wait, VIDEO_NARRATION_PROVIDER_TIMEOUT_SECONDS, budget_seconds)
                 return VideoNarration(video.source, "视频转述失败，尚未读到视频内容。", False)
             text = self.results.pop(task_id, "")
             return VideoNarration(video.source,
