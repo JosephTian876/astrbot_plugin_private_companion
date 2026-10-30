@@ -67,11 +67,20 @@ def _repair(messages: Any, event: Any, *, where: str) -> ToolPairingRepair:
         return ToolPairingRepair()
     if not isinstance(messages, list) or not messages:
         return ToolPairingRepair()
-    report = repair_tool_call_pairing(
-        messages,
-        placeholder=MISSING_TOOL_RESULT_TEXT,
-        factory=_factory_for(messages),
-    )
+    try:
+        report = repair_tool_call_pairing(
+            messages,
+            placeholder=MISSING_TOOL_RESULT_TEXT,
+            factory=_factory_for(messages),
+        )
+    except Exception:
+        # This check exists so that a damaged history does not cost the turn, so it
+        # must never be the reason one is lost. The host logs hook errors and keeps
+        # going, but leaning on that would leave the repair silently skipped, with
+        # nothing naming why the same request failed again.
+        logger.warning("[CompanionV2] 历史工具调用配对复核失败，保留原样继续 where=%s event_ref=%s",
+                       where, _event_ref(event), exc_info=True)
+        return ToolPairingRepair()
     if report.changed:
         # Visible on purpose: a silent repair would hide whichever hook dropped
         # the result, and this line is the only signal that a turn was saved

@@ -17,10 +17,12 @@ before 1 pending functionResponse part(s)" -- and the persona's custom error lin
 from copy import deepcopy
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 
 from astrbot.core.agent.message import Message, TextPart
 from astrbot.core.provider.entities import LLMResponse
 
+from astrbot_host import core_reply_history_guard as history_guard
 from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 from astrbot_host.core_reply_history_guard import (
     repair_request_history,
@@ -31,6 +33,8 @@ from companion_v2.conversation.history_legality import (
     repair_tool_call_pairing,
     tool_call_pairing_is_legal,
 )
+
+logger_name = history_guard.__name__
 
 
 def tool_call(call_id, name="companion_v2_group_participation_choose", arguments="{}"):
@@ -258,6 +262,21 @@ class CoreReplyHistoryGuardTests(unittest.TestCase):
         event = _Event()
         response = LLMResponse(role="assistant", completion_text="好")
         self.assertFalse(repair_run_context_history(event, NS(messages=response)).changed)
+
+    def test_a_failure_inside_the_guard_never_costs_the_turn(self):
+        # The guard runs so that one damaged entry cannot end the turn, so its own
+        # failure must stay contained and named instead of escaping to the host.
+        event = _Event()
+        req = NS(contexts=[user(), assistant_calls("call_314584"), assistant("好")])
+        before = deepcopy(req.contexts)
+
+        with patch.object(history_guard, "repair_tool_call_pairing", side_effect=ValueError("boom")):
+            with self.assertLogs(logger_name, level="WARNING") as captured:
+                report = history_guard.repair_request_history(event, req)
+
+        self.assertFalse(report.changed)
+        self.assertEqual(req.contexts, before, "the history is left exactly as it arrived")
+        self.assertIn("复核失败", "\n".join(captured.output))
 
 
 if __name__ == "__main__":
