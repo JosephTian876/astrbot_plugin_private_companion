@@ -1,4 +1,4 @@
-"""Reproduce short replies and preserve explicit migrated presentation settings."""
+"""Reproduce short replies, restore migrated presentation coverage, and pin the dispatch order."""
 
 from dataclasses import asdict, replace
 import json
@@ -44,57 +44,7 @@ def migrated_presentation(source, window_kind):
     return migrated
 
 
-class ReplyPresetTests(unittest.TestCase):
-    def test_migrated_settings_keep_explicit_cleanup_while_new_defaults_enable_cleanup(self):
-        source = json.loads((ROOT / "fixtures/reply_segmentation.v1.json").read_text(encoding="utf-8"))
-        # These dormant window values must never win while profiles are off.
-        source["legacy_compat_config"].update({"segmented_proactive_private_min_segment_chars": 8,
-            "segmented_proactive_private_max_segments": 3, "segmented_proactive_private_log_base": 1.8})
-        migrated = migrated_presentation(source, "private")
-        defaults = {field.field_id.removeprefix(GROUP + "."): field.default
-                    for field in configuration_fields(SegmentationPolicy(), True, 1.5)}
-        self.assertTrue(defaults["content_cleanup_enabled"])
-        self.assertTrue(migrated["content_cleanup_enabled"])
-        # V1's saved whole-part cleanup survives migration; only the V2 default
-        # narrows cleanup to the end of each part.
-        self.assertEqual(migrated["content_cleanup_scope"], "all")
-        self.assertEqual(text_policy(migrated).cleanup_scopes, WHOLE_PART_CLEANUP_SCOPES)
-        self.assertEqual(json.loads(migrated["content_cleanup_words"]), ["。", "，"])
-        self.assertEqual(migrated["content_cleanup_rule"],
-                         source["legacy_compat_config"]["segmented_proactive_content_cleanup_rule"])
-        # Only the settings V1 saved with a different value leave today's defaults;
-        # the dormant per-window values above and every other field stay on them.
-        explicit = {"content_cleanup_rule", "content_cleanup_scope", "content_cleanup_words", "split_words"}
-        self.assertEqual({key for key in migrated if migrated[key] != defaults[key]}, explicit)
-        # V1's explicitly saved comma boundary survives migration, while new
-        # replies keep comma-linked clauses together by default.
-        self.assertIn("，", json.loads(migrated["split_words"]))
-        self.assertNotIn("，", json.loads(defaults["split_words"]))
-        # Compared before the schema defaults below: that check is a known failure
-        # against current main (see _conf_schema.json split_words), and it must not
-        # mask the private/group agreement this test is about.
-        self.assertEqual(migrated, migrated_presentation(source, "group"))
-        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-        for key, item in schema["segmentation"]["items"].items():
-            self.assertEqual(item["default"], asdict(SegmentationPolicy())[key], key)
-
-    def test_profile_segmentation_overrides_the_plugin_defaults(self):
-        source = json.loads((ROOT / "fixtures/reply_segmentation.v1.json").read_text(encoding="utf-8"))
-        source["legacy_compat_config"].update({"enable_segmented_proactive_chat_profiles": True,
-            "segmented_proactive_private_max_segments": 3,
-            "segmented_proactive_private_min_segment_chars": 8,
-            "segmented_proactive_private_threshold": 120})
-        # The plugin-level segmentation section still migrates its own values ...
-        global_max = source["legacy_compat_config"]["segmented_proactive_max_segments"]
-        plugin = convert_plugin_configuration(source, window_kind="private").changes
-        self.assertEqual(plugin["segmentation.max_segments"], global_max)
-        private = migrated_presentation(source, "private")
-        self.assertEqual(private["max_segments"], 3)
-        self.assertEqual(private["min_segment_chars"], 8)
-        self.assertEqual(private["threshold"], 120)
-        # ... but only the selected window's rows override them.
-        self.assertEqual(migrated_presentation(source, "group")["max_segments"], global_max)
-
+class ReplyPreparationTests(unittest.TestCase):
     def test_live_short_reply_splits_and_has_no_edge_blank_lines(self):
         reply = prepare_reply("\n上课呢…偷偷瞄一眼。怎么啦，这个点找我？\n\n",
                               SegmentationPolicy(), ReplyTextPolicy())
@@ -128,6 +78,66 @@ class ReplyPresetTests(unittest.TestCase):
         source = "这是第一句话。这是第二句话！"
         self.assertEqual(policy.parts(source), ("这是第一句话。", "这是第二句话！"))
         self.assertEqual("".join(policy.parts(source)), source)
+
+
+class MigratedPresentationTests(unittest.TestCase):
+    """恢复旧版呈现设置迁移到 conversation.presentation.* 的覆盖。
+
+    8806e3dc 删掉失效的 tools.migrate_reply_segmentation 导入时，把这个用例整类一起
+    删了；该提交把 content_cleanup_* 的迁移性质补在 tests/test_configuration_migration.py
+    的真实转换入口上。这里不重新翻案，也不是重复那部分：补回的是那条用例没有覆盖的
+    性质，并且全部跑在产品实际执行的迁移入口（convert_plugin_configuration /
+    convert_configuration）而不是一个不存在的工具上——插件级分段默认值与 profile
+    行的覆盖次序、显式设置相对新默认的差异集合、split_words 的逗号边界存活、
+    cleanup_scope 折进文本策略，以及 schema 默认与 SegmentationPolicy 保持同步。
+    """
+
+    def test_migrated_settings_keep_explicit_cleanup_while_new_defaults_enable_cleanup(self):
+        source = json.loads((ROOT / "fixtures/reply_segmentation.v1.json").read_text(encoding="utf-8"))
+        # These dormant window values must never win while profiles are off.
+        source["legacy_compat_config"].update({"segmented_proactive_private_min_segment_chars": 8,
+            "segmented_proactive_private_max_segments": 3, "segmented_proactive_private_log_base": 1.8})
+        migrated = migrated_presentation(source, "private")
+        defaults = {field.field_id.removeprefix(GROUP + "."): field.default
+                    for field in configuration_fields(SegmentationPolicy(), True, 1.5)}
+        self.assertTrue(defaults["content_cleanup_enabled"])
+        self.assertTrue(migrated["content_cleanup_enabled"])
+        # V1's saved whole-part cleanup survives migration; only the V2 default
+        # narrows cleanup to the end of each part.
+        self.assertEqual(migrated["content_cleanup_scope"], "all")
+        self.assertEqual(text_policy(migrated).cleanup_scopes, WHOLE_PART_CLEANUP_SCOPES)
+        self.assertEqual(json.loads(migrated["content_cleanup_words"]), ["。", "，"])
+        self.assertEqual(migrated["content_cleanup_rule"],
+                         source["legacy_compat_config"]["segmented_proactive_content_cleanup_rule"])
+        # Only the settings V1 saved with a different value leave today's defaults;
+        # the dormant per-window values above and every other field stay on them.
+        explicit = {"content_cleanup_rule", "content_cleanup_scope", "content_cleanup_words", "split_words"}
+        self.assertEqual({key for key in migrated if migrated[key] != defaults[key]}, explicit)
+        # V1's explicitly saved comma boundary survives migration, while new
+        # replies keep comma-linked clauses together by default.
+        self.assertIn("，", json.loads(migrated["split_words"]))
+        self.assertNotIn("，", json.loads(defaults["split_words"]))
+        self.assertEqual(migrated, migrated_presentation(source, "group"))
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        for key, item in schema["segmentation"]["items"].items():
+            self.assertEqual(item["default"], asdict(SegmentationPolicy())[key], key)
+
+    def test_profile_segmentation_overrides_the_plugin_defaults(self):
+        source = json.loads((ROOT / "fixtures/reply_segmentation.v1.json").read_text(encoding="utf-8"))
+        source["legacy_compat_config"].update({"enable_segmented_proactive_chat_profiles": True,
+            "segmented_proactive_private_max_segments": 3,
+            "segmented_proactive_private_min_segment_chars": 8,
+            "segmented_proactive_private_threshold": 120})
+        # The plugin-level segmentation section still migrates its own values ...
+        global_max = source["legacy_compat_config"]["segmented_proactive_max_segments"]
+        plugin = convert_plugin_configuration(source, window_kind="private").changes
+        self.assertEqual(plugin["segmentation.max_segments"], global_max)
+        private = migrated_presentation(source, "private")
+        self.assertEqual(private["max_segments"], 3)
+        self.assertEqual(private["min_segment_chars"], 8)
+        self.assertEqual(private["threshold"], 120)
+        # ... but only the selected window's rows override them.
+        self.assertEqual(migrated_presentation(source, "group")["max_segments"], global_max)
 
 
 class ReplyDispatchOrderTests(HostFixture, unittest.IsolatedAsyncioTestCase):

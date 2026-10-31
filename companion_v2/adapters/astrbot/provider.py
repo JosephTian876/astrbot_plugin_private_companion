@@ -20,10 +20,15 @@ from companion_v2.model_gateway.response_diagnostics import ResponseDiagnostics,
 
 from .model_wire import build_wire, decode_response
 from .native import check_version, native_id
-from .memory_output import capture, explicit_refusal, response_format
+from .memory_output import capture, explicit_refusal, response_format, responses_text_format
 from .streaming import StreamTranscript
 from .response_diagnostics import observe_completion
 from .provider_transport import definitely_not_sent, rejected_before_generation
+
+
+# Reasoning models count hidden thinking tokens against the same completion budget.
+# A tiny probe cap (previously 8) can return only reasoning and no visible text.
+PROBE_OUTPUT_TOKENS = 256
 
 
 RESERVED_EXTRA = frozenset({"model", "messages", "tools", "functions", "function_call", "tool_choice",
@@ -59,11 +64,44 @@ def _developer_payload(payload):
     return _developer_content(payload)
 
 
+def _gemini_audio_part(item):
+    """把 OpenAI 形状的音频条目换成 AstrBot 的 Gemini 转换认得的那一种。
+
+    AstrBot 的 payload 循环对 user 消息里非 ``text`` / ``image_url`` 的条目一律当作
+    音频，直接读 ``item["audio_url"]["url"]``；把 ``input_audio`` 递过去就是一个
+    KeyError，整轮调用失败。Gemini 的音频只接受 data URL，所以这里就地产出那种形状。
+    """
+
+    if not isinstance(item, dict) or item.get("type") != "input_audio":
+        return item
+    audio = item.get("input_audio")
+    if not isinstance(audio, dict):
+        return item
+    data = audio.get("data")
+    if not isinstance(data, str) or not data:
+        return item
+    # 宿主从 URL 的 mime 段读格式，任何分隔符都会把解析切错。
+    fmt = "".join(char for char in str(audio.get("format") or "wav").lower() if char.isalnum()) or "wav"
+    return {"type": "audio_url", "audio_url": {"url": "data:audio/" + fmt + ";base64," + data}}
+
+
+def _gemini_content(content):
+    if not isinstance(content, list):
+        return content
+    converted, changed = [], False
+    for item in content:
+        part = _gemini_audio_part(item)
+        changed = changed or part is not item
+        converted.append(part)
+    return converted if changed else content
+
+
 def _gemini_messages(messages):
     """AstrBot 的 Gemini 转换用 ``message["name"]`` 回填 function_response。
 
     OpenAI 的工具结果只带 ``tool_call_id``，所以这里按同一次对话里的
-    tool_calls 把函数名补回去；没有可补的内容时原样返回。
+    tool_calls 把函数名补回去；音频条目同时换成宿主认得的形状。没有可补的内容时
+    原样返回。
     """
     names = {}
     for message in messages:
@@ -71,14 +109,85 @@ def _gemini_messages(messages):
             function = call.get("function") or {}
             if isinstance(call.get("id"), str) and isinstance(function.get("name"), str):
                 names[call["id"]] = function["name"]
-    if not names:
-        return messages
-    enriched = []
+    enriched, changed = [], False
     for message in messages:
+        current = message
         if message.get("role") == "tool" and message.get("tool_call_id") in names:
-            message = {**message, "name": names[message["tool_call_id"]]}
-        enriched.append(message)
-    return enriched
+            current = {**current, "name": names[message["tool_call_id"]]}
+        content = _gemini_content(current.get("content"))
+        if content is not current.get("content"):
+            current = {**current, "content": content}
+        changed = changed or current is not message
+        enriched.append(current)
+    return enriched if changed else messages
+
+
+def _chat_image_urls(messages):
+    """Collect image URLs from OpenAI-shaped chat messages before host conversion."""
+    urls = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        for part in content if isinstance(content, list) else ():
+            if not isinstance(part, dict) or part.get("type") not in ("image_url", "input_image"):
+                continue
+            image = part.get("image_url")
+            url = image.get("url") if isinstance(image, dict) else image
+            if isinstance(url, str) and url:
+                urls.append(url)
+    return tuple(urls)
+
+
+def _responses_image_urls(items):
+    """Collect image URLs from a prepared Responses ``input`` array."""
+    urls = []
+    for item in items if isinstance(items, list) else ():
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        for part in content if isinstance(content, list) else ():
+            if isinstance(part, dict) and part.get("type") == "input_image":
+                url = part.get("image_url")
+                if isinstance(url, str) and url:
+                    urls.append(url)
+    return tuple(urls)
+
+
+def _unsupported_media(messages):
+    """Return the media kinds the Responses converter would drop or degrade."""
+    found = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        for part in content if isinstance(content, list) else ():
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in ("input_audio", "audio_url"):
+                found.add("audio")
+            elif part.get("type") == "video_data":
+                found.add("video")
+    return tuple(sorted(found))
+
+
+def _responses_failure(error):
+    """Classify the host Responses parser's fixed exceptions without importing AstrBot.
+
+    ``ProviderOpenAIResponses._parse_response`` raises ``EmptyModelOutputError``
+    for unusable output and ``RuntimeError`` for a provider-reported failure or a
+    content-filter rejection. These are response-stage failures, never transport
+    failures; a content filter is a refusal with its own fallback semantics.
+    """
+    if "EmptyModelOutputError" in {item.__name__ for item in type(error).__mro__}:
+        return ModelFailure.NATIVE_PARSE
+    if type(error).__name__ == "RuntimeError":
+        message = str(error)
+        if message.startswith("Responses API output was rejected by the provider content filter"):
+            return ModelFailure.REFUSAL
+        if message.startswith("Responses API request failed"):
+            return ModelFailure.NATIVE_PARSE
+    return None
 
 
 def _developer_completion(completion):
@@ -153,16 +262,24 @@ class _DeveloperRequestTrace:
     def __init__(self, client, provider_id, event_id):
         self.client, self.provider_id, self.event_id = client, provider_id, event_id
 
-    async def create(self, **kwargs):
+    def _log(self, kwargs):
         logger.debug("[CompanionV2][开发者追踪] 最终模型请求 event_id=%s provider=%s payload=%s",
                      self.event_id, self.provider_id, _developer_payload(kwargs))
+
+    async def create(self, **kwargs):
+        self._log(kwargs)
         return await self.client.chat.completions.create(**kwargs)
+
+    async def create_response(self, **kwargs):
+        self._log(kwargs)
+        return await self.client.responses.create(**kwargs)
 
     def client_view(self):
         trace = self
 
         class ClientView:
             chat = SimpleNamespace(completions=SimpleNamespace(create=trace.create))
+            responses = SimpleNamespace(create=trace.create_response)
 
             def __getattr__(self, name):
                 return getattr(trace.client, name)
@@ -265,11 +382,19 @@ class AstrBotTextProvider:
         native_config = getattr(self.native, "provider_config", {})
         native_kind = str(native_config.get("type") or "") if isinstance(native_config, dict) else ""
         client = getattr(self.native, "client", None)
+        responses_create = getattr(getattr(client, "responses", None), "create", None)
+        responses_hooks = (native_kind == "openai_responses"
+                           and callable(getattr(self.native, "_parse_response", None))
+                           and callable(responses_create))
+        if native_kind == "openai_responses" and not responses_hooks:
+            raise ValueError("openai_responses provider lacks the verified Responses API surface")
         openai_hooks = (callable(getattr(self.native, "_prepare_chat_payload", None))
                         and callable(getattr(self.native, "_parse_openai_completion", None))
                         and callable(getattr(client, "with_options", None)))
-        # 只有具备 OpenAI 专用钩子的 provider 才走 OpenAI 分支；其余按归一化响应处理。
-        self.kind = ("openai" if openai_hooks
+        # Responses 与 Chat Completions 共用多数钩子，必须按宿主注册类型和真实
+        # Responses 表面先分流；其余才按 OpenAI 专用钩子判断。
+        self.kind = ("openai_responses" if responses_hooks else
+                     "openai" if openai_hooks
                      else "gemini" if native_kind.startswith("googlegenai") else "native")
         self.config = deepcopy(self.native.provider_config)
         self.config_hash = digest(self.config)
@@ -280,8 +405,11 @@ class AstrBotTextProvider:
         self.tariff, self.output_parameter = tariff, output_parameter
         if type(streaming) is not bool:
             raise ValueError("streaming must be an explicit boolean")
-        if streaming and self.kind != "openai":
-            # 原生 Gemini 的流式协议与本适配器的流式校验器不兼容：降级为一次性返回。
+        # 只有 Chat Completions 的 chunk 协议与 StreamTranscript 兼容。Responses
+        # 的 _query_stream 产出 LLMResponse 事件，Gemini 同样是另一套协议：没有
+        # 完整验证过的 transcript 前一律降级为一次性返回，不能假装支持流式。
+        self.streaming_supported = self.kind == "openai"
+        if streaming and not self.streaming_supported:
             streaming = False
         if streaming and not callable(getattr(self.native, "_query_stream", None)):
             raise ValueError("the verified native provider has no streaming transport")
@@ -295,7 +423,8 @@ class AstrBotTextProvider:
 
     def local_provider(self):
         capabilities = host_capabilities(self.config)
-        transport = ("astrbot_openai" if self.kind == "openai" else
+        transport = ("astrbot_openai_responses" if self.kind == "openai_responses" else
+                     "astrbot_openai" if self.kind == "openai" else
                      "astrbot_gemini" if self.kind == "gemini" else "astrbot_native")
         return LocalProvider(self.binding, capabilities, self.maximum_output_tokens,
                              self.reserve, self.generate, transport=transport, default_streaming=self.streaming,
@@ -439,23 +568,30 @@ class AstrBotTextProvider:
         self._current()
         native = copy(self.native)
         native.provider_config = deepcopy(self.config)
-        if self.kind != "openai":
+        if self.kind == "openai_responses":
+            native.client = self.client.with_options(max_retries=0)
+            if native.client.max_retries != 0:
+                raise ValueError("native probe retries could not be disabled")
+            # Responses 的合法请求只有 input；messages / max_tokens 会进入
+            # extra_body 并被服务端拒绝。这里直接复用宿主的真实转换器。
+            payload, _ = await native._prepare_chat_payload(
+                prompt="Reply OK.", contexts=[], model=self.model)
+            payload["max_output_tokens"] = 8
+            result = await native._query(payload, None, request_max_retries=1)
+        elif self.kind != "openai":
             # Gemini 客户端没有 OpenAI 的 with_options；重试次数由 request_max_retries 控制。
             payload = {"model": self.model, "messages": [{"role": "user", "content": "Reply OK."}],
-                       "max_tokens": 8}
+                       "max_tokens": PROBE_OUTPUT_TOKENS}
             result = await native._query(payload, None, request_max_retries=1)
-            self._current()
-            if result is None:
-                raise ValueError("native probe returned no result")
-            return
-        native.client = self.client.with_options(max_retries=0)
-        if native.client.max_retries != 0:
-            raise ValueError("native probe retries could not be disabled")
-        # AstrBot 的 `_query` 固定以 stream=False 调用原生 client；payload 里
-        # 再带 stream 会触发 `multiple values for keyword argument 'stream'`。
-        payload = {"model": self.model, "messages": [{"role": "user", "content": "Reply OK."}],
-                   self.output_parameter: 8}
-        result = await native._query(payload, None, request_max_retries=1)
+        else:
+            native.client = self.client.with_options(max_retries=0)
+            if native.client.max_retries != 0:
+                raise ValueError("native probe retries could not be disabled")
+            # AstrBot 的 `_query` 固定以 stream=False 调用原生 client；payload 里
+            # 再带 stream 会触发 `multiple values for keyword argument 'stream'`。
+            payload = {"model": self.model, "messages": [{"role": "user", "content": "Reply OK."}],
+                       self.output_parameter: PROBE_OUTPUT_TOKENS}
+            result = await native._query(payload, None, request_max_retries=1)
         self._current()
         if result is None:
             raise ValueError("native probe returned no result")
@@ -479,7 +615,7 @@ class AstrBotTextProvider:
             self._current()
             native = copy(self.native)
             native.provider_config = deepcopy(self.config)
-            if self.kind == "openai":
+            if self.kind in ("openai", "openai_responses"):
                 native.client = self.client.with_options(max_retries=0)
                 if native.client.max_retries != 0:
                     raise ValueError("client retry layer could not be disabled")
@@ -539,8 +675,9 @@ class AstrBotTextProvider:
                     logger.debug("[CompanionV2][开发者追踪] 原生解析失败 provider=%s error_type=%s",
                                  self.provider_id, type(error).__name__, exc_info=True)
                     raise
-            if self.kind == "openai":
-                native._parse_openai_completion = parse
+            if self.kind in ("openai", "openai_responses"):
+                if self.kind == "openai":
+                    native._parse_openai_completion = parse
                 if envelope.original.images or envelope.original.audios or envelope.original.videos:
                     # V2 has already materialized and validated exact data URLs. The
                     # host's general image resolver may download, re-encode or log
@@ -550,21 +687,40 @@ class AstrBotTextProvider:
                     native._materialize_context_image_parts = keep_original_images
                 payload, _ = await native._prepare_chat_payload(prompt=None, contexts=deepcopy(wire.messages),
                                                               model=envelope.model_override or self.model)
-                if envelope.original.images or envelope.original.audios or envelope.original.videos:
-                    def image_materials(messages):
-                        return [message for message in messages if isinstance(message.get("content"), list)]
-                    if image_materials(payload["messages"]) != image_materials(wire.messages):
+                if self.kind == "openai_responses":
+                    lossy = _unsupported_media(wire.messages)
+                    if lossy:
+                        # 宿主的 Responses 转换器把音频变成 "[Audio]" 文本、直接丢弃
+                        # 视频原始数据；宁可显式失败，也不能把附件静默当成文字。
+                        raise TaskError("host_media_unsupported",
+                                        "Responses provider cannot carry " + "/".join(lossy) + " input without data loss")
+                    input_items = payload.get("input")
+                    if not isinstance(input_items, list):
+                        raise ValueError("native Responses preparation returned no input")
+                    if _responses_image_urls(input_items) != _chat_image_urls(wire.messages):
                         raise ValueError("native preparation changed original images or their coverage and attribution")
-                payload[self.output_parameter] = envelope.max_output_tokens
+                    payload["max_output_tokens"] = envelope.max_output_tokens
+                else:
+                    if envelope.original.images or envelope.original.audios or envelope.original.videos:
+                        def image_materials(messages):
+                            return [message for message in messages if isinstance(message.get("content"), list)]
+                        if image_materials(payload["messages"]) != image_materials(wire.messages):
+                            raise ValueError("native preparation changed original images or their coverage and attribution")
+                    payload[self.output_parameter] = envelope.max_output_tokens
             else:
                 # 原生 Gemini 接受 OpenAI 形状的 messages，由宿主转换为 generate_content；
                 # 输出上限使用 Gemini 认得的 max_tokens。
                 payload = {"model": envelope.model_override or self.model,
                            "messages": deepcopy(_gemini_messages(wire.messages)),
                            "max_tokens": envelope.max_output_tokens}
-            structured = response_format(envelope.original)
-            if structured is not None:
-                payload["response_format"] = structured
+            if self.kind == "openai_responses":
+                text_format = responses_text_format(envelope.original)
+                if text_format is not None:
+                    payload["text"] = text_format
+            else:
+                structured = response_format(envelope.original)
+                if structured is not None:
+                    payload["response_format"] = structured
             logger.debug("[CompanionV2][开发者追踪] 实际模型请求 provider=%s model=%s payload=%s",
                          self.provider_id, payload.get("model", self.model), _developer_payload(payload))
             self._current()
@@ -573,9 +729,11 @@ class AstrBotTextProvider:
             envelope.before_dispatch()
             if envelope.record_cache_signature is not None:
                 try:
+                    signature_messages = (payload.get("input", ()) if self.kind == "openai_responses"
+                                          else payload.get("messages", ()))
                     envelope.record_cache_signature(signature_for_payload(
                         payload.get("model", envelope.model_override or self.model),
-                        payload.get("messages", ()), wire.tools))
+                        signature_messages, wire.tools))
                 except Exception:
                     logger.debug("cache signature collection failed", exc_info=True)
         except Exception as error:
@@ -604,7 +762,8 @@ class AstrBotTextProvider:
             response = (await transcript.query(native, payload, tools) if transcript is not None
                         else await native._query(payload, tools, request_max_retries=1))
             if self.kind != "openai":
-                # Gemini 的 LLMResponse 没有 OpenAI 解析钩子；直接观察归一化结果。
+                # Gemini 与 Responses 的 _query 都返回宿主归一化的 LLMResponse；
+                # 没有 ChatCompletion 解析钩子，直接观察该结果。
                 observed.append(response)
                 diagnostics = observe_completion(response)
                 verified_refusal = explicit_refusal(response)
@@ -629,6 +788,18 @@ class AstrBotTextProvider:
                              self.provider_id)
                 return ProviderResponse("generated", captured_output=CapturedModelOutput("", "refusal"),
                                         usage=usage, receipt_ref=receipt, diagnostics=replace(diagnostics, parse_state="refusal"))
+            # A background body is decoded by its own owner, so one the output
+            # ceiling cut is handed up with ``length`` semantics instead of being
+            # dropped as an unparsable answer — the same classification the private
+            # memory owner receives. A reply is never captured: half a delivered
+            # message is not a message, so it stays an incomplete result.
+            if wire.output_format != "conversation" and observed:
+                ceiling = capture(observed[-1])
+                if ceiling.finish_reason == "length":
+                    logger.debug("[CompanionV2][开发者追踪] 模型正文被输出上限截断 provider=%s output_format=%s",
+                                 self.provider_id, wire.output_format)
+                    return ProviderResponse("generated", captured_output=ceiling, usage=usage, receipt_ref=receipt,
+                                            diagnostics=replace(diagnostics, parse_state="captured"))
             draft, calls = decode_response(response, wire)
             logger.debug("[CompanionV2][开发者追踪] 模型正文处理 provider=%s stage=decoded body=%r claims=%r tool_calls=%r",
                          self.provider_id, draft.text if draft is not None else None,
@@ -640,6 +811,20 @@ class AstrBotTextProvider:
             logger.debug("[CompanionV2][开发者追踪] 模型回复处理失败 provider=%s stage=%s error_type=%s",
                          self.provider_id, failure.value, type(error).__name__, exc_info=True)
             raw = transcript.usage_receipt if transcript is not None and transcript.usage_receipt else (observed[-1] if observed else None)
+            native_failure = _responses_failure(error) if self.kind == "openai_responses" else None
+            if native_failure is ModelFailure.REFUSAL:
+                try:
+                    self._current()
+                    await self.bridge.verify_role(envelope.original.event.scope, envelope.original.role_binding,
+                                                  envelope.original.host_role_instruction)
+                except Exception:
+                    failure = ModelFailure.ROLE_RECHECK
+                    native_failure = None
+                else:
+                    return ProviderResponse("generated", captured_output=CapturedModelOutput("", "refusal"),
+                                            usage=self._usage(raw), receipt_ref=self._receipt(raw, receipt),
+                                            diagnostics=replace(diagnostics, finish_reason="content_filter",
+                                                                parse_state="refusal"))
             if transcript is not None and transcript.ended and transcript.finish == "content_filter":
                 try:
                     self._current()
@@ -662,7 +847,9 @@ class AstrBotTextProvider:
                     return ProviderResponse("generated", captured_output=CapturedModelOutput("", "refusal"),
                                             usage=self._usage(raw), receipt_ref=self._receipt(raw, receipt),
                                             diagnostics=replace(diagnostics, parse_state="refusal"))
-            final_failure = ModelFailure.NATIVE_PARSE if parse_failed else failure
+            final_failure = ModelFailure.NATIVE_PARSE if parse_failed else (native_failure or failure)
+            if native_failure is not None:
+                diagnostics = replace(diagnostics, parse_state="native_rejected")
             diagnostics = replace(diagnostics, failure=final_failure,
                 parse_state="contract_rejected" if final_failure is ModelFailure.WIRE_DECODE else diagnostics.parse_state)
             task_error_code = error.code if isinstance(error, TaskError) else "unavailable"

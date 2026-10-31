@@ -56,7 +56,7 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         await self.native_model.probe()
         payload, _ = self.native.provider.client.state.calls[-1]
         self.assertNotIn("stream", payload)
-        self.assertEqual(payload["max_tokens"], 8)
+        self.assertEqual(payload["max_tokens"], 256)
 
     async def test_state_and_planning_use_json_mode_and_end_with_their_task_contract(self):
         envelope = await self.envelope()
@@ -596,6 +596,28 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         response = await self.native_model.generate(envelope)
         self.assertEqual(response.status, "generated")
         self.assertIsNone(response.usage)
+
+    async def test_a_truncated_background_result_keeps_its_body_and_length_reason(self):
+        """The OpenAI wire must not lose the round the native wire now keeps.
+
+        The workflow owns the decision: half a planning object may still carry
+        complete items, and half a state object must be refused. A generic
+        "unknown" failure hides both cases from the log and the owner.
+        """
+        envelope = await self.envelope()
+        request = replace(envelope.original, output_format="calendar_planning", response_format="json_object")
+
+        async def respond(*_):
+            return completion('{"items":[{"title":"练琴"', finish="length")
+
+        self.native.provider.client.state.behavior = respond
+        response = await self.native_model.generate(replace(envelope, original=request))
+
+        self.assertEqual(response.status, "generated")
+        self.assertEqual(response.captured_output.text, '{"items":[{"title":"练琴"')
+        self.assertEqual(response.captured_output.finish_reason, "length")
+        self.assertEqual(response.usage, REPORTED_USAGE)
+        self.assertEqual(response.diagnostics.parse_state, "captured")
 
     async def test_reserved_config_overrides_and_unbounded_prompt_are_rejected_before_io(self):
         for key in ("messages", "model", "tools", "max_tokens", "max_completion_tokens", "stream", "n"):
