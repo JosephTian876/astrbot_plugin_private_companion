@@ -638,17 +638,22 @@ def _owns_output_backend(current) -> bool:
 
 
 def _owns_download_proxy(current) -> bool:
-    """Whether the operator already saved the V2 image download proxy.
+    """Whether the operator already saved the V2 image download group.
 
-    ``current`` is the V2 page projection, so a stored proxy is reported as
-    ``download_proxy_set``; a non-empty ``download_proxy`` is accepted as well so a
-    raw saved configuration is recognized too.
+    ``current`` is the V2 page projection.  A never-touched network group is
+    projected as ``{"download_proxy_set": False}``, while every saved group also
+    carries ``use_environment_proxy`` (the save path always persists both keys).
+    Presence of that key -- not its value -- is what tells an explicit clear
+    (``{"download_proxy_set": False, "use_environment_proxy": False}``) apart from
+    "no V2 save yet", so a cleared proxy is preserved instead of being restored
+    from V1.  A non-empty ``download_proxy`` is accepted as well so a raw saved
+    configuration is recognized too.
     """
     network = current.get("network") if isinstance(current, dict) else None
     if not isinstance(network, dict):
         return False
-    return (bool(network.get("download_proxy") or network.get("download_proxy_set"))
-            or network.get("use_environment_proxy") is True)
+    return ("use_environment_proxy" in network
+            or bool(network.get("download_proxy") or network.get("download_proxy_set")))
 
 
 def plan_image_output_changes(current, changes):

@@ -114,6 +114,25 @@ class ImageOutputMigrationRetentionTests(unittest.TestCase):
         self.assertEqual([item["base_url"] for item in self.stored()["endpoints"]],
                          ["https://api.example.test/v1"])
 
+    def test_cleared_v2_download_proxy_is_not_restored_by_a_rerun(self):
+        self.save({"network": {"download_proxy": "http://v2-proxy:3128"}})
+        self.save({"network": {"clear_download_proxy": True}})
+        # 已清空的组与从未改过的组都投影成 download_proxy_set=False；只有显式
+        # 保存过才会带 use_environment_proxy。
+        self.assertEqual(self.settings()["network"],
+                         {"download_proxy_set": False, "use_environment_proxy": False})
+
+        changes, differences = plan_image_output_changes(self.settings(), self.migrated().output_changes)
+
+        self.assertNotIn("network", changes)
+        self.assertIn("endpoints", changes)
+        self.assertEqual([item["field"] for item in differences], ["image.output.network"])
+        self.save(changes)
+        self.assertEqual(self.stored()["network"],
+                         {"download_proxy": "", "use_environment_proxy": False})
+        self.assertEqual([item["base_url"] for item in self.stored()["endpoints"]],
+                         ["https://api.example.test/v1"])
+
     def test_second_migration_over_a_populated_output_preserves_it_and_writes_nothing(self):
         first = self.migrated()
         self.save(first.output_changes)
