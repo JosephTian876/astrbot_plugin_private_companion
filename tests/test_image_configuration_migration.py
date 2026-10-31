@@ -99,6 +99,23 @@ class ImageConfigurationMigrationTests(unittest.TestCase):
         self.assertFalse(result.output_changes["enabled"])
         self.assertTrue(any(item["kind"] == "incomplete_backend" for item in result.differences))
 
+    def test_every_save_path_quality_reaches_the_endpoint_unchanged(self):
+        # 迁移端的质量词表与保存端（IMAGE_QUALITIES）各写一份：companion_v2 的隔离
+        # 规则不允许反向导入 astrbot_host，而保存端所在的镜像制品又被发布基线钉住。
+        # 这条断言就是两处的耦合点——保存端将来新增取值时，这里会先红，而不是让
+        # 迁入的端点被静默降级成 invalid_value。
+        from astrbot_host.native_extensions.image_native.output_configuration import IMAGE_QUALITIES
+
+        for quality in sorted(IMAGE_QUALITIES):
+            with self.subTest(quality=quality):
+                result = convert_image_configuration({"photo_action_config": {
+                    "external_image_api_endpoints": [{"name": "Quality", "platform": "openai",
+                        "base_url": "https://api.example.test/v1", "model": "image-v1",
+                        "quality": quality}],
+                }})
+                self.assertEqual(result.output_changes["endpoints"][0]["quality"], quality)
+                self.assertEqual(result.differences, ())
+
 
 if __name__ == "__main__":
     unittest.main()
