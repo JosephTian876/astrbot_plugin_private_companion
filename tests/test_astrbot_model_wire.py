@@ -113,6 +113,18 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
             payload, _ = self.native.provider.client.state.calls[-1]
             self.assertEqual(payload["response_format"], {"type": "json_object"})
 
+    async def test_self_review_is_told_the_candidate_contract(self):
+        envelope = await self.envelope()
+        request = replace(envelope.original, output_format="role_self_review",
+                          instruction="只输出待审复盘候选。")
+        wire = build_wire(replace(envelope, original=request))
+
+        prompt = wire.messages[0]["content"]
+        self.assertIn("summary 与 guidance", prompt)
+        self.assertIn("evidence_handles", prompt)
+        self.assertIn("expires_at", prompt)
+        self.assertNotIn("claims", prompt)
+
     async def test_model_wire_records_the_final_prompt_when_a_snapshot_sink_is_attached(self):
         envelope = await self.envelope()
         snapshots = []

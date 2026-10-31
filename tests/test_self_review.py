@@ -100,6 +100,29 @@ class SelfReviewOutputTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.parse(self.guidance(), now=datetime(2026, 9, 26, 12, 0))
 
+    def test_background_note_names_every_field_the_parser_requires(self):
+        """The model only sees the wire note; a field it never names is a guess."""
+        from companion_v2.adapters.astrbot.model_wire import BACKGROUND_OUTPUT_NOTES
+
+        note = BACKGROUND_OUTPUT_NOTES["role_self_review"]
+        for key in self_review.SCHEMA["required"]:
+            self.assertIn(key, note)
+        for key in self_review.SCHEMA["properties"]["guidance"]["items"]["required"]:
+            self.assertIn(key, note)
+        for kind in self_review.GUIDANCE_KINDS:
+            self.assertIn(kind, note)
+
+    def test_parse_failure_logs_the_validator_reason_without_the_body(self):
+        from companion_v2.role_work.journal.self_review_service import parse_output as service_parse_output
+
+        raw = '{"summary":"不该出现在日志里的正文","guidance":[],"note":"extra"}'
+        with self.assertLogs("companion_v2.role_work.journal.self_review_service", level="WARNING") as captured:
+            with self.assertRaises(TaskError):
+                service_parse_output(raw, allowed_evidence=set(), now=NOW)
+        line = captured.output[0]
+        self.assertIn("invalid_shape", line)
+        self.assertNotIn("不该出现在日志里的正文", line)
+
 
 class EvidenceWindowTests(unittest.TestCase):
     def test_window_document_is_bounded_and_ordered(self):

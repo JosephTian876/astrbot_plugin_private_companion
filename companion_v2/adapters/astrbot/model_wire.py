@@ -42,6 +42,10 @@ REPLY_CONTRACT = (
 BACKGROUND_OUTPUT_NOTES = {
     "role_state": "本轮是后台状态维护。只输出包含 energy、hunger、health、sleep、busy、mood、location、cycle、presence、online_mode、conditions 的完整 JSON 对象；字段类型遵循本轮状态协议，不写聊天回复。",
     "calendar_planning": "本轮是后台日程规划。仅输出本轮模式要求的 JSON 对象：daily/horizon 使用 items，refine 使用 detail，intervention 使用 changes；不写聊天回复或额外说明。",
+    # The self-review owner parses an exact contract. Without naming it here the
+    # model can only guess the keys, so a valid JSON object still fails the
+    # owner's shape check. Keep this note aligned with self_review.SCHEMA.
+    "role_self_review": "本轮是后台自我复盘。只输出一个 JSON 对象，只含 summary 与 guidance 两个字段，不写 Markdown、表格或代码围栏。guidance 是数组，没有可提的建议时写空数组，不要省略。每项必须且只能包含 kind、observation、next_action、confidence、evidence_handles、expires_at：kind 取 try_next_time、keep、ask_user、no_change 之一；observation 与 next_action 是非空字符串；confidence 是 0 到 1 的数字；evidence_handles 是材料中实际出现过的 handle 字符串数组，至少一个且不重复；expires_at 是晚于当前时间、带时区的短期 ISO 8601。形状示例（示例 handle 是占位值，必须逐字替换成材料里的真实 handle）：{\"summary\":\"…\",\"guidance\":[{\"kind\":\"keep\",\"observation\":\"…\",\"next_action\":\"…\",\"confidence\":0.7,\"evidence_handles\":[\"reply:0000000000000000000000000000000000000000000000000000000000000000\"],\"expires_at\":\"2026-11-01T12:00:00+08:00\"}]}。",
 }
 
 

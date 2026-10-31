@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 import json
+import logging
 
 from companion_v2.conversation.foreground import (BackgroundPromptTrigger, PromptMaterial, PromptRequest,
     SealedForegroundContext)
@@ -29,6 +30,8 @@ from companion_v2.storage.repositories import OperationRepository
 
 from . import self_review
 from .self_review_evidence import SelfReviewEvidenceCatalog, evidence_handles, window_document
+
+logger = logging.getLogger(__name__)
 
 KIND = "role.self_review"
 OWNER = "role.self_review"
@@ -56,7 +59,13 @@ def parse_output(raw, *, allowed_evidence, now):
     try:
         return self_review.parse_output(raw, allowed_evidence=allowed_evidence, now=now)
     except ValueError as error:
-        raise TaskError("self_review_output_invalid", str(error) or "self-review output is invalid") from error
+        # The validator's own reason is the only place that names the failed
+        # clause; the task code alone cannot tell shape from evidence or expiry.
+        # Keep the warning body-free: the reason code and the length only.
+        reason = str(error) or "self-review output is invalid"
+        logger.warning("[CompanionV2] 自我复盘候选不符合输出合同 reason=%s chars=%d",
+                       reason, len(raw) if type(raw) is str else -1)
+        raise TaskError("self_review_output_invalid", reason) from error
 
 
 class SelfReviewService:
