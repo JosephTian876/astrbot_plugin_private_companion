@@ -79,10 +79,12 @@ _PLATFORM_ALIASES = {
 # The save path owns the same vocabulary (``IMAGE_QUALITIES`` in
 # ``astrbot_host/native_extensions/image_native/output_configuration.py``) and this
 # package may not import ``astrbot_host`` (``companion_v2.foundation.isolation``),
-# so the two sets stay separate;
-# ``test_every_save_path_quality_reaches_the_endpoint_unchanged`` pins them equal.
-# A value added only there would otherwise be downgraded here into a spurious
-# ``invalid_value`` difference.
+# so the two sets stay separate.
+# ``test_quality_vocabularies_match_the_save_path_exactly`` compares the sets in
+# both directions (the save side also accepts "" for "use the service default"),
+# so a value added to only one side fails there: a migration-only value would make
+# the save path reject the whole ``image.output`` write, and a save-only value
+# would be downgraded here into a spurious ``invalid_value`` difference.
 _IMAGE_QUALITIES = frozenset({"auto", "low", "medium", "high", "standard", "hd"})
 
 
