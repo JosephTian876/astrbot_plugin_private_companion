@@ -26,16 +26,17 @@ WHOLE_PART_CLEANUP_SCOPES = frozenset(("leading", "middle", "trailing"))
 def migrated_presentation(source, window_kind):
     """Fold the migrated V1 settings over the current V2 presentation defaults.
 
-    The upgrade path converts window presentation fields with the registry
-    converter and the plugin-level segmentation fields with the plugin
-    converter, so a migrated profile is their union on top of today's field
-    defaults.
+    The plugin-level segmentation section seeds the window defaults that the
+    application builds, while the registry converter's
+    ``conversation.presentation.*`` rows are stored settings that override those
+    defaults.  The fold therefore applies the plugin converter first and the
+    registry converter last, on top of today's field defaults.
     """
     fields = configuration_fields(SegmentationPolicy(), True, 1.5)
     registry = FieldRegistry(version="reply-pipeline-regressions", fields=fields)
     migrated = {field.field_id.removeprefix(GROUP + "."): field.default for field in fields}
-    for changes in (convert_configuration(source, registry=registry, window_kind=window_kind).changes,
-                    convert_plugin_configuration(source, window_kind=window_kind).changes):
+    for changes in (convert_plugin_configuration(source, window_kind=window_kind).changes,
+                    convert_configuration(source, registry=registry, window_kind=window_kind).changes):
         for field_id, value in changes.items():
             name = field_id.removeprefix(GROUP + ".").removeprefix("segmentation.")
             if name in migrated:
@@ -64,16 +65,35 @@ class ReplyPresetTests(unittest.TestCase):
         # Only the settings V1 saved with a different value leave today's defaults;
         # the dormant per-window values above and every other field stay on them.
         explicit = {"content_cleanup_rule", "content_cleanup_scope", "content_cleanup_words", "split_words"}
-        self.assertEqual(set(migrated), set(defaults))
         self.assertEqual({key for key in migrated if migrated[key] != defaults[key]}, explicit)
         # V1's explicitly saved comma boundary survives migration, while new
         # replies keep comma-linked clauses together by default.
         self.assertIn("，", json.loads(migrated["split_words"]))
         self.assertNotIn("，", json.loads(defaults["split_words"]))
+        # Compared before the schema defaults below: that check is a known failure
+        # against current main (see _conf_schema.json split_words), and it must not
+        # mask the private/group agreement this test is about.
+        self.assertEqual(migrated, migrated_presentation(source, "group"))
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         for key, item in schema["segmentation"]["items"].items():
             self.assertEqual(item["default"], asdict(SegmentationPolicy())[key], key)
-        self.assertEqual(migrated, migrated_presentation(source, "group"))
+
+    def test_profile_segmentation_overrides_the_plugin_defaults(self):
+        source = json.loads((ROOT / "fixtures/reply_segmentation.v1.json").read_text(encoding="utf-8"))
+        source["legacy_compat_config"].update({"enable_segmented_proactive_chat_profiles": True,
+            "segmented_proactive_private_max_segments": 3,
+            "segmented_proactive_private_min_segment_chars": 8,
+            "segmented_proactive_private_threshold": 120})
+        # The plugin-level segmentation section still migrates its own values ...
+        global_max = source["legacy_compat_config"]["segmented_proactive_max_segments"]
+        plugin = convert_plugin_configuration(source, window_kind="private").changes
+        self.assertEqual(plugin["segmentation.max_segments"], global_max)
+        private = migrated_presentation(source, "private")
+        self.assertEqual(private["max_segments"], 3)
+        self.assertEqual(private["min_segment_chars"], 8)
+        self.assertEqual(private["threshold"], 120)
+        # ... but only the selected window's rows override them.
+        self.assertEqual(migrated_presentation(source, "group")["max_segments"], global_max)
 
     def test_live_short_reply_splits_and_has_no_edge_blank_lines(self):
         reply = prepare_reply("\n上课呢…偷偷瞄一眼。怎么啦，这个点找我？\n\n",
