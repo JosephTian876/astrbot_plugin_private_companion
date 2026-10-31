@@ -84,12 +84,15 @@ class MigratedPresentationTests(unittest.TestCase):
     """恢复旧版呈现设置迁移到 conversation.presentation.* 的覆盖。
 
     8806e3dc 删掉失效的 tools.migrate_reply_segmentation 导入时，把这个用例整类一起
-    删了；该提交把 content_cleanup_* 的迁移性质补在 tests/test_configuration_migration.py
-    的真实转换入口上。这里不重新翻案，也不是重复那部分：补回的是那条用例没有覆盖的
-    性质，并且全部跑在产品实际执行的迁移入口（convert_plugin_configuration /
-    convert_configuration）而不是一个不存在的工具上——插件级分段默认值与 profile
-    行的覆盖次序、显式设置相对新默认的差异集合、split_words 的逗号边界存活、
-    cleanup_scope 折进文本策略，以及 schema 默认与 SegmentationPolicy 保持同步。
+    删了，并把 content_cleanup_* 的迁移性质补在 tests/test_configuration_migration.py
+    的真实转换入口上。这里不重新翻案，也不替代那两个用例；补回的是它们没覆盖到的
+    几处：显式设置相对今天默认值的差异集合、split_words 里 V1 保存的逗号边界、
+    cleanup_scope 折进文本策略，以及 _conf_schema.json 的分段默认值与
+    SegmentationPolicy 一致——最后一条原本只由 tests/test_segmentation_host_settings.py
+    守着，而那个文件在模块级导入 astrbot SDK，contract job 里收集不到。
+
+    所有断言都跑在产品实际执行的迁移入口（convert_plugin_configuration /
+    convert_configuration）上，而不是那个从未在仓库里存在过的工具。
     """
 
     def test_migrated_settings_keep_explicit_cleanup_while_new_defaults_enable_cleanup(self):
