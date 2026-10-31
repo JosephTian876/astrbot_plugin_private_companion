@@ -685,9 +685,9 @@ def plan_image_output_changes(current, changes):
     if "network" not in changes or not _owns_download_proxy(current):
         return dict(changes), ()
     writable = {field: value for field, value in changes.items() if field != "network"}
-    explain = "V2 已保存在线图片下载代理，为避免覆盖，本次保留 V2 设置。"
+    explain = "V2 已保存在线图片下载代理设置（含显式清空），为避免覆盖，本次保留 V2 设置。"
     if writable:
         explain += "其余 V1 图片设置照常迁移。"
     return writable, ({"field": "image.output.network", "kind": "preserved_v2",
-                       "before": "V1 在线图片下载代理", "after": "V2 已有在线图片下载代理",
+                       "before": "V1 在线图片下载代理", "after": "V2 已保存的在线图片下载代理设置",
                        "explain": explain},)
