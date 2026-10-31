@@ -7,7 +7,9 @@ V1 迁移可以重复试算、重复执行，所以它必然落在「新版界�
 * V2 已保存的下载代理、或已清空的下载代理（以及整份已迁入的配置），不能被
   第二遍迁移改写；
 * 宿主侧的 ``_prepare_image_output_intent`` 必须把迁移层的保留判定落成差异记录、
-  过滤掉不可写字段的 confidence/sources，并在没有可写组时不返回意图。
+  过滤掉不可写字段的 confidence/sources，并在没有可写组时不返回意图；
+* ``_prepare_intents`` 必须把 ``image_output_config`` 意图交给上面那个方法处理，
+  而不是让它掉到通用配置路径上。
 
 保存走真实的 ``save_configuration``，因此断言的是落盘后的配置，而不是一份
 手写的近似快照。宿主方法无法直接 import（``astrbot_host.legacy_api`` 在导入期
@@ -27,11 +29,13 @@ from astrbot_host.native_extensions.image_native.output_configuration import (
     public_configuration,
     save_configuration,
 )
+from companion_v2.configuration.models import ConfigLayer
+from companion_v2.execution.models import digest
 from companion_v2.legacy.image_configuration_migration import (
     convert_image_configuration,
     plan_image_output_changes,
 )
-from companion_v2.legacy.migration import ConfigIntent
+from companion_v2.legacy.migration import ConfigIntent, MigrationPlan
 
 
 class _Config(dict):
@@ -79,7 +83,10 @@ def v1_photo_action_config():
 
 
 _HOST_SOURCE = Path(__file__).resolve().parents[1] / "astrbot_host" / "legacy_api.py"
-_HOST_METHODS = ("_image_extension_api", "_prepare_image_output_intent", "_intent_key")
+# ``_prepare_intents`` 连同它的两个依赖一起取出：只测预处理方法本身，无法发现
+# 分发分支被改名后生图意图掉到通用配置路径上的情况。
+_HOST_METHODS = ("_image_extension_api", "_prepare_image_output_intent", "_intent_key",
+                 "_prepare_intents", "_configuration_layer_intents", "_scope_target")
 
 
 def _method_lines(node, lines):
@@ -88,10 +95,11 @@ def _method_lines(node, lines):
 
 
 def _host_type():
-    """由真实源码拼出只含生图输出预处理方法的宿主替身。
+    """由真实源码拼出只含生图输出预处理链的宿主替身。
 
-    被取出的三个方法本身不依赖 AstrBot SDK；方法改名或删除会让这里直接失败，
-    而不会悄悄退回一份手写副本。
+    被取出的方法本身不依赖 AstrBot SDK；方法改名或删除会让这里直接失败，
+    而不会悄悄退回一份手写副本。唯一替换掉的是 ``_operator``（导入期需要
+    ``astrbot.api.web``），生图分支根本不会用到它。
     """
     source = _HOST_SOURCE.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(_HOST_SOURCE))
@@ -105,9 +113,12 @@ def _host_type():
         raise AssertionError(f"legacy_api 缺少被测方法：{missing}")
     lines = source.splitlines()
     body = "\n".join("\n".join(_method_lines(methods[name], lines)) for name in _HOST_METHODS)
-    namespace = {"replace": replace, "plan_image_output_changes": plan_image_output_changes}
+    namespace = {"replace": replace, "plan_image_output_changes": plan_image_output_changes,
+                 "digest": digest, "ConfigLayer": ConfigLayer}
     exec(compile("class _ExtractedHost:\n" + body, str(_HOST_SOURCE), "exec"), namespace)
-    return namespace["_ExtractedHost"]
+    extracted = namespace["_ExtractedHost"]
+    extracted._operator = lambda self: "operator"
+    return extracted
 
 
 class ImageOutputMigrationRetentionTests(unittest.TestCase):
@@ -176,6 +187,31 @@ class ImageOutputMigrationRetentionTests(unittest.TestCase):
         self.assertEqual([item["base_url"] for item in self.stored()["endpoints"]],
                          ["https://api.example.test/v1"])
 
+    def test_unrelated_v2_save_also_owns_the_network_group(self):
+        # 已知取舍：保存端每次保存都会把 network 组整组落盘，因此「在 V2 保存过
+        # 任何生图配置」与「显式清空过代理」在公开投影上不可区分。保存一个与网络
+        # 无关的组之后，network 组同样带 use_environment_proxy，按键存在判定会把
+        # 它当作 V2 已拥有，于是不再回填 V1 代理——保守方向的代价，这里钉住它。
+        self.save({"legacy_options": {"foo": 1}})
+        self.assertEqual(self.settings()["network"],
+                         {"download_proxy_set": False, "use_environment_proxy": False})
+
+        changes, differences = plan_image_output_changes(self.settings(), self.migrated().output_changes)
+
+        self.assertNotIn("network", changes)
+        self.assertIn("endpoints", changes)
+        self.assertEqual([item["field"] for item in differences], ["image.output.network"])
+        self.assertEqual([item["kind"] for item in differences], ["preserved_v2"])
+        self.assertEqual(differences[0]["after"], "V2 已保存的在线图片下载代理设置")
+        self.assertEqual(differences[0]["explain"],
+                         "V2 已保存在线图片下载代理设置（含显式清空），为避免覆盖，"
+                         "本次保留 V2 设置。其余 V1 图片设置照常迁移。")
+        self.save(changes)
+        self.assertEqual(self.stored()["network"],
+                         {"download_proxy": "", "use_environment_proxy": False})
+        self.assertEqual([item["base_url"] for item in self.stored()["endpoints"]],
+                         ["https://api.example.test/v1"])
+
     def test_second_migration_over_a_populated_output_preserves_it_and_writes_nothing(self):
         first = self.migrated()
         self.save(first.output_changes)
@@ -201,9 +237,9 @@ class ImageOutputHostPrepareTests(unittest.TestCase):
     def save(self, changes):
         return save_configuration(self.plugin, public_configuration(self.plugin)["revision"], changes)
 
-    def prepare(self, current):
+    def intent(self):
         migrated = convert_image_configuration(v1_photo_action_config())
-        intent = ConfigIntent(
+        return migrated, ConfigIntent(
             scope="image.output", group_id="image.output",
             changes=dict(migrated.output_changes), source_id="image.configuration",
             # 多出来的字段用来验证宿主只留下真正写入的字段。
@@ -212,6 +248,9 @@ class ImageOutputHostPrepareTests(unittest.TestCase):
             sources={**migrated.output_sources, "not_a_field": ("v1.not_a_field",)},
             target_kind="image_output_config",
         )
+
+    def prepare(self, current):
+        migrated, intent = self.intent()
         api = SimpleNamespace(output_configuration=lambda: current)
         host = self.host_type()
         host.controller = SimpleNamespace(
@@ -219,6 +258,42 @@ class ImageOutputHostPrepareTests(unittest.TestCase):
         differences, scope_status, edit_tokens = [], [], {}
         prepared = host._prepare_image_output_intent(intent, differences, scope_status, edit_tokens)
         return migrated, prepared, differences, scope_status, edit_tokens
+
+    def test_prepare_intents_sends_image_output_intents_through_the_prepare_method(self):
+        """``image_output_config`` 必须被路由进 ``_prepare_image_output_intent``。
+
+        把它改名成别的分支后，意图会掉到通用配置路径：既拿不到预处理写入的
+        ``image_output_config_state`` 令牌，也会被判定成没有可写目标而消失。
+        """
+        self.save({"network": {"download_proxy": "http://v2-proxy:3128"}})
+        current = public_configuration(self.plugin)
+        migrated, intent = self.intent()
+
+        host = self.host_type()
+        host.controller = SimpleNamespace(
+            native_extensions=SimpleNamespace(image_extension_api=lambda: SimpleNamespace(
+                output_configuration=lambda: current)))
+        # 通用路径会读 session.application.configuration；生图分支用不到它，
+        # 因此这里给一个空对象就足以区分两条路径。
+        session = SimpleNamespace(application=SimpleNamespace(configuration=SimpleNamespace()))
+
+        intents, differences, scope_status, edit_tokens = host._prepare_intents(
+            session, MigrationPlan(v1_root="", intents=(intent,)))
+
+        self.assertEqual(len(intents), 1)
+        self.assertIsNot(intents[0], intent)
+        self.assertEqual(set(intents[0].changes), set(migrated.output_changes) - {"network"})
+        self.assertEqual(set(intents[0].confidence), set(intents[0].changes))
+        self.assertEqual(set(intents[0].sources), set(intents[0].changes))
+        self.assertEqual([item["field"] for item in differences], ["image.output.network"])
+        self.assertEqual([item["kind"] for item in differences], ["preserved_v2"])
+        self.assertEqual(scope_status, [{"scope": "image.output", "group_id": "image.output",
+                                         "available": True, "reason": ""}])
+        key = ("image.output|image.output|image_output_config|"
+               + ",".join(sorted(intents[0].changes)))
+        self.assertEqual(edit_tokens, {"private_contact_preferences": digest([]),
+                                       "image_output_config_state": current["revision"],
+                                       key: current["revision"]})
 
     def test_fresh_v2_output_keeps_the_whole_intent_and_drops_foreign_metadata(self):
         current = public_configuration(self.plugin)
