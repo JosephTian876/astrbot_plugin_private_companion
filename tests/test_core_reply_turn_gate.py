@@ -43,7 +43,7 @@ from astrbot_host.core_reply_tool_dispatch import (
     CORE_TOOL_DISPATCH_EXTRA, observe_core_tool_dispatch_begin, restore_core_tool_dispatch,
 )
 from astrbot_host.core_reply_turn_gate import (
-    RESPONSE_STREAM, _blank, _downstream_buffers, _restore_blank,
+    DISPATCH, EXHAUSTED_REPLY, RESPONSE_STREAM, _blank, _downstream_buffers, _restore_blank,
     _turn_round, close_core_reply_turn, install_core_reply_turn, turn_gate,
 )
 
@@ -223,10 +223,13 @@ def sent_text(event):
 
 class TurnGateTests(unittest.IsolatedAsyncioTestCase):
     async def run_turn(self, rounds, *, streaming=False, buffered=True, observe=True, install=True,
-                       event=None, max_step=8, stop_after=False):
+                       event=None, max_step=8, stop_after=False, participation=None):
         """Run one turn end to end and return what a chat would see."""
         event = event or GateEvent(buffered=buffered)
-        event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": {"channel": "group", "event_ref": "turn-gate"}})
+        extra = {"prepared": {"channel": "group", "event_ref": "turn-gate"}}
+        if participation is not None:
+            extra["group_participation"] = participation
+        event.set_extra(CORE_REPLY_CONTEXT_EXTRA, extra)
         provider = ScriptedProvider(rounds)
         tool = ParticipationTool()
         tool.stop_after = stop_after
@@ -316,6 +319,31 @@ class TurnGateTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["text"], "第三句。", result["visible"])
                 self.assertEqual(result["gate"]["released"], 1)
                 self.assertIsNone(result["gate"]["draft"])
+
+    async def test_a_turn_that_exhausts_its_steps_without_any_text_still_says_something(self):
+        # Every round of the turn called a tool and wrote nothing, so no draft
+        # exists to release.  Returning nothing would be a silent turn; one short
+        # line is the floor the gate guarantees instead, and it must reach the
+        # reader exactly once -- whichever carrier this host listens to.
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming):
+                result = await self.run_turn(
+                    [tool_round(""), tool_round("", call_id="call-2"),
+                     silent_round()],
+                    max_step=2, streaming=streaming)
+                shown = result["text"] + result["sent"]
+                self.assertEqual(shown.count(EXHAUSTED_REPLY), 1, result["visible"])
+                self.assertEqual(result["gate"]["released"], 1)
+                self.assertTrue(result["gate"]["said"])
+
+    async def test_a_turn_that_keeps_listening_is_left_silent_when_the_budget_runs_out(self):
+        # choose(mode=skip) means this turn decided not to speak.  The fallback
+        # line must not turn that decision into a reply.
+        result = await self.run_turn(
+            [tool_round(""), tool_round("", call_id="call-2"), silent_round()],
+            max_step=2, participation={"mode": "skip"})
+        self.assertEqual(result["visible"], [])
+        self.assertEqual(result["gate"]["released"], 0)
 
     async def test_a_cancelled_turn_still_says_its_draft_once(self):
         # The user stops the turn while the tool runs. The abort response is not
@@ -453,7 +481,7 @@ class TurnGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_gate_is_installed_once_per_turn(self):
         result = await self.run_turn([tool_round(), text_round(OTHER)])
         state = result["gate"]
-        self.assertEqual(list(state["methods"]), [RESPONSE_STREAM, "step"])
+        self.assertEqual(list(state["methods"]), [RESPONSE_STREAM, DISPATCH, "step"])
         self.assertTrue(state["closed"])
         self.assertTrue(state["restored"])
 
@@ -469,16 +497,50 @@ class TurnGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["text"], OTHER, second["visible"])
 
     # -- fail open ------------------------------------------------------------
-    async def test_without_the_dispatch_observer_nothing_is_withheld(self):
-        # The observer owns the point where withheld text goes back, so the gate
-        # must refuse to run rather than risk corrupting the assistant history.
-        result = await self.run_turn([tool_round(), text_round(BODY)], observe=False)
-        self.assertIsNone(result["gate"])
-        self.assertIsNone(turn_gate(result["event"]))
-        self.assertEqual(result["visible"], [BODY, BODY], "unchanged from today without the gate")
+    async def test_without_the_dispatch_observer_the_gate_still_says_one_thing(self):
+        # The gate brings its own restore point, so a host that installs no
+        # dispatch observer must still get one reply per turn -- not the old
+        # "fall back to two messages" behaviour, and never silence.
+        result = await self.run_turn([tool_round(), text_round(OTHER)], observe=False)
+        self.assertIsNotNone(result["gate"], "the gate must install without the observer")
+        self.assertIs(turn_gate(result["event"]), result["gate"])
+        self.assertEqual(result["text"], OTHER, result["visible"])
+        self.assertEqual(result["gate"]["released"], 0)
 
-    async def test_without_an_active_runner_nothing_is_withheld(self):
+    async def test_the_gate_restores_withheld_text_without_the_dispatch_observer(self):
+        # With no observer the gate alone must put the prose back before the tool
+        # runs: the assistant history is written right there from the response.
+        result = await self.run_turn([tool_round(), text_round(OTHER)], observe=False)
+        self.assertEqual(result["provider"].responses[0].completion_text, BODY)
+        self.assertIn(BODY, [part.text for part in result["messages"][1].content])
+        self.assertNotIn(DISPATCH, result["runner"].__dict__)
+
+    async def test_without_the_dispatch_observer_an_exhausted_turn_still_says_its_draft(self):
+        # The exact turn the author reported: the budget runs out, the observer is
+        # missing. The draft is the turn's only text, so it must go out once.
+        result = await self.run_turn(
+            [tool_round(BODY), tool_round(LATER, call_id="call-2"),
+             tool_round("第三句。", call_id="call-3")],
+            max_step=2, observe=False)
+        self.assertIsNotNone(result["gate"])
+        self.assertEqual(result["text"], "第三句。", result["visible"])
+        self.assertEqual(result["gate"]["released"], 1)
+        self.assertIsNone(result["gate"]["draft"])
+
+    async def test_the_host_binding_missing_still_finds_the_runner_by_identity(self):
+        # A host that registers the runner under another key makes the host's own
+        # lookup miss.  The gate must still find this turn's runner by identity
+        # rather than fall open and send the prose and the answer separately.
         with patch("astrbot_host.core_reply_tool_dispatch.active_core_runner", return_value=None):
+            result = await self.run_turn([tool_round(), text_round(OTHER)])
+        self.assertIsNotNone(result["gate"], "the gate must still install")
+        self.assertEqual(result["text"], OTHER, result["visible"])
+
+    async def test_without_a_registered_runner_nothing_is_withheld(self):
+        # No registry entry at all: the gate cannot prove which runner is this
+        # turn's, so it must leave the round untouched rather than guess.
+        with patch("astrbot_host.core_reply_turn_gate._scan_registry", return_value=None), \
+                patch("astrbot_host.core_reply_tool_dispatch.active_core_runner", return_value=None):
             result = await self.run_turn([tool_round(), text_round(BODY)])
         self.assertIsNone(result["gate"])
         self.assertEqual(result["visible"], [BODY, BODY])
@@ -488,7 +550,6 @@ class TurnGateTests(unittest.IsolatedAsyncioTestCase):
                     step=lambda: None, done=lambda: False, streaming=False)
         event = GateEvent()
         event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": {}})
-        event.set_extra(CORE_TOOL_DISPATCH_EXTRA, {"runner": runner, "run_context": runner.run_context})
         with patch("astrbot_host.core_reply_turn_gate.discover_runner", return_value=runner):
             self.assertIsNone(install_core_reply_turn(event, runner.run_context))
         self.assertNotIn(RESPONSE_STREAM, runner.__dict__)

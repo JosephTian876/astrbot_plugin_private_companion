@@ -15,8 +15,18 @@ answer.  The gate watches each round's model response stream:
 
 Withheld text goes back on the response object before the SDK dispatches the tool,
 so the assistant history and the tool call IDs and arguments keep exactly what the
-model said.  Every step fails open: when the gate cannot be installed, or a
-decision raises, the round behaves exactly as it does without the gate.
+model said.  The gate brings its own restore point: it wraps
+``_handle_function_tools`` itself and puts the text back there, so the delivery
+net never depends on another observer having been installed first.  When the
+dispatch observer is also present both restore the same text, which is idempotent,
+and the observer's call binding still sees the restored response.  Every step
+fails open: when the gate cannot be installed, or a decision raises, the round
+behaves exactly as it does without the gate.
+
+A turn that wrote nothing at all is still not allowed to end in silence *when it
+ran out of steps*: the host burned its whole budget without producing a word, so
+one short line goes out as the floor.  A turn that chose to keep listening stays
+silent -- that silence is the decision, not a lost reply.
 
 The turn can also end *without* a final round: the step budget runs out, the user
 stops the turn, the provider raises, or the provider answers with an error.  Each
@@ -45,6 +55,11 @@ from types import SimpleNamespace
 CORE_TURN_GATE_EXTRA = "_companion_v2_core_turn_gate"
 RESPONSE_STREAM = "_iter_llm_responses_with_fallback"
 STEP = "step"
+DISPATCH = "_handle_function_tools"
+# Only reached when the host burned the whole step budget and the model never
+# wrote a single word: the turn is about to end without a reply, which no read
+# path can explain, so one short line goes out instead of nothing.
+EXHAUSTED_REPLY = "这条回复没生成完整，稍后再聊。"
 # Only plain text is a draft.  A round that also carries a mention or a quote is
 # shown as it is: losing the mention with the prose is worse than a second
 # message, so the gate would rather not fix that round at all.
@@ -58,21 +73,14 @@ def install_core_reply_turn(event, run_context):
     """Attach the round gate to this turn's runner.  Returns None when unusable."""
     try:
         from .core_reply import CORE_REPLY_CONTEXT_EXTRA
-        from .core_reply_tool_dispatch import CORE_TOOL_DISPATCH_EXTRA
         existing = turn_gate(event)
         if not isinstance(event.get_extra(CORE_REPLY_CONTEXT_EXTRA), dict):
             _finish_gate(existing)
             return None
-        if not isinstance(event.get_extra(CORE_TOOL_DISPATCH_EXTRA), dict):
-            # The dispatch observer owns the point where withheld text goes back
-            # before the tool runs; without it the gate could only corrupt history.
-            _finish_gate(existing)
-            logger.warning("[CompanionV2] 工具轮文本闸门不可用 reason=no_dispatch_observer")
-            return None
         runner = discover_runner(event, run_context)
         if runner is None:
             _finish_gate(existing)
-            logger.warning("[CompanionV2] 工具轮文本闸门不可用 reason=hook_missing")
+            logger.info("[CompanionV2] 工具轮文本闸门不可用 reason=hook_missing")
             return None
         if isinstance(existing, dict):
             if (not existing.get("closed") and existing.get("runner") is runner
@@ -83,14 +91,24 @@ def install_core_reply_turn(event, run_context):
             _finish_gate(existing)
         source = getattr(runner, RESPONSE_STREAM, None)
         source_step = getattr(runner, STEP, None)
-        if not callable(source) or not callable(getattr(runner, "_handle_function_tools", None)):
-            logger.warning("[CompanionV2] 工具轮文本闸门不可用 reason=no_response_stream")
+        if not callable(source) or not callable(getattr(runner, DISPATCH, None)):
+            logger.info("[CompanionV2] 工具轮文本闸门不可用 reason=no_response_stream")
             return None
         gate = {"runner": runner, "run_context": run_context, "event": event, "methods": {},
                 "hold_fragments": _hold_fragments(event, runner), "draft": None,
-                "emitted": False, "blank": None, "failed": False, "rounds_with_tools": 0,
-                "deferred": 0, "released": 0, "restored": False, "closed": False,
+"emitted": False, "said": False, "blank": None, "failed": False,
+                "rounds_with_tools": 0, "deferred": 0, "released": 0, "restored": False,
+                "closed": False,
                 "had_tools": getattr(getattr(runner, "req", None), "func_tool", None) is not None}
+
+        async def gated_dispatch(*args, **kwargs):
+            # The gate owns the restore point it depends on: the text goes back on
+            # the response here, right before the SDK runs the tools and writes the
+            # assistant history from it.  The dispatch observer may also exist and
+            # restore the same text; restoring twice is idempotent.
+            _restore_blank(gate)
+            async for item in source_dispatch(*args, **kwargs):
+                yield item
 
         async def gated_responses(*args, **kwargs):
             try:
@@ -129,17 +147,26 @@ def install_core_reply_turn(event, run_context):
             if _turn_over(gate):
                 # The step budget ran out (or the runner finished) with no round
                 # left to carry the draft: say it now, once.
-                for extra in _draft_agent_responses(gate, "turn_end"):
+                released = _draft_agent_responses(gate, "turn_end")
+                if not released and not gate.get("said"):
+                    # Neither a draft nor a final round wrote anything, so the turn
+                    # would end silent.  One short line goes out instead -- unless
+                    # this turn deliberately chose to keep listening.
+                    released = _fallback_agent_responses(gate, "exhausted_empty")
+                for extra in released:
                     yield extra
                 _finish_gate(gate)
 
         local = getattr(runner, "__dict__", {})
+        source_dispatch = getattr(runner, DISPATCH)
         gate["methods"][RESPONSE_STREAM] = (RESPONSE_STREAM in local, local.get(RESPONSE_STREAM),
                                             gated_responses)
+        gate["methods"][DISPATCH] = (DISPATCH in local, local.get(DISPATCH), gated_dispatch)
         if callable(source_step):
             gate["methods"][STEP] = (STEP in local, local.get(STEP), gated_step)
         try:
             setattr(runner, RESPONSE_STREAM, gated_responses)
+            setattr(runner, DISPATCH, gated_dispatch)
             if callable(source_step):
                 setattr(runner, STEP, gated_step)
         except Exception as error:
@@ -167,13 +194,35 @@ def turn_gate(event):
 def discover_runner(event, run_context):
     """Locate the runner that drives *this* turn, or None.
 
-    The plugin already addresses the active runner this way for tool dispatch,
-    call binding and telemetry.  A host that drops that entry leaves all of them
-    inert, and the gate follows the same contract instead of guessing from object
-    graphs and risking another session's runner.
+    The plugin prefers the host's own binding (the same lookup tool dispatch, call
+    binding and telemetry use).  When that lookup misses -- the host registered the
+    runner under another key, or under no key at all -- the gate falls back to an
+    identity match over the same registry: the runner whose ``run_context`` *is*
+    this one, or whose context carries this very event.  Both are single-object
+    checks, so another session's runner is never picked.
     """
     from .core_reply_tool_dispatch import active_core_runner
-    return active_core_runner(event, run_context)
+    runner = active_core_runner(event, run_context)
+    if runner is not None:
+        return runner
+    return _scan_registry(event, run_context)
+
+
+def _scan_registry(event, run_context):
+    try:
+        from astrbot.core.pipeline.process_stage.follow_up import _ACTIVE_AGENT_RUNNERS
+        candidates = list(_ACTIVE_AGENT_RUNNERS.values())
+    except Exception:
+        return None
+    for runner in candidates:
+        if runner is None:
+            continue
+        context = getattr(runner, "run_context", None)
+        if context is run_context:
+            return runner
+        if getattr(getattr(context, "context", None), "event", None) is event:
+            return runner
+    return None
 
 
 def restore_core_turn_text(event):
@@ -196,10 +245,18 @@ async def close_core_reply_turn(event, response=None, *, release=False):
     if release:
         if _should_release_on_close(gate, response):
             await _send_draft(gate, "turn_end")
+        elif response is None and gate.get("draft"):
+            # No final response at all: nothing superseded the draft, so the turn
+            # must say what it wrote instead of dropping it as "answer wins".
+            await _send_draft(gate, "turn_end_no_response")
         elif gate.get("draft"):
             # The final answer is being delivered; the draft is superseded.
             gate["draft"] = None
             logger.info("[CompanionV2] 工具轮正文被最终回答取代 reason=answer_wins")
+        if not gate.get("said"):
+            # The turn is over and nothing ever reached the reader: say one short
+            # line rather than leave the turn silent.
+            await _send_fallback(gate, "exhausted_empty")
     if _turn_over(gate):
         _finish_gate(gate)
         if gate.get("rounds_with_tools") or gate.get("released") or gate.get("failed"):
@@ -220,6 +277,10 @@ async def _turn_round(gate, source):
                 if gate["hold_fragments"]:
                     fragments.append(response)
                 else:
+                    # The fragment is on its way to the reader: this turn did say
+                    # something, so no later exit may add a fallback line.
+                    if _kinds(response) - {"none"}:
+                        gate["said"] = True
                     yield response
                 continue
             if final is not None:
@@ -250,6 +311,8 @@ async def _turn_round(gate, source):
             # fragments already went out above, so the list is empty then.)
             pending = [*fragments, final]
         for response in pending:
+            if _kinds(response) - {"none"}:
+                gate["said"] = True
             yield response
     finally:
         if _error_round(final):
@@ -304,6 +367,7 @@ def _round_plan(gate, fragments, final):
         # say it once rather than not at all.
         released = gate["draft"]
         gate["draft"], gate["emitted"], gate["released"] = None, True, gate["released"] + 1
+        gate["said"] = True
         logger.info("[CompanionV2] 工具轮正文已释放 reason=released_draft rounds=%s",
                     gate.get("rounds_with_tools"))
         return _draft_responses(released)
@@ -324,6 +388,7 @@ def _error_plan(gate, fragments, final):
     if not draft:
         return [*fragments, final]
     gate["draft"], gate["emitted"], gate["released"] = None, True, gate["released"] + 1
+    gate["said"] = True
     text = _draft_text(draft)
     if text:
         current = getattr(final, "completion_text", "") or ""
@@ -374,9 +439,68 @@ def _draft_agent_responses(gate, reason):
     if not draft:
         return []
     gate["draft"], gate["emitted"], gate["released"] = None, True, gate["released"] + 1
+    gate["said"] = True
     logger.info("[CompanionV2] 工具轮正文已释放 reason=%s rounds=%s", reason,
                 gate.get("rounds_with_tools"))
     return _agent_responses(draft, streaming=bool(getattr(gate.get("runner"), "streaming", False)))
+
+
+def _fallback_agent_responses(gate, reason):
+    """Last resort: the turn burned its whole step budget and said nothing at all.
+
+    No round is left and no draft exists, so returning nothing would make the turn
+    silent.  One short line is the floor the gate guarantees instead.  Two outcomes
+    are deliberately left alone: a turn that chose to keep listening, and a turn
+    that was stopped by the user -- silence there is the request, not a lost reply.
+    """
+    if _keeps_listening(gate) or not _exhausted(gate.get("runner")):
+        return []
+    gate["emitted"], gate["released"], gate["said"] = True, gate["released"] + 1, True
+    logger.warning("[CompanionV2] 工具轮文本闸门步数耗尽 reason=%s rounds=%s 兜底发出一条可见正文",
+                   reason, gate.get("rounds_with_tools"))
+    return _agent_responses({"fragments": [], "text": EXHAUSTED_REPLY, "chain": None},
+                            streaming=bool(getattr(gate.get("runner"), "streaming", False)))
+
+
+async def _send_fallback(gate, reason):
+    """Release the exhausted-turn fallback through the event, once."""
+    if not _fallback_agent_responses(gate, reason):
+        return
+    event = gate.get("event")
+    send = getattr(event, "send", None)
+    if not callable(send):
+        return
+    try:
+        from astrbot.core.message.message_event_result import MessageChain
+        await send(MessageChain().message(EXHAUSTED_REPLY))
+    except Exception as error:
+        logger.warning("[CompanionV2] 工具轮兜底正文发送失败 reason=send_failed error_type=%s",
+                       type(error).__name__)
+
+
+def _exhausted(runner):
+    """Whether the host used up the whole step budget for this turn."""
+    budget_max = getattr(runner, "_step_budget_max", None)
+    budget_used = getattr(runner, "_step_budget_used", None)
+    return (isinstance(budget_max, int) and isinstance(budget_used, int)
+            and budget_used > budget_max)
+
+
+def _keeps_listening(gate):
+    """Whether this turn chose not to speak, so silence is the correct outcome."""
+    event = gate.get("event")
+    getter = getattr(event, "get_extra", None)
+    if not callable(getter):
+        return False
+    try:
+        from .core_reply import CORE_REPLY_CONTEXT_EXTRA
+        core = getter(CORE_REPLY_CONTEXT_EXTRA)
+    except Exception:
+        return False
+    if not isinstance(core, dict):
+        return False
+    participation = core.get("group_participation")
+    return isinstance(participation, dict) and participation.get("mode") == "skip"
 
 
 def _agent_responses(draft, *, streaming):
@@ -433,6 +557,7 @@ async def _send_draft(gate, reason):
                 gate.get("rounds_with_tools"))
     if not text:
         return False
+    gate["said"] = True
     event = gate.get("event")
     send = getattr(event, "send", None)
     if not callable(send):
